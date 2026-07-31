@@ -7,19 +7,33 @@ import type {
   SabnzbdSettingsRecord
 } from "@/features/settings/models";
 import {
+  handleDeleteIndexer,
   handleGetSettings,
+  handlePutIndexer,
   handlePutIgdb
 } from "@/app/api/settings/handlers";
 import { parseOriginPolicy } from "@/lib/trusted-mutation";
 
 class MemoryRepository implements SettingsRepository {
   igdb: IgdbSettingsRecord | null = null;
+  indexers: IndexerRecord[] = [];
   getIgdb = () => this.igdb;
   saveIgdb = (value: IgdbSettingsRecord) => { this.igdb = value; };
   getSabnzbd = (): SabnzbdSettingsRecord | null => null;
   saveSabnzbd = () => undefined;
-  listIndexers = (): IndexerRecord[] => [];
-  saveIndexer = () => undefined;
+  listIndexers = (): IndexerRecord[] => this.indexers;
+  saveIndexer = (value: IndexerRecord) => {
+    const index = this.indexers.findIndex((item) => item.id === value.id);
+    if (index === -1) this.indexers.push(value);
+    else this.indexers[index] = value;
+  };
+  deleteIndexer = (id: string, deletedAt: number) => {
+    const indexer = this.indexers.find((item) => item.id === id);
+    if (indexer) {
+      indexer.deletedAt = deletedAt;
+      indexer.enabled = false;
+    }
+  };
 }
 
 const policy = parseOriginPolicy("http://gamarr.local");
@@ -76,5 +90,54 @@ describe("settings HTTP handlers", () => {
       indexers: [],
       sabnzbd: null
     });
+  });
+
+  it("updates and soft-deletes a named indexer", async () => {
+    const repository = new MemoryRepository();
+    const service = new SettingsService(repository, () => 100, () => "indexer");
+    service.saveIndexer({
+      name: "Old",
+      baseUrl: "https://indexer.test/api",
+      apiKey: { action: "replace", value: "secret" },
+      enabled: true,
+      categoryIds: [],
+      timeoutMs: 10_000
+    });
+    const update = await handlePutIndexer(
+      "indexer",
+      new Request("http://gamarr.local/api/settings/indexers/indexer", {
+        method: "PUT",
+        headers: {
+          host: "gamarr.local",
+          origin: "http://gamarr.local",
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({
+          name: "New",
+          baseUrl: "https://indexer.test/api",
+          apiKey: { action: "retain" },
+          enabled: true,
+          categoryIds: ["4050"],
+          timeoutMs: 10_000
+        })
+      }),
+      { service, policy }
+    );
+    const deleted = await handleDeleteIndexer(
+      "indexer",
+      new Request("http://gamarr.local/api/settings/indexers/indexer", {
+        method: "DELETE",
+        headers: {
+          host: "gamarr.local",
+          origin: "http://gamarr.local"
+        }
+      }),
+      { service, policy }
+    );
+
+    expect(update.status).toBe(200);
+    expect(await update.json()).toMatchObject({ id: "indexer", name: "New" });
+    expect(deleted.status).toBe(204);
+    expect(repository.indexers[0]?.deletedAt).toBe(100);
   });
 });

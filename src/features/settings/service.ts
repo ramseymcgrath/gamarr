@@ -26,6 +26,7 @@ export interface SettingsRepository {
   saveSabnzbd(value: SabnzbdSettingsRecord): void;
   listIndexers(): IndexerRecord[];
   saveIndexer(value: IndexerRecord): void;
+  deleteIndexer(id: string, deletedAt: number): void;
 }
 
 function parseInput<T>(parse: () => T): T {
@@ -182,6 +183,15 @@ export class SettingsService {
     };
     this.repository.saveIndexer(record);
     return this.toPublicIndexer(record);
+  }
+
+  deleteIndexer(id: string): void {
+    const existing = this.repository.listIndexers()
+      .find((item) => item.id === id && item.deletedAt === null);
+    if (!existing) {
+      throw validationError("Indexer does not exist");
+    }
+    this.repository.deleteIndexer(id, this.now());
   }
 
   private toPublicIndexer(record: IndexerRecord): PublicIndexer {

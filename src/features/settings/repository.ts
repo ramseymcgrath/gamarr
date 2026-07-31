@@ -102,4 +102,23 @@ export class SqliteSettingsRepository implements SettingsRepository {
       })
       .run();
   }
+
+  deleteIndexer(id: string, deletedAt: number): void {
+    const existing = this.database
+      .select()
+      .from(indexers)
+      .where(eq(indexers.id, id))
+      .get();
+    if (!existing) return;
+    this.database
+      .update(indexers)
+      .set({
+        enabled: false,
+        deletedAt,
+        updatedAt: deletedAt,
+        configRevision: existing.configRevision + 1
+      })
+      .where(eq(indexers.id, id))
+      .run();
+  }
 }

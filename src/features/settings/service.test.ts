@@ -44,6 +44,16 @@ class MemorySettingsRepository implements SettingsRepository {
       this.indexers[index] = value;
     }
   }
+
+  deleteIndexer(id: string, deletedAt: number) {
+    const indexer = this.indexers.find((item) => item.id === id);
+    if (indexer) {
+      indexer.enabled = false;
+      indexer.deletedAt = deletedAt;
+      indexer.updatedAt = deletedAt;
+      indexer.configRevision += 1;
+    }
+  }
 }
 
 describe("SettingsService", () => {
@@ -122,5 +132,27 @@ describe("SettingsService", () => {
     expect(saved.baseUrl).toBe("https://indexer.test/api");
     expect(saved.hasApiKey).toBe(true);
     expect(JSON.stringify(saved)).not.toContain("\"key\"");
+  });
+
+  it("soft-deletes indexers so historical download records remain valid", () => {
+    const repository = new MemorySettingsRepository();
+    const service = new SettingsService(repository, () => 2_000, () => "indexer-1");
+    service.saveIndexer({
+      name: "Indexer",
+      baseUrl: "https://indexer.test/api",
+      apiKey: { action: "replace", value: "key" },
+      enabled: true,
+      categoryIds: ["4050"],
+      timeoutMs: 10_000
+    });
+
+    service.deleteIndexer("indexer-1");
+
+    expect(repository.indexers[0]).toMatchObject({
+      enabled: false,
+      deletedAt: 2_000,
+      configRevision: 2
+    });
+    expect(service.getRedacted().indexers).toEqual([]);
   });
 });
