@@ -1,0 +1,22 @@
+services:
+  gamarr:
+    build: .
+    container_name: gamarr
+    restart: unless-stopped
+    ports:
+      - "8989:8989"
+    environment:
+      GAMARR_ALLOWED_ORIGINS: >-
+        http://localhost:8989,http://127.0.0.1:8989
+    volumes:
+      - gamarr-config:/config
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  gamarr-config:

@@ -1,0 +1,13 @@
+.git
+.github
+.next
+.codebase-memory
+node_modules
+dist
+coverage
+playwright-report
+test-results
+*.db
+*.db-shm
+*.db-wal
+.env*

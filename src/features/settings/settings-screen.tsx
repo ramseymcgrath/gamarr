@@ -104,7 +104,8 @@ export function SettingsScreen({
 
   const addIndexer = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const form = new FormData(event.currentTarget);
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
     void run("Indexer save", async () => {
       const indexer = await mutate("/api/settings/indexers", "POST", {
         name: form.get("name"),
@@ -118,7 +119,7 @@ export function SettingsScreen({
         timeoutMs: 10_000
       });
       await mutate(`/api/settings/indexers/${indexer.id}/test`, "POST");
-      event.currentTarget.reset();
+      formElement.reset();
     });
   };
 
