@@ -20,6 +20,7 @@ export const games = sqliteTable("games", {
   releaseYear: integer("release_year"),
   genres: jsonText<string[]>("genres").notNull().default([]),
   alternateTitles: jsonText<string[]>("alternate_titles").notNull().default([]),
+  platformIds: jsonText<number[]>("platform_ids").notNull().default([]),
   cachedAt: integer("cached_at").notNull()
 });
 
