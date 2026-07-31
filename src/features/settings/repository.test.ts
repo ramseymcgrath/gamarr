@@ -60,11 +60,30 @@ describe("SqliteSettingsRepository", () => {
       createdAt: 100,
       updatedAt: 100
     });
+    settings.recordIgdbTest("ok", 200);
+    settings.recordSabnzbdTest("failed", 201);
+    settings.recordIndexerTest("indexer", "ok", 202);
 
-    expect(settings.getIgdb()).toMatchObject({ clientId: "client", clientSecret: "secret" });
-    expect(settings.getSabnzbd()).toMatchObject({ baseUrl: "http://sab.local", apiKey: "key" });
+    expect(settings.getIgdb()).toMatchObject({
+      clientId: "client",
+      clientSecret: "secret",
+      lastTestStatus: "ok",
+      lastTestedAt: 200
+    });
+    expect(settings.getSabnzbd()).toMatchObject({
+      baseUrl: "http://sab.local",
+      apiKey: "key",
+      lastTestStatus: "failed",
+      lastTestedAt: 201
+    });
     expect(settings.listIndexers()).toEqual([
-      expect.objectContaining({ id: "indexer", categoryIds: ["4050"], enabled: true })
+      expect.objectContaining({
+        id: "indexer",
+        categoryIds: ["4050"],
+        enabled: true,
+        lastTestStatus: "ok",
+        lastTestedAt: 202
+      })
     ]);
 
     database.$client.close();

@@ -44,6 +44,13 @@ export class SqliteSettingsRepository implements SettingsRepository {
       .run();
   }
 
+  recordIgdbTest(status: string, testedAt: number): void {
+    this.database.update(igdbSettings)
+      .set({ lastTestStatus: status, lastTestedAt: testedAt })
+      .where(eq(igdbSettings.id, 1))
+      .run();
+  }
+
   getSabnzbd(): SabnzbdSettingsRecord | null {
     const row = this.database
       .select()
@@ -71,6 +78,13 @@ export class SqliteSettingsRepository implements SettingsRepository {
         target: sabnzbdSettings.id,
         set: value
       })
+      .run();
+  }
+
+  recordSabnzbdTest(status: string, testedAt: number): void {
+    this.database.update(sabnzbdSettings)
+      .set({ lastTestStatus: status, lastTestedAt: testedAt })
+      .where(eq(sabnzbdSettings.id, 1))
       .run();
   }
 
@@ -118,6 +132,13 @@ export class SqliteSettingsRepository implements SettingsRepository {
         updatedAt: deletedAt,
         configRevision: existing.configRevision + 1
       })
+      .where(eq(indexers.id, id))
+      .run();
+  }
+
+  recordIndexerTest(id: string, status: string, testedAt: number): void {
+    this.database.update(indexers)
+      .set({ lastTestStatus: status, lastTestedAt: testedAt })
       .where(eq(indexers.id, id))
       .run();
   }

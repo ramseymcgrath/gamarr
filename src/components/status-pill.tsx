@@ -16,7 +16,9 @@ export function StatusPill({
 }) {
   const normalized = (status ?? "untested").toLowerCase();
   const success = ["ok", "completed", "ready"].includes(normalized);
-  const failure = ["failed", "error"].includes(normalized);
+  const failure = ["failed", "error", "conflicting", "unknown"].includes(
+    normalized
+  );
   const active = ["queued", "downloading", "submitting", "testing"].includes(
     normalized
   );

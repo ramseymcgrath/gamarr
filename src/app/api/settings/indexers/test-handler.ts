@@ -17,19 +17,25 @@ export async function handleTestIndexer(
     policy: OriginPolicy;
     findIndexer: (id: string) => IndexerRecord | null;
     clientFactory: (indexer: IndexerRecord) => CapabilitiesClient;
+    recordResult?: (id: string, status: string) => void;
   }
 ): Promise<Response> {
+  let trusted = false;
   try {
     assertTrustedMutation(request, dependencies.policy);
+    trusted = true;
     const indexer = dependencies.findIndexer(id);
     if (!indexer || indexer.deletedAt !== null) {
       throw validationError("Indexer does not exist");
     }
+    const capabilities = await dependencies.clientFactory(indexer).getCapabilities();
+    dependencies.recordResult?.(id, "ok");
     return Response.json(
-      await dependencies.clientFactory(indexer).getCapabilities(),
+      capabilities,
       { headers: { "cache-control": "no-store" } }
     );
   } catch (error) {
+    if (trusted) dependencies.recordResult?.(id, "failed");
     if (error instanceof AppError) {
       return Response.json(
         { error: { code: error.code, message: error.message } },

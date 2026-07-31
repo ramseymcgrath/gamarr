@@ -11,7 +11,9 @@ export class LibraryService {
   list(): LibraryCard[] {
     return this.repository.list().map(({ attempts, ...entry }) => ({
       ...entry,
-      latestAttempt: attempts[0] ?? null
+      latestAttempt: attempts.find((attempt) => attempt.status === "Completed") ??
+        attempts[0] ??
+        null
     }));
   }
 

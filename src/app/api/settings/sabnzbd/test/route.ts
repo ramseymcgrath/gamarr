@@ -9,9 +9,12 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function POST(request: Request): Promise<Response> {
+  const repository = new SqliteSettingsRepository(getDatabase());
+  let trusted = false;
   try {
     assertTrustedMutation(request, settingsDependencies().policy);
-    const settings = new SqliteSettingsRepository(getDatabase()).getSabnzbd();
+    trusted = true;
+    const settings = repository.getSabnzbd();
     if (!settings?.apiKey) {
       throw validationError("SABnzbd is not configured");
     }
@@ -20,8 +23,10 @@ export async function POST(request: Request): Promise<Response> {
       apiKey: settings.apiKey,
       maxNzbBytes: settings.maxNzbBytes
     }).testConnection();
+    repository.recordSabnzbdTest("ok", Date.now());
     return Response.json({ status: "ok" });
   } catch (error) {
+    if (trusted) repository.recordSabnzbdTest("failed", Date.now());
     if (error instanceof AppError) {
       return Response.json(
         { error: { code: error.code, message: error.message } },

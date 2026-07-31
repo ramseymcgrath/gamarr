@@ -28,6 +28,8 @@ export async function POST(
       baseUrl: indexer.baseUrl,
       apiKey: indexer.apiKey,
       timeoutMs: Math.min(indexer.timeoutMs, 10_000)
-    })
+    }),
+    recordResult: (indexerId, status) =>
+      repository.recordIndexerTest(indexerId, status, Date.now())
   });
 }

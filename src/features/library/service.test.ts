@@ -13,6 +13,15 @@ const detail = {
   createdAt: 1,
   updatedAt: 2,
   attempts: [{
+    id: "newer-failure",
+    status: "Failed" as const,
+    releaseTitle: "Bad Release",
+    progress: 0,
+    createdAt: 4,
+    updatedAt: 4,
+    completedAt: null,
+    failureDetail: "Failed"
+  }, {
     id: "completed",
     status: "Completed" as const,
     releaseTitle: "Game.Name.NSW",
@@ -21,15 +30,6 @@ const detail = {
     updatedAt: 3,
     completedAt: 3,
     failureDetail: null
-  }, {
-    id: "older",
-    status: "Failed" as const,
-    releaseTitle: "Bad Release",
-    progress: 0,
-    createdAt: 1,
-    updatedAt: 1,
-    completedAt: null,
-    failureDetail: "Failed"
   }]
 };
 
