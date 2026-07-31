@@ -21,6 +21,22 @@ function clean(value: string): string {
     .replace(/\s+/g, " ");
 }
 
+export function planPrimaryQuery(
+  input: Pick<
+    QueryPlanInput,
+    "title" | "releaseYear" | "titleIsAmbiguous" | "categoryIds"
+  >
+): PlannedQuery {
+  return {
+    term: clean([
+      input.title,
+      input.titleIsAmbiguous && input.releaseYear ? input.releaseYear : ""
+    ].filter(Boolean).join(" ")),
+    categories: [...input.categoryIds],
+    reason: "canonical"
+  };
+}
+
 export function planQueries(input: QueryPlanInput): PlannedQuery[] {
   const titles = [
     { value: input.title, reason: "canonical-platform" as QueryReason },

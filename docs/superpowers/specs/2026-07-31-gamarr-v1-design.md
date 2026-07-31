@@ -94,15 +94,24 @@ Discover renders a short recent/visible platform set as archive media-spine tabs
 
 ### Release search
 
-Gamarr builds bounded queries from:
+Gamarr builds one broad outbound query per enabled indexer from:
 
 - Canonical title.
-- Up to three IGDB alternate titles.
-- Release year when the canonical title is not unique within the selected platform.
-- Configured aliases for the selected platform.
 - Configured Newznab category IDs for that platform or indexer.
 
-Gamarr issues at most eight query variants per indexer. Enabled indexers are searched concurrently with a 10-second per-indexer timeout and a 20-second overall deadline. Results are normalized and deduplicated by GUID, download identity, and normalized release title. A deduplicated result retains all contributing indexer sources. The default order is match class, score signals, publication time descending, size ascending, then normalized title and source ID for deterministic ties.
+Alternate titles, release year, and configured platform aliases remain ranking
+signals rather than additional provider requests. This prevents query
+amplification when multiple Prowlarr indexers share a rate-limited upstream
+host.
+
+Enabled indexers are searched with bounded concurrency and a 10-second
+per-indexer timeout. The overall deadline scales with the number of enabled
+indexers at 2.5 seconds per indexer plus five seconds, bounded between 20 and
+60 seconds. Results are normalized and deduplicated by GUID, download
+identity, and normalized release title. A deduplicated result retains all
+contributing indexer sources. The default order is match class, score signals,
+publication time descending, size ascending, then normalized title and source
+ID for deterministic ties.
 
 Ranking uses transparent signals rather than quality profiles:
 

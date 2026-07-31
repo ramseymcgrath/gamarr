@@ -160,6 +160,79 @@ describe("ReleaseSearchService", () => {
     });
   });
 
+  it("issues one broad canonical-title query per indexer", async () => {
+    const observed: Array<{ indexerId: string; term: string }> = [];
+    const service = new ReleaseSearchService({
+      catalog,
+      settings,
+      candidates: new MemoryCandidates(),
+      clientFactory: (indexer) => ({
+        search: async (query) => {
+          observed.push({ indexerId: indexer.id, term: query.term });
+          return { releases: [], warnings: [] };
+        }
+      })
+    });
+
+    await service.search({ gameId: 1, platformId: 130 });
+
+    expect(observed).toEqual([
+      { indexerId: "one", term: "Game Name" },
+      { indexerId: "two", term: "Game Name" }
+    ]);
+  });
+
+  it("scales the deadline for a shared-host Prowlarr queue", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const queuedIndexers = Array.from({ length: 18 }, (_, index) => ({
+      ...indexers[0]!,
+      id: `indexer-${index + 1}`,
+      name: `Indexer ${index + 1}`,
+      baseUrl: `https://prowlarr.test/${index + 1}/api`
+    }));
+    let nextSlotMs = 0;
+    let completed = 0;
+    const service = new ReleaseSearchService({
+      catalog,
+      settings: {
+        ...settings,
+        listIndexers: () => queuedIndexers
+      },
+      candidates: new MemoryCandidates(),
+      clientFactory: () => ({
+        search: async (_query, signal) => {
+          signal.throwIfAborted();
+          nextSlotMs += 2_000;
+          const delay = Math.max(0, nextSlotMs + 500 - Date.now());
+          return new Promise((resolve, reject) => {
+            const requestTimeout = setTimeout(() => {
+              clearTimeout(responseTimer);
+              reject(new Error("Per-indexer request timed out"));
+            }, 10_000);
+            const responseTimer = setTimeout(() => {
+              clearTimeout(requestTimeout);
+              completed += 1;
+              resolve({ releases: [], warnings: [] });
+            }, delay);
+            signal.addEventListener("abort", () => {
+              clearTimeout(requestTimeout);
+              clearTimeout(responseTimer);
+              reject(signal.reason);
+            }, { once: true });
+          });
+        }
+      })
+    });
+
+    const pending = service.search({ gameId: 1, platformId: 130 });
+    await vi.advanceTimersByTimeAsync(37_000);
+    const response = await pending;
+
+    expect(completed).toBe(18);
+    expect(response.warnings).toEqual([]);
+  });
+
   it("aborts outstanding indexer work at the overall deadline", async () => {
     vi.useFakeTimers();
     let observedAbort = 0;

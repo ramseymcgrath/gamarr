@@ -7,7 +7,7 @@ import {
   rankRelease
 } from "@/features/release-search/matcher";
 import type { RankedRelease } from "@/features/release-search/models";
-import { planQueries } from "@/features/release-search/query-planner";
+import { planPrimaryQuery } from "@/features/release-search/query-planner";
 import type {
   CandidateRepository,
   NewznabClientFactory
@@ -84,9 +84,11 @@ export class ReleaseSearchService {
     const ranked: RankedRelease[] = [];
     const warnings: ReleaseSearchResponse["warnings"] = [];
     const controller = new AbortController();
+    const overallTimeoutMs = this.dependencies.overallTimeoutMs ??
+      Math.min(60_000, Math.max(20_000, 5_000 + indexers.length * 2_500));
     const timeout = setTimeout(
       () => controller.abort(new Error("Release search timed out")),
-      this.dependencies.overallTimeoutMs ?? 20_000
+      overallTimeoutMs
     );
     try {
       await this.forEachConcurrent(
@@ -97,16 +99,12 @@ export class ReleaseSearchService {
             ...(platform.categoryIds ?? []),
             ...indexer.categoryIds
           ])];
-          const queries = planQueries({
+          const queries = [planPrimaryQuery({
             title: game.name,
-            alternativeNames: game.alternativeNames,
             releaseYear: game.releaseYear,
             titleIsAmbiguous: false,
-            platformAliases: platform.aliases.length > 0
-              ? platform.aliases
-              : [platform.abbreviation ?? platform.name],
             categoryIds: categories
-          });
+          })];
           try {
             const client = this.dependencies.clientFactory(indexer);
             for (const query of queries) {
