@@ -1,6 +1,6 @@
+import { errorResponse } from "@/app/api/error-response";
 import type { SettingsService } from "@/features/settings/service";
 import type { IndexerInput } from "@/features/settings/models";
-import { AppError } from "@/lib/errors";
 import {
   assertTrustedMutation,
   type OriginPolicy
@@ -12,19 +12,6 @@ interface ReadDependencies {
 
 interface MutationDependencies extends ReadDependencies {
   policy: OriginPolicy;
-}
-
-function errorResponse(error: unknown): Response {
-  if (error instanceof AppError) {
-    return Response.json(
-      { error: { code: error.code, message: error.message } },
-      { status: error.status }
-    );
-  }
-  return Response.json(
-    { error: { code: "INTERNAL", message: "Unexpected server error" } },
-    { status: 500 }
-  );
 }
 
 export async function handleGetSettings(

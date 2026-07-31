@@ -160,6 +160,128 @@ describe("ReleaseSearchService", () => {
     });
   });
 
+  const release = (overrides: Record<string, unknown>) => ({
+    guid: "guid",
+    title: "Game.Name.NSW-GROUP",
+    indexerId: "one",
+    indexerName: "One",
+    downloadUrl: "https://one.test/api?t=get&id=guid&apikey=secret-one",
+    size: 100,
+    category: "4050",
+    publishedAt: 20,
+    ...overrides
+  });
+
+  it("drops only the unsafe release from an otherwise healthy indexer", async () => {
+    const candidates = new MemoryCandidates();
+    const clients: Record<string, NewznabPort> = {
+      one: {
+        search: async () => ({
+          releases: [
+            release({ guid: "safe-a", size: 100 }),
+            release({
+              guid: "safe-b",
+              title: "Game.Name.Update.NSW-GROUP",
+              size: 200
+            }),
+            release({
+              guid: "unsafe",
+              title: "Game.Name.Repack.NSW-GROUP",
+              size: 300,
+              downloadUrl: "https://cdn.example/get?id=unsafe&apikey=secret-one"
+            })
+          ],
+          warnings: []
+        })
+      },
+      two: {
+        search: async () => ({ releases: [], warnings: [] })
+      }
+    };
+    let nextId = 0;
+    const service = new ReleaseSearchService({
+      catalog,
+      settings,
+      candidates,
+      clientFactory: (indexer) => clients[indexer.id]!,
+      id: () => `candidate-${++nextId}`,
+      now: () => 1_000
+    });
+
+    const response = await service.search({ gameId: 1, platformId: 130 });
+
+    expect(response.releases).toHaveLength(2);
+    expect(candidates.saved).toHaveLength(2);
+    expect(response.warnings).toEqual([{
+      indexerId: "one",
+      indexerName: "One",
+      message: "Ignored 1 release result: unsafe download URL (1 different origin)."
+    }]);
+    expect(JSON.stringify(response)).not.toContain("secret-one");
+    expect(JSON.stringify(response)).not.toContain("cdn.example");
+  });
+
+  it("keeps a healthy indexer when another indexer is entirely unsafe", async () => {
+    const candidates = new MemoryCandidates();
+    const clients: Record<string, NewznabPort> = {
+      one: {
+        search: async () => ({
+          releases: [
+            release({
+              guid: "creds",
+              title: "Game.Name.NSW-GROUP",
+              size: 100,
+              downloadUrl: "https://user:pass@one.test/api?t=get&id=creds"
+            }),
+            release({
+              guid: "offsite",
+              title: "Game.Name.Repack.NSW-GROUP",
+              size: 300,
+              downloadUrl: "https://cdn.example/get?id=offsite"
+            })
+          ],
+          warnings: []
+        })
+      },
+      two: {
+        search: async () => ({
+          releases: [release({
+            guid: "two-safe",
+            title: "Game.Name.Deluxe.NSW-GROUP",
+            size: 400,
+            indexerId: "two",
+            indexerName: "Two",
+            downloadUrl: "https://two.test/api?t=get&id=two-safe&apikey=secret-two"
+          })],
+          warnings: []
+        })
+      }
+    };
+    let nextId = 0;
+    const service = new ReleaseSearchService({
+      catalog,
+      settings,
+      candidates,
+      clientFactory: (indexer) => clients[indexer.id]!,
+      id: () => `candidate-${++nextId}`,
+      now: () => 1_000
+    });
+
+    const response = await service.search({ gameId: 1, platformId: 130 });
+
+    expect(response.releases).toHaveLength(1);
+    expect(response.releases[0]?.sources).toEqual([{
+      candidateId: "candidate-1",
+      indexerName: "Two"
+    }]);
+    expect(response.warnings).toEqual([{
+      indexerId: "one",
+      indexerName: "One",
+      message: "Ignored 2 release results: unsafe download URLs "
+        + "(1 credentials or fragment; 1 different origin)."
+    }]);
+  });
+
   it("issues one broad canonical-title query per indexer", async () => {
     const observed: Array<{ indexerId: string; term: string }> = [];
     const service = new ReleaseSearchService({

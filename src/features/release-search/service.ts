@@ -13,7 +13,35 @@ import type {
   NewznabClientFactory
 } from "@/features/release-search/ports";
 import { validationError } from "@/lib/errors";
-import { validateDownloadUrl } from "@/integrations/newznab/url-policy";
+import {
+  DownloadUrlPolicyError,
+  validateDownloadUrl,
+  type DownloadUrlRejectionReason
+} from "@/integrations/newznab/url-policy";
+
+const rejectionLabels: Array<[DownloadUrlRejectionReason, string]> = [
+  ["malformed", "malformed"],
+  ["unsupportedProtocol", "non-HTTP(S) scheme"],
+  ["credentialsOrFragment", "credentials or fragment"],
+  ["differentOrigin", "different origin"]
+];
+
+/**
+ * Built only from counts and fixed labels — never from the rejected URL or the
+ * caught message — so an indexer API key cannot reach a user-facing warning.
+ */
+function unsafeDownloadUrlWarning(
+  byReason: Map<DownloadUrlRejectionReason, number>
+): string {
+  const total = [...byReason.values()].reduce((sum, count) => sum + count, 0);
+  const detail = rejectionLabels
+    .filter(([reason]) => (byReason.get(reason) ?? 0) > 0)
+    .map(([reason, label]) => `${byReason.get(reason)} ${label}`)
+    .join("; ");
+  return total === 1
+    ? `Ignored 1 release result: unsafe download URL (${detail}).`
+    : `Ignored ${total} release results: unsafe download URLs (${detail}).`;
+}
 
 interface ReleaseSearchDependencies {
   catalog: CatalogRepository;
@@ -140,13 +168,29 @@ export class ReleaseSearchService {
     }
 
     const timestamp = this.now();
-    const releases = deduplicateReleases(ranked).map((release) => {
-      const sources = release.sources.map((source) => {
+    // Reasons are counted per indexer so one unusable enclosure costs only that
+    // release, not every result from every indexer.
+    const rejectedSources = new Map<
+      string,
+      Map<DownloadUrlRejectionReason, number>
+    >();
+    const releases = deduplicateReleases(ranked).flatMap((release) => {
+      const sources = release.sources.flatMap((source) => {
         const indexer = indexers.find((candidate) => candidate.id === source.indexerId);
         if (!indexer) {
           throw validationError("Indexer changed during release search");
         }
-        const safe = validateDownloadUrl(indexer.baseUrl, source.downloadUrl);
+        let safe;
+        try {
+          safe = validateDownloadUrl(indexer.baseUrl, source.downloadUrl);
+        } catch (error) {
+          if (!(error instanceof DownloadUrlPolicyError)) throw error;
+          const byReason = rejectedSources.get(indexer.id)
+            ?? new Map<DownloadUrlRejectionReason, number>();
+          byReason.set(error.reason, (byReason.get(error.reason) ?? 0) + 1);
+          rejectedSources.set(indexer.id, byReason);
+          return [];
+        }
         const candidateId = this.id();
         this.dependencies.candidates.save({
           id: candidateId,
@@ -164,9 +208,10 @@ export class ReleaseSearchService {
           }),
           createdAt: timestamp
         });
-        return { candidateId, indexerName: indexer.name };
+        return [{ candidateId, indexerName: indexer.name }];
       });
-      return {
+      if (sources.length === 0) return [];
+      return [{
         title: release.title,
         size: release.size,
         category: release.category,
@@ -176,8 +221,16 @@ export class ReleaseSearchService {
         supportingReasons: release.supportingReasons,
         conflictingReasons: release.conflictingReasons,
         sources
-      };
+      }];
     });
+    for (const [indexerId, byReason] of rejectedSources) {
+      const indexer = indexers.find((candidate) => candidate.id === indexerId);
+      warnings.push({
+        indexerId,
+        indexerName: indexer?.name ?? indexerId,
+        message: unsafeDownloadUrlWarning(byReason)
+      });
+    }
     return { releases, warnings };
   }
 

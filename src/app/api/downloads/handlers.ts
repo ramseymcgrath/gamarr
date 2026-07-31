@@ -1,8 +1,9 @@
+import { errorResponse } from "@/app/api/error-response";
 import type {
   DownloadAttempt,
   SubmitDownloadInput
 } from "@/features/downloads/models";
-import { AppError, validationError } from "@/lib/errors";
+import { validationError } from "@/lib/errors";
 import {
   assertTrustedMutation,
   type OriginPolicy
@@ -28,19 +29,6 @@ export function toPublicAttempt(attempt: DownloadAttempt) {
     updatedAt: attempt.updatedAt,
     completedAt: attempt.completedAt
   };
-}
-
-function errorResponse(error: unknown): Response {
-  if (error instanceof AppError) {
-    return Response.json(
-      { error: { code: error.code, message: error.message } },
-      { status: error.status }
-    );
-  }
-  return Response.json(
-    { error: { code: "INTERNAL", message: "Unexpected server error" } },
-    { status: 500 }
-  );
 }
 
 export async function handleSubmitDownload(

@@ -1,22 +1,10 @@
+import { errorResponse } from "@/app/api/error-response";
 import type { LibraryService } from "@/features/library/service";
-import { AppError, validationError } from "@/lib/errors";
+import { validationError } from "@/lib/errors";
 import {
   assertTrustedMutation,
   type OriginPolicy
 } from "@/lib/trusted-mutation";
-
-function errorResponse(error: unknown): Response {
-  if (error instanceof AppError) {
-    return Response.json(
-      { error: { code: error.code, message: error.message } },
-      { status: error.status }
-    );
-  }
-  return Response.json(
-    { error: { code: "INTERNAL", message: "Unexpected server error" } },
-    { status: 500 }
-  );
-}
 
 export async function handleListLibrary(
   dependencies: { service: Pick<LibraryService, "list"> }

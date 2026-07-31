@@ -1,6 +1,7 @@
+import { errorResponse } from "@/app/api/error-response";
 import type { IndexerRecord } from "@/features/settings/models";
 import type { NewznabCapabilities } from "@/integrations/newznab/client";
-import { AppError, validationError } from "@/lib/errors";
+import { validationError } from "@/lib/errors";
 import {
   assertTrustedMutation,
   type OriginPolicy
@@ -36,15 +37,6 @@ export async function handleTestIndexer(
     );
   } catch (error) {
     if (trusted) dependencies.recordResult?.(id, "failed");
-    if (error instanceof AppError) {
-      return Response.json(
-        { error: { code: error.code, message: error.message } },
-        { status: error.status }
-      );
-    }
-    return Response.json(
-      { error: { code: "INTERNAL", message: "Unexpected server error" } },
-      { status: 500 }
-    );
+    return errorResponse(error);
   }
 }

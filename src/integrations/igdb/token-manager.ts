@@ -1,6 +1,10 @@
 import { z } from "zod";
 
+import { readBoundedJson } from "@/integrations/read-bounded-response";
 import { AppError, validationError } from "@/lib/errors";
+
+/** A Twitch client-credentials token payload is a few hundred bytes. */
+const maxTokenResponseBytes = 64 * 1024;
 
 export interface TokenPort {
   getAccessToken(): Promise<string>;
@@ -93,7 +97,15 @@ export class TwitchTokenManager implements TokenPort {
         "Twitch authentication failed"
       );
     }
-    const parsed = twitchResponseSchema.parse(await response.json());
+    const parsed = twitchResponseSchema.parse(await readBoundedJson(
+      response,
+      maxTokenResponseBytes,
+      () => new AppError(
+        "UNAVAILABLE",
+        502,
+        "Twitch authentication response is too large"
+      )
+    ));
     return {
       accessToken: parsed.access_token,
       expiresInSeconds: parsed.expires_in

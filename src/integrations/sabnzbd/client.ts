@@ -4,7 +4,11 @@ import type {
   NzbUpload,
   SabJob
 } from "@/features/downloads/models";
-import type { SabnzbdPort } from "@/features/downloads/port";
+import {
+  SabnzbdUploadError,
+  type SabnzbdPort
+} from "@/features/downloads/port";
+import { readBoundedJson } from "@/integrations/read-bounded-response";
 import { AppError, validationError } from "@/lib/errors";
 
 interface SabnzbdClientOptions {
@@ -12,13 +16,27 @@ interface SabnzbdClientOptions {
   apiKey: string;
   maxNzbBytes: number;
   timeoutMs?: number;
+  /** Ceiling for SABnzbd's own JSON replies, not for uploaded NZBs. */
+  maxResponseBytes?: number;
   fetch?: typeof fetch;
 }
 
-const acknowledgementSchema = z.object({
-  status: z.literal(true),
-  nzo_ids: z.array(z.string().min(1)).length(1)
-});
+/** Large enough for a queue or history with many slots, small enough to bound. */
+const defaultMaxResponseBytes = 8 * 1024 * 1024;
+
+// SABnzbd signals an application-level refusal as a 2xx body with
+// `status: false`, so both branches must parse — accepting only `true` made a
+// definite rejection indistinguishable from an unreadable response.
+const acknowledgementSchema = z.discriminatedUnion("status", [
+  z.object({
+    status: z.literal(true),
+    nzo_ids: z.array(z.string().min(1)).length(1)
+  }),
+  z.object({
+    status: z.literal(false),
+    error: z.string().min(1).optional()
+  })
+]);
 
 const jobSchema = z.object({
   nzo_id: z.string().min(1),
@@ -31,10 +49,24 @@ const jobSchema = z.object({
 export class SabnzbdClient implements SabnzbdPort {
   private readonly request: typeof fetch;
   private readonly timeoutMs: number;
+  private readonly maxResponseBytes: number;
 
   constructor(private readonly options: SabnzbdClientOptions) {
     this.request = options.fetch ?? fetch;
     this.timeoutMs = options.timeoutMs ?? 10_000;
+    this.maxResponseBytes = options.maxResponseBytes ?? defaultMaxResponseBytes;
+  }
+
+  private readBody(response: Response, operation: string): Promise<unknown> {
+    return readBoundedJson(
+      response,
+      this.maxResponseBytes,
+      () => new AppError(
+        "UNAVAILABLE",
+        502,
+        `SABnzbd ${operation} response is too large`
+      )
+    );
   }
 
   async upload(input: NzbUpload): Promise<{ jobId: string }> {
@@ -59,14 +91,28 @@ export class SabnzbdClient implements SabnzbdPort {
       signal: AbortSignal.timeout(this.timeoutMs)
     });
     if (!response.ok) {
-      throw new AppError("UNAVAILABLE", 502, "SABnzbd rejected the upload");
+      // A 4xx means SABnzbd refused the request outright; a 5xx may have
+      // failed after the job was already accepted, so it stays ambiguous.
+      throw response.status < 500
+        ? new SabnzbdUploadError("rejected", "SABnzbd rejected the upload")
+        : new SabnzbdUploadError(
+          "ambiguous",
+          "SABnzbd did not confirm the upload"
+        );
     }
-    const parsed = acknowledgementSchema.safeParse(await response.json());
+    const parsed = acknowledgementSchema.safeParse(
+      await this.readBody(response, "upload")
+    );
     if (!parsed.success) {
-      throw new AppError(
-        "UNAVAILABLE",
-        502,
+      throw new SabnzbdUploadError(
+        "ambiguous",
         "SABnzbd returned an ambiguous upload acknowledgement"
+      );
+    }
+    if (!parsed.data.status) {
+      throw new SabnzbdUploadError(
+        "rejected",
+        parsed.data.error ?? "SABnzbd rejected the upload"
       );
     }
     return { jobId: parsed.data.nzo_ids[0]! };
@@ -108,7 +154,7 @@ export class SabnzbdClient implements SabnzbdPort {
     if (!response.ok) {
       throw new AppError("UNAVAILABLE", 502, `SABnzbd ${mode} request failed`);
     }
-    const payload = await response.json() as Record<string, unknown>;
+    const payload = await this.readBody(response, mode) as Record<string, unknown>;
     const container = payload[mode] as Record<string, unknown> | undefined;
     const parsed = z.array(jobSchema).safeParse(container?.slots ?? []);
     if (!parsed.success) {

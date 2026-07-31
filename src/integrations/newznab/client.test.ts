@@ -116,4 +116,72 @@ describe("NewznabClient", () => {
       reason: "canonical"
     })).rejects.toMatchObject({ code: "UNAVAILABLE" });
   });
+
+  it("stops reading an oversized chunked response instead of buffering it", async () => {
+    const chunk = new TextEncoder().encode("x".repeat(64));
+    const pulled: number[] = [];
+    let index = 0;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (index >= 100) {
+          controller.close();
+          return;
+        }
+        pulled.push(index);
+        controller.enqueue(chunk);
+        index += 1;
+      }
+    }, { highWaterMark: 0 });
+    const client = new NewznabClient({
+      id: "indexer",
+      name: "Indexer",
+      baseUrl: "https://indexer.test/api",
+      apiKey: "secret",
+      timeoutMs: 10_000,
+      maxResponseBytes: 100,
+      fetch: async () => new Response(stream)
+    });
+
+    await expect(client.search({
+      term: "game",
+      categories: [],
+      reason: "canonical"
+    })).rejects.toMatchObject({ code: "UNAVAILABLE" });
+    expect(pulled.length).toBeLessThanOrEqual(2);
+  });
+
+  it("decodes a multi-byte title split across transport chunks", async () => {
+    const feed = rss.replace("Game.Name.NSW-GROUP", "Game.🎮.NSW-GROUP");
+    const encoded = new TextEncoder().encode(feed);
+    const split = encoded.indexOf(0xf0) + 2;
+    let sent = false;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (sent) {
+          controller.close();
+          return;
+        }
+        sent = true;
+        controller.enqueue(encoded.slice(0, split));
+        controller.enqueue(encoded.slice(split));
+      }
+    }, { highWaterMark: 0 });
+    const client = new NewznabClient({
+      id: "indexer",
+      name: "Indexer",
+      baseUrl: "https://indexer.test/api",
+      apiKey: "secret",
+      timeoutMs: 10_000,
+      maxResponseBytes: encoded.byteLength,
+      fetch: async () => new Response(stream)
+    });
+
+    const result = await client.search({
+      term: "game",
+      categories: [],
+      reason: "canonical"
+    });
+
+    expect(result.releases[0]?.title).toBe("Game.🎮.NSW-GROUP");
+  });
 });

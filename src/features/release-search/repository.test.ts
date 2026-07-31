@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { createDatabase } from "@/db/client";
 import { migrateDatabase } from "@/db/migrate";
-import { indexers } from "@/db/schema";
+import { indexers, releaseCandidates } from "@/db/schema";
 import { SqliteCandidateRepository } from "@/features/release-search/repository";
 
 const temporaryDirectories: string[] = [];
@@ -75,6 +75,41 @@ describe("SqliteCandidateRepository", () => {
     });
 
     expect(candidates.get("expired")).toBeNull();
+    database.$client.close();
+  });
+
+  it("purges expired candidates on write while keeping claimable ones", () => {
+    const { database } = repository();
+    const record = (id: string, expiresAt: number) => ({
+      id,
+      expiresAt,
+      indexerId: "indexer",
+      indexerConfigRevision: 1,
+      guid: `guid-${id}`,
+      title: "Game",
+      size: null,
+      downloadPath: "/api?t=get&id=guid",
+      category: null,
+      sourceSnapshot: "{}",
+      createdAt: 900
+    });
+    const early = new SqliteCandidateRepository(database, () => 1_000);
+    early.save(record("expired", 2_000));
+    early.save(record("in-flight", 3_000));
+
+    // A later search is the only thing that triggers collection.
+    const later = new SqliteCandidateRepository(database, () => 2_001);
+    later.save(record("fresh", 4_000));
+
+    const stored = database
+      .select({ id: releaseCandidates.id })
+      .from(releaseCandidates)
+      .all()
+      .map((row) => row.id)
+      .sort();
+
+    expect(stored).toEqual(["fresh", "in-flight"]);
+    expect(later.get("in-flight")).toMatchObject({ id: "in-flight" });
     database.$client.close();
   });
 });

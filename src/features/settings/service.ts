@@ -17,7 +17,7 @@ import {
   indexerInputSchema,
   sabnzbdSettingsInputSchema
 } from "@/features/settings/models";
-import { validationError } from "@/lib/errors";
+import { AppError, validationError } from "@/lib/errors";
 
 export interface SettingsRepository {
   getIgdb(): IgdbSettingsRecord | null;
@@ -148,11 +148,15 @@ export class SettingsService {
 
   saveIndexer(input: IndexerInput): PublicIndexer {
     const parsed = parseInput(() => indexerInputSchema.parse(input));
+    // Soft-deleted indexers are invisible everywhere else, so an update must
+    // not silently restore one. Without the liveness filter the unconditional
+    // `deletedAt: null` below resurrected it.
     const existing = parsed.id
-      ? this.repository.listIndexers().find((item) => item.id === parsed.id)
+      ? this.repository.listIndexers()
+        .find((item) => item.id === parsed.id && item.deletedAt === null)
       : undefined;
     if (parsed.id && !existing) {
-      throw validationError("Indexer does not exist");
+      throw new AppError("NOT_FOUND", 404, "Indexer does not exist");
     }
 
     const apiKey = resolveSecret(parsed.apiKey, existing?.apiKey);

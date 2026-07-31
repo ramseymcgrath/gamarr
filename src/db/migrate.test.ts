@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -100,6 +100,48 @@ describe("migrateDatabase", () => {
     }).toThrow(/CHECK/);
 
     database.$client.close();
+  });
+
+  it("reopens post-processing failures without touching genuine ones", () => {
+    const directory = mkdtempSync(path.join(tmpdir(), "gamarr-upgrade-"));
+    temporaryDirectories.push(directory);
+
+    // Migrate only as far as 0001 so the repair in 0002 has legacy rows to act
+    // on, mirroring a real upgrade rather than a fresh install.
+    const priorMigrations = path.join(directory, "drizzle");
+    cpSync(path.resolve("drizzle"), priorMigrations, { recursive: true });
+    const journalPath = path.join(priorMigrations, "meta", "_journal.json");
+    const journal = JSON.parse(readFileSync(journalPath, "utf8")) as {
+      entries: { tag: string }[];
+    };
+    journal.entries = journal.entries.filter((entry) => entry.tag !== "0002_repair_postprocessing_failures");
+    writeFileSync(journalPath, JSON.stringify(journal, null, 2));
+
+    const database = createDatabase(path.join(directory, "gamarr.db"));
+    migrateDatabase(database, priorMigrations);
+    const sql = database.$client;
+    sql.prepare("insert into games (id, title, slug, cached_at) values (1, 'Game', 'game', 1)").run();
+    sql.prepare("insert into platforms (id, name, last_synced_at) values (2, 'Console', 1)").run();
+    sql.prepare("insert into library_entries (id, game_id, platform_id, created_at, updated_at) values ('library', 1, 2, 1, 1)").run();
+    const insertAttempt = sql.prepare(`
+      insert into download_attempts (
+        id, library_entry_id, submission_key, request_fingerprint, status,
+        release_title, indexer_name_snapshot, sabnzbd_config_revision,
+        sab_marker, progress, failure_detail, created_at, updated_at
+      ) values (?, 'library', ?, 'fingerprint', 'Failed',
+        'Release', 'Indexer', 1, ?, 0, ?, 1, 1)
+    `);
+    insertAttempt.run("mislabelled", "key-a", "gamarr-a", "Extracting");
+    insertAttempt.run("genuine", "key-b", "gamarr-b", "Failed");
+
+    migrateDatabase(database, path.resolve("drizzle"));
+
+    expect(sql.prepare("select status, failure_detail from download_attempts where id = 'mislabelled'").get())
+      .toEqual({ status: "Unknown", failure_detail: null });
+    expect(sql.prepare("select status, failure_detail from download_attempts where id = 'genuine'").get())
+      .toEqual({ status: "Failed", failure_detail: "Failed" });
+
+    sql.close();
   });
 
   it("rolls back a failed transaction", () => {

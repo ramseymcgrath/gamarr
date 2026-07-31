@@ -1,9 +1,10 @@
+import { errorResponse } from "@/app/api/error-response";
 import type {
   CatalogSearchInput,
   GameSearchResult,
   PlatformView
 } from "@/features/catalog/models";
-import { AppError, validationError } from "@/lib/errors";
+import { validationError } from "@/lib/errors";
 import {
   assertTrustedMutation,
   type OriginPolicy
@@ -13,19 +14,6 @@ export interface CatalogHandlerService {
   search(input: CatalogSearchInput): Promise<unknown>;
   getGame(id: number): unknown;
   syncPlatforms(): Promise<unknown>;
-}
-
-function errorResponse(error: unknown): Response {
-  if (error instanceof AppError) {
-    return Response.json(
-      { error: { code: error.code, message: error.message } },
-      { status: error.status }
-    );
-  }
-  return Response.json(
-    { error: { code: "INTERNAL", message: "Unexpected server error" } },
-    { status: 500 }
-  );
 }
 
 export async function handleCatalogSearch(

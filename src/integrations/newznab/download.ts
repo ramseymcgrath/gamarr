@@ -4,6 +4,7 @@ import * as ipaddr from "ipaddr.js";
 import { Agent, fetch as undiciFetch, interceptors } from "undici";
 
 import type { NzbFetcherPort } from "@/features/downloads/port";
+import { readBoundedResponse } from "@/integrations/read-bounded-response";
 import { AppError } from "@/lib/errors";
 
 interface ResolvedAddress {
@@ -132,11 +133,15 @@ export class NewznabNzbFetcher implements NzbFetcherPort {
         if (!response.ok || !response.body) {
           throw new AppError("UNAVAILABLE", 502, "Indexer NZB retrieval failed");
         }
-        const length = Number(response.headers.get("content-length"));
-        if (Number.isFinite(length) && length > input.maxBytes) {
-          throw new AppError("UNAVAILABLE", 502, "Indexer NZB exceeded the size limit");
-        }
-        return await this.readBounded(response.body, input.maxBytes);
+        return await readBoundedResponse(
+          response,
+          input.maxBytes,
+          () => new AppError(
+            "UNAVAILABLE",
+            502,
+            "Indexer NZB exceeded the size limit"
+          )
+        );
       } finally {
         if (response.body && !response.bodyUsed) {
           await response.body.cancel().catch(() => undefined);
@@ -241,29 +246,4 @@ export class NewznabNzbFetcher implements NzbFetcherPort {
     }
   }
 
-  private async readBounded(
-    stream: ReadableStream<Uint8Array>,
-    maxBytes: number
-  ): Promise<Uint8Array> {
-    const reader = stream.getReader();
-    const chunks: Uint8Array[] = [];
-    let total = 0;
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      total += value.byteLength;
-      if (total > maxBytes) {
-        await reader.cancel();
-        throw new AppError("UNAVAILABLE", 502, "Indexer NZB exceeded the size limit");
-      }
-      chunks.push(value);
-    }
-    const bytes = new Uint8Array(total);
-    let offset = 0;
-    for (const chunk of chunks) {
-      bytes.set(chunk, offset);
-      offset += chunk.byteLength;
-    }
-    return bytes;
-  }
 }

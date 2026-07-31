@@ -5,9 +5,10 @@ import type {
   DownloadStatus,
   SubmitDownloadInput
 } from "@/features/downloads/models";
-import type {
-  NzbFetcherPort,
-  SabnzbdPort
+import {
+  SabnzbdUploadError,
+  type NzbFetcherPort,
+  type SabnzbdPort
 } from "@/features/downloads/port";
 import type { DownloadRepository } from "@/features/downloads/repository";
 import type { CandidateRepository } from "@/features/release-search/ports";
@@ -35,17 +36,36 @@ function fingerprint(input: SubmitDownloadInput): string {
     .digest("hex");
 }
 
+const historySuccess = ["completed", "completed/pp", "completed/unpack"];
+
+/**
+ * SABnzbd moves a job into history as soon as downloading finishes and keeps it
+ * there throughout post-processing (Extracting, Repairing, Moving, ...). Only
+ * `Completed` and `Failed` are terminal, so anything else returns null meaning
+ * "no verdict yet" — writing a terminal status there would be permanent, since
+ * reconcile never revisits a Completed or Failed attempt.
+ */
 function statusFromJob(
   source: "queue" | "history",
   status: string
-): DownloadStatus {
+): DownloadStatus | null {
   const normalized = status.toLowerCase();
   if (source === "history") {
-    return ["completed", "completed/pp", "completed/unpack"].includes(normalized)
-      ? "Completed"
-      : "Failed";
+    if (historySuccess.includes(normalized)) return "Completed";
+    if (normalized === "failed") return "Failed";
+    return null;
   }
   return normalized.includes("download") ? "Downloading" : "Queued";
+}
+
+/**
+ * True only when the upload provably never reached SABnzbd's queue. Anything
+ * else — a timeout, an aborted connection, a 5xx, an unreadable acknowledgement
+ * — may have been accepted, so it must stay Unknown rather than terminal.
+ */
+function submittedNothing(error: unknown): boolean {
+  if (error instanceof SabnzbdUploadError) return error.outcome === "rejected";
+  return error instanceof AppError && error.code === "VALIDATION";
 }
 
 export class DownloadService {
@@ -160,10 +180,13 @@ export class DownloadService {
         sabJobId: result.jobId,
         updatedAt: this.now()
       });
-    } catch {
+    } catch (error) {
+      const rejected = submittedNothing(error);
       return this.dependencies.repository.update(attemptId, {
-        status: "Unknown",
-        failureDetail: "SABnzbd acknowledgement was not confirmed",
+        status: rejected ? "Failed" : "Unknown",
+        failureDetail: rejected && error instanceof Error
+          ? error.message
+          : "SABnzbd acknowledgement was not confirmed",
         updatedAt: this.now()
       });
     }
@@ -193,6 +216,9 @@ export class DownloadService {
       const job = historyJob ?? queueJob;
       if (!job) continue;
       const status = statusFromJob(historyJob ? "history" : "queue", job.status);
+      // Post-processing in progress: leave the attempt untouched so a later
+      // poll can still resolve it.
+      if (status === null) continue;
       this.dependencies.repository.update(attempt.id, {
         status,
         sabJobId: attempt.sabJobId ?? job.jobId,

@@ -32,6 +32,27 @@ interface SdkExecutorOptions {
   baseUrl?: string;
 }
 
+/**
+ * Carries the upstream IGDB status separately from the public HTTP status.
+ * The retry loop needs the raw upstream value (401 refresh, 429 backoff) while
+ * callers must never see a status that is absent or not an error — assigning
+ * the upstream value over `status` produced HTTP 200 for transport failures.
+ */
+export class IgdbUpstreamError extends AppError {
+  constructor(
+    readonly upstreamStatus: number | undefined,
+    cause: unknown
+  ) {
+    super(
+      "UNAVAILABLE",
+      upstreamStatus === 401 ? 401 : 502,
+      "IGDB request failed",
+      { cause }
+    );
+    this.name = "IgdbUpstreamError";
+  }
+}
+
 export class SdkIgdbExecutor implements IgdbExecutor {
   constructor(private readonly options: SdkExecutorOptions) {}
 
@@ -51,15 +72,7 @@ export class SdkIgdbExecutor implements IgdbExecutor {
       const status = (
         error as { response?: { status?: number }; status?: number }
       ).response?.status ?? (error as { status?: number }).status;
-      throw Object.assign(
-        new AppError(
-          "UNAVAILABLE",
-          status === 401 ? 401 : 502,
-          "IGDB request failed",
-          { cause: error }
-        ),
-        { status }
-      );
+      throw new IgdbUpstreamError(status, error);
     }
   }
 }
@@ -175,14 +188,21 @@ export class IgdbClient implements IgdbPort {
       try {
         return await this.executor.execute(token, request);
       } catch (error) {
-        const typed = error as { status?: number; retryAfterMs?: number };
-        if (typed.status === 401 && !authenticationRetried) {
+        const typed = error as {
+          status?: number;
+          upstreamStatus?: number;
+          retryAfterMs?: number;
+        };
+        // `upstreamStatus` is the raw provider status; fall back to `status`
+        // for executors that only expose the latter.
+        const upstreamStatus = typed.upstreamStatus ?? typed.status;
+        if (upstreamStatus === 401 && !authenticationRetried) {
           authenticationRetried = true;
           this.tokens.invalidate();
           token = await this.tokens.getAccessToken();
           continue;
         }
-        if (typed.status === 429 && rateLimitRetries < 2) {
+        if (upstreamStatus === 429 && rateLimitRetries < 2) {
           rateLimitRetries += 1;
           await this.sleep(typed.retryAfterMs ?? 250 * rateLimitRetries);
           continue;

@@ -96,7 +96,10 @@ export function ReleaseResults({
       ) : (
         <div className="release-list">
           {sorted.map((release) => (
-            <article className="release-row" key={`${release.title}-${release.publishedAt}`}>
+            // Deduplication groups by normalized title *and* size, so title
+            // plus publishedAt is not unique. Candidate IDs are minted once per
+            // source after deduplication and survive re-sorts.
+            <article className="release-row" key={release.sources[0]?.candidateId}>
               <div className="release-main">
                 <div className="release-title-row">
                   <StatusPill status={release.match} label={release.match} />

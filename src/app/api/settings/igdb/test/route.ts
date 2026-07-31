@@ -1,6 +1,6 @@
 import { catalogService } from "@/app/api/catalog/dependencies";
+import { errorResponse } from "@/app/api/error-response";
 import { settingsDependencies } from "@/app/api/settings/dependencies";
-import { AppError } from "@/lib/errors";
 import { assertTrustedMutation } from "@/lib/trusted-mutation";
 import { SqliteSettingsRepository } from "@/features/settings/repository";
 import { getDatabase } from "@/db/client";
@@ -19,15 +19,10 @@ export async function POST(request: Request): Promise<Response> {
     return Response.json({ status: "ok" });
   } catch (error) {
     if (trusted) repository.recordIgdbTest("failed", Date.now());
-    if (error instanceof AppError) {
-      return Response.json(
-        { error: { code: error.code, message: error.message } },
-        { status: error.status }
-      );
-    }
-    return Response.json(
-      { error: { code: "UNAVAILABLE", message: "IGDB connection failed" } },
-      { status: 502 }
-    );
+    return errorResponse(error, {
+      code: "UNAVAILABLE",
+      message: "IGDB connection failed",
+      status: 502
+    });
   }
 }

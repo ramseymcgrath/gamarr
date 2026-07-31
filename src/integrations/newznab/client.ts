@@ -5,6 +5,7 @@ import type {
   PlannedQuery,
   Release
 } from "@/features/release-search/models";
+import { readBoundedResponse } from "@/integrations/read-bounded-response";
 import { AppError } from "@/lib/errors";
 
 interface NewznabClientOptions {
@@ -140,14 +141,16 @@ export class NewznabClient {
         `${this.options.name} ${operation} failed`
       );
     }
-    const declaredLength = Number(response.headers.get("content-length"));
-    if (Number.isFinite(declaredLength) && declaredLength > this.maxResponseBytes) {
-      throw new AppError("UNAVAILABLE", 502, `${this.options.name} response is too large`);
-    }
-    const xml = await response.text();
-    if (new TextEncoder().encode(xml).byteLength > this.maxResponseBytes) {
-      throw new AppError("UNAVAILABLE", 502, `${this.options.name} response is too large`);
-    }
+    const bytes = await readBoundedResponse(
+      response,
+      this.maxResponseBytes,
+      () => new AppError(
+        "UNAVAILABLE",
+        502,
+        `${this.options.name} response is too large`
+      )
+    );
+    const xml = new TextDecoder().decode(bytes);
     if (XMLValidator.validate(xml) !== true) {
       throw new AppError("UNAVAILABLE", 502, `${this.options.name} returned malformed XML`);
     }

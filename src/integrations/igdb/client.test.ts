@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   IgdbClient,
+  IgdbUpstreamError,
   type IgdbExecutor,
   type IgdbRequest
 } from "@/integrations/igdb/client";
@@ -98,5 +99,25 @@ describe("IgdbClient", () => {
     await expect(client.listPlatforms()).resolves.toHaveLength(1);
     expect(attempts).toBe(3);
     expect(delays).toEqual([25, 25]);
+  });
+
+  it("retries an exhausted rate limit then reports it as 502", async () => {
+    let attempts = 0;
+    const executor: IgdbExecutor = {
+      execute: async () => {
+        attempts += 1;
+        throw new IgdbUpstreamError(429, new Error("rate limited"));
+      }
+    };
+    const client = new IgdbClient(new FixedToken(), executor, {
+      sleep: async () => undefined
+    });
+
+    await expect(client.listPlatforms()).rejects.toMatchObject({
+      code: "UNAVAILABLE",
+      status: 502,
+      upstreamStatus: 429
+    });
+    expect(attempts).toBe(3);
   });
 });

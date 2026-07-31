@@ -31,12 +31,13 @@ describe("SabnzbdClient", () => {
     expect(JSON.stringify([...capture.submitted!.entries()])).not.toContain("indexer");
   });
 
-  it("rejects oversized uploads and ambiguous SAB acknowledgements", async () => {
+  it("rejects an oversized upload before contacting SABnzbd", async () => {
+    const request = vi.fn(async () => Response.json({ status: true }));
     const client = new SabnzbdClient({
       baseUrl: "http://sab.test/api",
       apiKey: "secret",
       maxNzbBytes: 5,
-      fetch: async () => Response.json({ status: true, nzo_ids: [] })
+      fetch: request
     });
 
     await expect(client.upload({
@@ -45,12 +46,101 @@ describe("SabnzbdClient", () => {
       category: null,
       marker: "gamarr-attempt-1"
     })).rejects.toMatchObject({ code: "VALIDATION" });
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it("treats an explicit SABnzbd refusal as a rejection", async () => {
+    const client = new SabnzbdClient({
+      baseUrl: "http://sab.test/api",
+      apiKey: "secret",
+      maxNzbBytes: 100,
+      fetch: async () => Response.json({ status: false, error: "nzb rejected" })
+    });
+
     await expect(client.upload({
       filename: "small.nzb",
       bytes: new Uint8Array(5),
       category: null,
       marker: "gamarr-attempt-1"
-    })).rejects.toMatchObject({ code: "UNAVAILABLE" });
+    })).rejects.toMatchObject({ outcome: "rejected", message: "nzb rejected" });
+  });
+
+  it("treats a client error response as a rejection", async () => {
+    const client = new SabnzbdClient({
+      baseUrl: "http://sab.test/api",
+      apiKey: "secret",
+      maxNzbBytes: 100,
+      fetch: async () => new Response("forbidden", { status: 403 })
+    });
+
+    await expect(client.upload({
+      filename: "small.nzb",
+      bytes: new Uint8Array(5),
+      category: null,
+      marker: "gamarr-attempt-1"
+    })).rejects.toMatchObject({ outcome: "rejected" });
+  });
+
+  it("treats a server error response as ambiguous", async () => {
+    const client = new SabnzbdClient({
+      baseUrl: "http://sab.test/api",
+      apiKey: "secret",
+      maxNzbBytes: 100,
+      fetch: async () => new Response("boom", { status: 500 })
+    });
+
+    await expect(client.upload({
+      filename: "small.nzb",
+      bytes: new Uint8Array(5),
+      category: null,
+      marker: "gamarr-attempt-1"
+    })).rejects.toMatchObject({ outcome: "ambiguous" });
+  });
+
+  it("treats an unreadable acknowledgement as ambiguous", async () => {
+    const client = new SabnzbdClient({
+      baseUrl: "http://sab.test/api",
+      apiKey: "secret",
+      maxNzbBytes: 100,
+      fetch: async () => Response.json({ status: true, nzo_ids: [] })
+    });
+
+    await expect(client.upload({
+      filename: "small.nzb",
+      bytes: new Uint8Array(5),
+      category: null,
+      marker: "gamarr-attempt-1"
+    })).rejects.toMatchObject({ code: "UNAVAILABLE", outcome: "ambiguous" });
+  });
+
+  it("stops reading an oversized queue response", async () => {
+    const chunk = new TextEncoder().encode("x".repeat(64));
+    const pulled: number[] = [];
+    let index = 0;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (index >= 100) {
+          controller.close();
+          return;
+        }
+        pulled.push(index);
+        controller.enqueue(chunk);
+        index += 1;
+      }
+    }, { highWaterMark: 0 });
+    const client = new SabnzbdClient({
+      baseUrl: "http://sab.test/api",
+      apiKey: "secret",
+      maxNzbBytes: 100,
+      maxResponseBytes: 100,
+      fetch: async () => new Response(stream)
+    });
+
+    await expect(client.getQueue()).rejects.toMatchObject({
+      code: "UNAVAILABLE",
+      message: "SABnzbd queue response is too large"
+    });
+    expect(pulled.length).toBeLessThanOrEqual(2);
   });
 
   it("normalizes queue and history jobs and tests with a zero-item queue", async () => {

@@ -155,4 +155,50 @@ describe("SettingsService", () => {
     });
     expect(service.getRedacted().indexers).toEqual([]);
   });
+
+  it("refuses to resurrect a soft-deleted indexer through an update", () => {
+    const repository = new MemorySettingsRepository();
+    const service = new SettingsService(repository, () => 2_000, () => "indexer-1");
+    service.saveIndexer({
+      name: "Indexer",
+      baseUrl: "https://indexer.test/api",
+      apiKey: { action: "replace", value: "key" },
+      enabled: true,
+      categoryIds: ["4050"],
+      timeoutMs: 10_000
+    });
+    service.deleteIndexer("indexer-1");
+
+    expect(() => service.saveIndexer({
+      id: "indexer-1",
+      name: "Revived",
+      baseUrl: "https://indexer.test/api",
+      apiKey: { action: "retain" },
+      enabled: true,
+      categoryIds: ["4050"],
+      timeoutMs: 10_000
+    })).toThrow(expect.objectContaining({ code: "NOT_FOUND", status: 404 }));
+
+    expect(repository.indexers[0]).toMatchObject({
+      name: "Indexer",
+      enabled: false,
+      deletedAt: 2_000
+    });
+    expect(service.getRedacted().indexers).toEqual([]);
+  });
+
+  it("reports an unknown indexer id as not found", () => {
+    const repository = new MemorySettingsRepository();
+    const service = new SettingsService(repository, () => 2_000, () => "indexer-1");
+
+    expect(() => service.saveIndexer({
+      id: "missing",
+      name: "Indexer",
+      baseUrl: "https://indexer.test/api",
+      apiKey: { action: "replace", value: "key" },
+      enabled: true,
+      categoryIds: ["4050"],
+      timeoutMs: 10_000
+    })).toThrow(expect.objectContaining({ code: "NOT_FOUND", status: 404 }));
+  });
 });

@@ -4,10 +4,12 @@ import type {
   DownloadAttempt,
   SubmissionClaimInput
 } from "@/features/downloads/models";
+import { SabnzbdUploadError } from "@/features/downloads/port";
 import type { DownloadRepository } from "@/features/downloads/repository";
 import { DownloadService } from "@/features/downloads/service";
 import type { CandidateRepository } from "@/features/release-search/ports";
 import type { SettingsRepository } from "@/features/settings/service";
+import { validationError } from "@/lib/errors";
 
 class MemoryDownloads implements DownloadRepository {
   attempts = new Map<string, DownloadAttempt>();
@@ -264,5 +266,204 @@ describe("DownloadService", () => {
 
     expect(completed).toMatchObject({ status: "Completed", progress: 100 });
     expect(stillCompleted).toMatchObject({ status: "Completed", progress: 100 });
+  });
+
+  const postProcessing = [
+    "Queued",
+    "QuickCheck",
+    "Verifying",
+    "Repairing",
+    "Fetching",
+    "Extracting",
+    "Moving",
+    "Running"
+  ];
+
+  it.each(postProcessing)(
+    "leaves an attempt reconcilable while history reports %s",
+    async (historyStatus) => {
+      const repository = new MemoryDownloads();
+      const service = new DownloadService({
+        repository,
+        candidates,
+        settings,
+        nzbFetcher: { fetch: async () => new Uint8Array([1]) },
+        sabFactory: () => ({
+          upload: async () => ({ jobId: "job" }),
+          getQueue: async () => [],
+          getHistory: async () => [{
+            jobId: "job",
+            marker: "gamarr-attempt-1",
+            status: historyStatus,
+            progress: 0
+          }],
+          testConnection: async () => undefined
+        }),
+        id: () => "attempt-1",
+        now: () => 2_000
+      });
+      const queued = await service.submit(input({ submissionKey: historyStatus }));
+
+      const [reconciled] = await service.reconcile([queued.id]);
+
+      expect(reconciled).toMatchObject({
+        status: "Queued",
+        failureDetail: null,
+        completedAt: null
+      });
+    }
+  );
+
+  it("completes an attempt that finished post-processing after an earlier poll", async () => {
+    const repository = new MemoryDownloads();
+    let historyStatus = "Extracting";
+    const service = new DownloadService({
+      repository,
+      candidates,
+      settings,
+      nzbFetcher: { fetch: async () => new Uint8Array([1]) },
+      sabFactory: () => ({
+        upload: async () => ({ jobId: "job" }),
+        getQueue: async () => [],
+        getHistory: async () => [{
+          jobId: "job",
+          marker: "gamarr-attempt-1",
+          status: historyStatus,
+          progress: 100
+        }],
+        testConnection: async () => undefined
+      }),
+      id: () => "attempt-1",
+      now: () => 2_000
+    });
+    const queued = await service.submit(input({ submissionKey: "post-process" }));
+
+    const [midway] = await service.reconcile([queued.id]);
+    historyStatus = "Completed";
+    const [settled] = await service.reconcile([queued.id]);
+
+    expect(midway).toMatchObject({ status: "Queued", completedAt: null });
+    expect(settled).toMatchObject({
+      status: "Completed",
+      progress: 100,
+      completedAt: 2_000
+    });
+  });
+
+  it("marks a genuine history failure as Failed", async () => {
+    const repository = new MemoryDownloads();
+    const service = new DownloadService({
+      repository,
+      candidates,
+      settings,
+      nzbFetcher: { fetch: async () => new Uint8Array([1]) },
+      sabFactory: () => ({
+        upload: async () => ({ jobId: "job" }),
+        getQueue: async () => [],
+        getHistory: async () => [{
+          jobId: "job",
+          marker: "gamarr-attempt-1",
+          status: "Failed",
+          progress: 0
+        }],
+        testConnection: async () => undefined
+      }),
+      id: () => "attempt-1",
+      now: () => 2_000
+    });
+    const queued = await service.submit(input({ submissionKey: "real-failure" }));
+
+    const [reconciled] = await service.reconcile([queued.id]);
+
+    expect(reconciled).toMatchObject({
+      status: "Failed",
+      failureDetail: "Failed",
+      completedAt: null
+    });
+  });
+
+  it("marks a locally rejected upload Failed because nothing was submitted", async () => {
+    const repository = new MemoryDownloads();
+    const service = new DownloadService({
+      repository,
+      candidates,
+      settings,
+      nzbFetcher: { fetch: async () => new Uint8Array([1]) },
+      sabFactory: () => ({
+        upload: async () => {
+          throw validationError("NZB exceeds the configured upload limit");
+        },
+        getQueue: async () => [],
+        getHistory: async () => [],
+        testConnection: async () => undefined
+      }),
+      id: () => "attempt-1",
+      now: () => 1_000
+    });
+
+    const attempt = await service.submit(input({ submissionKey: "too-large" }));
+
+    expect(attempt).toMatchObject({
+      status: "Failed",
+      failureDetail: "NZB exceeds the configured upload limit",
+      sabJobId: null
+    });
+  });
+
+  it("marks an upload SABnzbd explicitly rejected as Failed", async () => {
+    const repository = new MemoryDownloads();
+    const service = new DownloadService({
+      repository,
+      candidates,
+      settings,
+      nzbFetcher: { fetch: async () => new Uint8Array([1]) },
+      sabFactory: () => ({
+        upload: async () => {
+          throw new SabnzbdUploadError("rejected", "SABnzbd rejected the upload");
+        },
+        getQueue: async () => [],
+        getHistory: async () => [],
+        testConnection: async () => undefined
+      }),
+      id: () => "attempt-1",
+      now: () => 1_000
+    });
+
+    const attempt = await service.submit(input({ submissionKey: "rejected" }));
+
+    expect(attempt).toMatchObject({
+      status: "Failed",
+      failureDetail: "SABnzbd rejected the upload"
+    });
+  });
+
+  it("keeps a server-side upload failure Unknown because it may have been accepted", async () => {
+    const repository = new MemoryDownloads();
+    const service = new DownloadService({
+      repository,
+      candidates,
+      settings,
+      nzbFetcher: { fetch: async () => new Uint8Array([1]) },
+      sabFactory: () => ({
+        upload: async () => {
+          throw new SabnzbdUploadError(
+            "ambiguous",
+            "SABnzbd did not confirm the upload"
+          );
+        },
+        getQueue: async () => [],
+        getHistory: async () => [],
+        testConnection: async () => undefined
+      }),
+      id: () => "attempt-1",
+      now: () => 1_000
+    });
+
+    const attempt = await service.submit(input({ submissionKey: "server-error" }));
+
+    expect(attempt).toMatchObject({
+      status: "Unknown",
+      failureDetail: "SABnzbd acknowledgement was not confirmed"
+    });
   });
 });

@@ -1,8 +1,9 @@
+import { errorResponse } from "@/app/api/error-response";
 import type {
   ReleaseSearchInput,
   ReleaseSearchResponse
 } from "@/features/release-search/service";
-import { AppError, validationError } from "@/lib/errors";
+import { validationError } from "@/lib/errors";
 import {
   assertTrustedMutation,
   type OriginPolicy
@@ -10,19 +11,6 @@ import {
 
 interface ReleaseSearchHandlerService {
   search(input: ReleaseSearchInput): Promise<ReleaseSearchResponse | unknown>;
-}
-
-function errorResponse(error: unknown): Response {
-  if (error instanceof AppError) {
-    return Response.json(
-      { error: { code: error.code, message: error.message } },
-      { status: error.status }
-    );
-  }
-  return Response.json(
-    { error: { code: "INTERNAL", message: "Unexpected server error" } },
-    { status: 500 }
-  );
 }
 
 export async function handleReleaseSearch(
