@@ -12,16 +12,16 @@ import { validationError } from "@/lib/errors";
 export class CatalogService {
   constructor(
     private readonly repository: CatalogRepository,
-    private readonly provider: IgdbPort,
+    private readonly provider: IgdbPort | (() => IgdbPort),
     private readonly now: () => number = Date.now
   ) {}
 
   async testConnection(): Promise<void> {
-    await this.provider.testConnection();
+    await this.getProvider().testConnection();
   }
 
   async syncPlatforms(): Promise<PlatformView[]> {
-    const platforms = await this.provider.listPlatforms();
+    const platforms = await this.getProvider().listPlatforms();
     this.repository.upsertPlatforms(platforms, this.now());
     return this.repository.listPlatforms();
   }
@@ -55,7 +55,7 @@ export class CatalogService {
       throw validationError("Select a visible platform before searching");
     }
 
-    const games = (await this.provider.searchGames(query, input.platformId))
+    const games = (await this.getProvider().searchGames(query, input.platformId))
       .filter((game) => game.platformIds.includes(input.platformId));
     this.repository.upsertGames(games, this.now());
     return games;
@@ -63,5 +63,11 @@ export class CatalogService {
 
   getGame(id: number): GameSearchResult | null {
     return this.repository.getGame(id);
+  }
+
+  private getProvider(): IgdbPort {
+    return typeof this.provider === "function"
+      ? this.provider()
+      : this.provider;
   }
 }

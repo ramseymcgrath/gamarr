@@ -58,6 +58,6 @@ function igdbClient(): IgdbClient {
 export function catalogService(): CatalogService {
   return new CatalogService(
     new SqliteCatalogRepository(getDatabase()),
-    igdbClient()
+    igdbClient
   );
 }

@@ -107,4 +107,21 @@ describe("CatalogService", () => {
     await expect(service.search({ query: "Metroid", platformId: 130 }))
       .resolves.toEqual([expect.objectContaining({ id: 7346 })]);
   });
+
+  it("initializes the provider lazily for provider-backed operations", async () => {
+    const repository = new MemoryCatalogRepository();
+    let providerInitializations = 0;
+    const service = new CatalogService(repository, () => {
+      providerInitializations += 1;
+      throw new AppError("VALIDATION", 400, "IGDB credentials are not configured");
+    });
+
+    expect(service.listPlatforms()).toEqual([]);
+    expect(providerInitializations).toBe(0);
+    await expect(service.syncPlatforms()).rejects.toMatchObject({
+      code: "VALIDATION",
+      status: 400
+    });
+    expect(providerInitializations).toBe(1);
+  });
 });
