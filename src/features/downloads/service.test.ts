@@ -143,6 +143,39 @@ describe("DownloadService", () => {
     expect(uploads).toBe(1);
   });
 
+  it("uses a synthetic NZB filename instead of exposing the provider GUID", async () => {
+    const repository = new MemoryDownloads();
+    let uploadedFilename = "";
+    const service = new DownloadService({
+      repository,
+      candidates: {
+        save: () => undefined,
+        get: () => ({
+          ...candidate,
+          guid: "https://provider.example/details/guid?token=provider-secret"
+        })
+      },
+      settings,
+      nzbFetcher: { fetch: async () => new TextEncoder().encode("<nzb />") },
+      sabFactory: () => ({
+        upload: async ({ filename }) => {
+          uploadedFilename = filename;
+          return { jobId: "job-1" };
+        },
+        getQueue: async () => [],
+        getHistory: async () => [],
+        testConnection: async () => undefined
+      }),
+      id: () => "attempt-1",
+      now: () => 1_000
+    });
+
+    await service.submit(input({ submissionKey: "safe-filename" }));
+
+    expect(uploadedFilename).toBe("gamarr-attempt-1.nzb");
+    expect(uploadedFilename).not.toContain("provider-secret");
+  });
+
   it("marks an ambiguous acknowledgement Unknown and never auto-resubmits", async () => {
     const repository = new MemoryDownloads();
     let uploads = 0;

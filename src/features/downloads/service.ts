@@ -150,7 +150,7 @@ export class DownloadService {
     });
     try {
       const result = await this.dependencies.sabFactory(sabSettings).upload({
-        filename: `${candidate.guid}.nzb`,
+        filename: `gamarr-${attemptId}.nzb`,
         bytes,
         category: sabSettings.defaultCategory,
         marker: `gamarr-${attemptId}`
