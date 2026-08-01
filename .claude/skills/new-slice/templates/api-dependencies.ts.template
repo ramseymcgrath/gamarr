@@ -1,0 +1,30 @@
+import "server-only";
+
+import { getDatabase } from "@/db/client";
+import { Sqlite__Feature__Repository } from "@/features/__feature__/repository";
+import { __Feature__Service } from "@/features/__feature__/service";
+import { parseOriginPolicy } from "@/lib/trusted-mutation";
+
+/**
+ * Composition root for this route.
+ *
+ * The only place allowed to call `getDatabase()`, read `process.env`, or
+ * construct a concrete integration client. Keeping that here is what lets
+ * services and handlers stay injectable and testable.
+ *
+ * Integration clients that are configured at runtime (indexers, SABnzbd) are
+ * passed as factories rather than instances, because their credentials come from
+ * the database rather than the environment.
+ */
+export function __feature__Dependencies() {
+  const database = getDatabase();
+  return {
+    service: new __Feature__Service({
+      repository: new Sqlite__Feature__Repository(database)
+    }),
+    policy: parseOriginPolicy(process.env.GAMARR_ALLOWED_ORIGINS ?? "", {
+      trustedProxy: process.env.GAMARR_TRUST_PROXY === "true",
+      automationToken: process.env.GAMARR_API_TOKEN
+    })
+  };
+}

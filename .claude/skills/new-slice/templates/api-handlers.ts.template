@@ -1,0 +1,57 @@
+import { errorResponse } from "@/app/api/error-response";
+import type { __Feature__Record } from "@/features/__feature__/models";
+import { validationError } from "@/lib/errors";
+import {
+  assertTrustedMutation,
+  type OriginPolicy
+} from "@/lib/trusted-mutation";
+
+// A narrow structural interface rather than an import of the concrete service.
+// This is what lets handlers.test.ts pass a plain object literal.
+interface __Feature__HandlerService {
+  list(): __Feature__Record[];
+}
+
+/** Read-only route: no origin guard needed. */
+export async function handleList__Feature__(dependencies: {
+  service: __Feature__HandlerService;
+}): Promise<Response> {
+  try {
+    return Response.json(
+      { items: dependencies.service.list() },
+      { headers: { "cache-control": "no-store" } }
+    );
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+
+/**
+ * Mutating route: `assertTrustedMutation` runs first, before the body is read,
+ * so a disallowed origin never reaches parsing or the service.
+ *
+ * Validate explicitly here rather than trusting the client. Let `errorResponse`
+ * serialize — anything that is not an `AppError` becomes a generic 500, which is
+ * deliberate: raw upstream errors can carry indexer API keys.
+ */
+export async function handleCreate__Feature__(
+  request: Request,
+  dependencies: {
+    service: __Feature__HandlerService;
+    policy: OriginPolicy;
+  }
+): Promise<Response> {
+  try {
+    assertTrustedMutation(request, dependencies.policy);
+    const body = (await request.json()) as { id?: unknown };
+    if (typeof body.id !== "string" || !body.id.trim()) {
+      throw validationError("id must be a non-empty string");
+    }
+    return Response.json(
+      { ok: true },
+      { headers: { "cache-control": "no-store" } }
+    );
+  } catch (error) {
+    return errorResponse(error);
+  }
+}

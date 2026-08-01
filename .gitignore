@@ -11,3 +11,7 @@ test-results/
 .env
 .env.local
 .DS_Store
+
+# Per-developer Claude Code settings. The shared config (.claude/settings.json,
+# hooks, agents, skills) is checked in; local permission grants are not.
+.claude/settings.local.json
