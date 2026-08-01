@@ -48,6 +48,18 @@ test("configures providers and sends a selected release to SABnzbd", async ({
   await expect(page.getByRole("link", { name: /Metroid Prime 4: Beyond/ }))
     .toBeVisible();
 
+  // Every route is wrapped in .page, which fades in via the page-enter
+  // keyframes over 360ms. axe derives contrast from composited pixels, so
+  // scanning mid-fade measures a partially transparent element: the primary
+  // button was reported at roughly 44% opacity as #f6f7f2 on #8fa9d1 (2.2:1),
+  // with the exact ratio drifting between runs, while the settled colours are
+  // white on --blue #184fb3 at 7.48:1 — comfortably past AA and AAA.
+  // Let animations settle so the scan measures the real design. Both keyframes
+  // in globals.css are finite, so this cannot hang.
+  await page.waitForFunction(() =>
+    document.getAnimations().every((animation) =>
+      animation.playState === "finished"));
+
   const results = await new AxeBuilder({ page }).analyze();
   expect(results.violations).toEqual([]);
 });
