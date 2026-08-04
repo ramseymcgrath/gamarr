@@ -106,6 +106,20 @@ export const sabnzbdSettings = sqliteTable("sabnzbd_settings", {
   )
 ]);
 
+export const qbittorrentSettings = sqliteTable("qbittorrent_settings", {
+  id: integer("id").primaryKey().default(1),
+  baseUrl: text("base_url").notNull(),
+  username: text("username").notNull(),
+  password: text("password").notNull(),
+  defaultCategory: text("default_category"),
+  lastTestStatus: text("last_test_status"),
+  lastTestedAt: integer("last_tested_at"),
+  configRevision: integer("config_revision").notNull().default(1),
+  updatedAt: integer("updated_at").notNull()
+}, (table) => [
+  check("qbittorrent_singleton", sql`${table.id} = 1`)
+]);
+
 export const libraryEntries = sqliteTable(
   "library_entries",
   {
@@ -167,6 +181,7 @@ export const downloadAttempts = sqliteTable(
     indexerUrlSnapshot: text("indexer_url_snapshot"),
     newznabGuid: text("newznab_guid"),
     iaFileName: text("ia_file_name"),
+    torrentHash: text("torrent_hash"),
     size: integer("size"),
     category: text("category"),
     sabnzbdConfigRevision: integer("sabnzbd_config_revision").notNull(),

@@ -19,6 +19,7 @@ const attempt = {
   indexerUrlSnapshot: "https://indexer.test",
   newznabGuid: "guid",
   iaFileName: null,
+  torrentHash: null,
   size: 123,
   category: "games",
   sabnzbdConfigRevision: 1,

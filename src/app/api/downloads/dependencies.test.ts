@@ -83,6 +83,7 @@ function seedAbandonedDownload(database: Database, updatedAt: number): void {
       indexerUrlSnapshot: "https://archive.org",
       newznabGuid: null,
       iaFileName: "Game.zip",
+      torrentHash: null,
       size: null,
       category: null,
       sabnzbdConfigRevision: 0,

@@ -1,5 +1,17 @@
 import type { ReleaseSourceType } from "@/features/release-search/models";
 
+/**
+ * How an attempt's payload is delivered. Wider than `ReleaseSourceType`
+ * because torrent delivery is a property of the *attempt*, not of the release:
+ * an Internet Archive search result can be taken either way, and the choice is
+ * made at submit time. Stored on the attempt because `assertSameRequest`
+ * recomputes a replayed fingerprint from it — the candidate that produced the
+ * original may already have expired.
+ */
+export type AttemptSourceType =
+  | ReleaseSourceType
+  | "internet-archive-torrent";
+
 export type DownloadStatus =
   | "Pending"
   | "Submitting"
@@ -43,13 +55,17 @@ export interface DownloadAttempt {
   submissionKey: string;
   requestFingerprint: string;
   status: DownloadStatus;
-  source: ReleaseSourceType;
+  source: AttemptSourceType;
   releaseTitle: string;
   indexerId: string | null;
   indexerNameSnapshot: string;
   indexerUrlSnapshot: string | null;
   newznabGuid: string | null;
   iaFileName: string | null;
+  /** qBittorrent infohash. Null until the client reports one — WebAPI builds
+   * before 2.14.0 answer `torrents/add` with a bare `Ok.`, and those attempts
+   * are matched by tag instead. */
+  torrentHash: string | null;
   size: number | null;
   category: string | null;
   sabnzbdConfigRevision: number;
@@ -79,6 +95,12 @@ export interface SubmitDownloadInput {
   candidateId: string;
   gameId: number;
   platformId: number;
+  /**
+   * Which delivery an Internet Archive candidate should use. Defaults to
+   * `"file"` so existing clients keep working unchanged. Ignored for Newznab
+   * candidates, which have only one delivery.
+   */
+  delivery?: "file" | "torrent";
   /**
    * Required for Internet Archive candidates, which bundle many files per
    * item; ignored for Newznab candidates, whose fingerprint never includes it

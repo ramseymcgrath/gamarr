@@ -50,6 +50,7 @@ function attempt(overrides: Partial<DownloadAttempt> = {}): DownloadAttempt {
     indexerUrlSnapshot: "https://indexer.test",
     newznabGuid: "guid",
     iaFileName: null,
+    torrentHash: null,
     size: 10,
     category: "games",
     sabnzbdConfigRevision: 1,
@@ -64,6 +65,14 @@ function attempt(overrides: Partial<DownloadAttempt> = {}): DownloadAttempt {
     ...overrides
   };
 }
+
+const library = {
+  id: "library-1-130",
+  gameId: 1,
+  platformId: 130,
+  createdAt: 1,
+  updatedAt: 1
+};
 
 describe("SqliteDownloadRepository", () => {
   it("atomically claims one submission key and returns the winner", () => {
@@ -267,6 +276,55 @@ describe("SqliteDownloadRepository", () => {
     const { database, repository } = setup();
 
     expect(() => repository.update("missing", { progress: 1 })).toThrow();
+    database.$client.close();
+  });
+
+  it("round-trips a torrent attempt's source and hash", () => {
+    const { database, repository } = setup();
+    repository.claimSubmission({
+      library,
+      attempt: attempt({
+        source: "internet-archive-torrent",
+        newznabGuid: null,
+        indexerUrlSnapshot: null,
+        sabnzbdConfigRevision: 0,
+        torrentHash: null
+      })
+    });
+    const updated = repository.update("attempt", {
+      status: "Queued",
+      torrentHash: "8c212779b4abde7c6bc608063a0d008b7e40ce32",
+      updatedAt: 2
+    });
+
+    expect(updated.source).toBe("internet-archive-torrent");
+    expect(updated.torrentHash).toBe("8c212779b4abde7c6bc608063a0d008b7e40ce32");
+    database.$client.close();
+  });
+
+  it("refuses a torrent write once the attempt is terminal", () => {
+    const { database, repository } = setup();
+    repository.claimSubmission({
+      library,
+      attempt: attempt({
+        source: "internet-archive-torrent",
+        newznabGuid: null,
+        indexerUrlSnapshot: null,
+        sabnzbdConfigRevision: 0,
+        torrentHash: null
+      })
+    });
+    repository.update("attempt", {
+      status: "Completed",
+      completedAt: 3,
+      updatedAt: 3
+    });
+    const after = repository.update("attempt", {
+      torrentHash: "deadbeef",
+      updatedAt: 4
+    });
+
+    expect(after.torrentHash).toBeNull();
     database.$client.close();
   });
 });

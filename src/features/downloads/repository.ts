@@ -45,6 +45,7 @@ function mapAttempt(
     indexerUrlSnapshot: row.indexerUrlSnapshot,
     newznabGuid: row.newznabGuid,
     iaFileName: row.iaFileName,
+    torrentHash: row.torrentHash,
     size: row.size,
     category: row.category,
     sabnzbdConfigRevision: row.sabnzbdConfigRevision,

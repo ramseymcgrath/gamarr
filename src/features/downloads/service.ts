@@ -7,6 +7,7 @@ import { clearInterval, setInterval } from "node:timers";
 
 import {
   isTerminalDownloadStatus,
+  type AttemptSourceType,
   type DownloadAttempt,
   type DownloadStatus,
   type SubmitDownloadInput
@@ -18,10 +19,7 @@ import {
   type SabnzbdPort
 } from "@/features/downloads/port";
 import type { DownloadRepository } from "@/features/downloads/repository";
-import {
-  INTERNET_ARCHIVE_INDEXER_NAME,
-  type ReleaseSourceType
-} from "@/features/release-search/models";
+import { INTERNET_ARCHIVE_INDEXER_NAME } from "@/features/release-search/models";
 import type {
   CandidateRepository,
   ReleaseCandidateRecord
@@ -89,7 +87,7 @@ function selectedFileName(input: SubmitDownloadInput): string {
  */
 function fingerprint(
   input: SubmitDownloadInput,
-  source: ReleaseSourceType
+  source: AttemptSourceType
 ): string {
   const identity = source === "internet-archive"
     ? [input.candidateId, input.gameId, input.platformId, selectedFileName(input)]
@@ -213,6 +211,7 @@ export class DownloadService {
         indexerUrlSnapshot: snapshot.origin ?? new URL(indexer.baseUrl).origin,
         newznabGuid: candidate.guid,
         iaFileName: null,
+        torrentHash: null,
         size: candidate.size,
         category: sabSettings.defaultCategory,
         sabnzbdConfigRevision: sabSettings.configRevision,
@@ -343,6 +342,7 @@ export class DownloadService {
         indexerUrlSnapshot: snapshot.origin ?? null,
         newznabGuid: null,
         iaFileName: fileName,
+        torrentHash: null,
         size: fileInfo.size,
         category: null,
         // No SABnzbd configuration participates in this path; revision 0 is
