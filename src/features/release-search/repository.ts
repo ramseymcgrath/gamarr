@@ -2,6 +2,7 @@ import { and, eq, gt, lte } from "drizzle-orm";
 
 import type { Database } from "@/db/client";
 import { releaseCandidates } from "@/db/schema";
+import type { ReleaseSourceType } from "@/features/release-search/models";
 import type {
   CandidateRepository,
   ReleaseCandidateRecord
@@ -39,13 +40,16 @@ export class SqliteCandidateRepository implements CandidateRepository {
   }
 
   get(id: string): ReleaseCandidateRecord | null {
-    return this.database
+    const row = this.database
       .select()
       .from(releaseCandidates)
       .where(and(
         eq(releaseCandidates.id, id),
         gt(releaseCandidates.expiresAt, this.now())
       ))
-      .get() ?? null;
+      .get();
+    return row
+      ? { ...row, source: row.source as ReleaseSourceType }
+      : null;
   }
 }

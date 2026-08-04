@@ -19,8 +19,10 @@ export function toPublicAttempt(attempt: DownloadAttempt) {
     id: attempt.id,
     libraryEntryId: attempt.libraryEntryId,
     status: attempt.status,
+    source: attempt.source,
     releaseTitle: attempt.releaseTitle,
     indexerName: attempt.indexerNameSnapshot,
+    fileName: attempt.iaFileName,
     size: attempt.size,
     category: attempt.category,
     progress: attempt.progress,
@@ -45,7 +47,8 @@ export async function handleSubmitDownload(
       typeof body.submissionKey !== "string" ||
       typeof body.candidateId !== "string" ||
       !Number.isInteger(body.gameId) ||
-      !Number.isInteger(body.platformId)
+      !Number.isInteger(body.platformId) ||
+      (body.fileName !== undefined && typeof body.fileName !== "string")
     ) {
       throw validationError("Invalid download submission");
     }

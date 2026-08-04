@@ -107,14 +107,16 @@ describe("migrateDatabase", () => {
     temporaryDirectories.push(directory);
 
     // Migrate only as far as 0001 so the repair in 0002 has legacy rows to act
-    // on, mirroring a real upgrade rather than a fresh install.
+    // on, mirroring a real upgrade rather than a fresh install. Everything
+    // after 0001 is filtered out — applying a later migration here would make
+    // drizzle's migrator treat 0002 as out-of-order and skip it.
     const priorMigrations = path.join(directory, "drizzle");
     cpSync(path.resolve("drizzle"), priorMigrations, { recursive: true });
     const journalPath = path.join(priorMigrations, "meta", "_journal.json");
     const journal = JSON.parse(readFileSync(journalPath, "utf8")) as {
       entries: { tag: string }[];
     };
-    journal.entries = journal.entries.filter((entry) => entry.tag !== "0002_repair_postprocessing_failures");
+    journal.entries = journal.entries.filter((entry) => entry.tag < "0002");
     writeFileSync(journalPath, JSON.stringify(journal, null, 2));
 
     const database = createDatabase(path.join(directory, "gamarr.db"));

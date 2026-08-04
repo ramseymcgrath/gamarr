@@ -1070,6 +1070,61 @@ label {
   font-size: 0.76rem;
 }
 
+.file-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 260px;
+  overflow-y: auto;
+  margin: 20px 0 0;
+  padding: 0;
+  border: 0;
+}
+
+.file-picker legend {
+  margin-bottom: 8px;
+  padding: 0;
+  font-weight: 600;
+}
+
+.file-option {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  background: white;
+  cursor: pointer;
+}
+
+.file-option:focus-within {
+  outline: 3px solid var(--amber);
+  outline-offset: 2px;
+}
+
+.file-option:has(input:checked) {
+  border-color: var(--blue);
+  box-shadow: inset 0 0 0 1px var(--blue);
+}
+
+.file-option-name {
+  flex: 1;
+  overflow-wrap: anywhere;
+}
+
+.file-option-meta {
+  flex-shrink: 0;
+  color: var(--muted);
+  font-size: 0.76rem;
+  white-space: nowrap;
+}
+
+.file-picker-status {
+  color: var(--muted);
+  line-height: 1.55;
+}
+
 .dialog-actions {
   display: flex;
   gap: 9px;

@@ -32,7 +32,9 @@ export default defineConfig({
       GAMARR_ALLOWED_ORIGINS: "http://127.0.0.1:3200",
       GAMARR_E2E: "true",
       GAMARR_TWITCH_TOKEN_URL: "http://127.0.0.1:4100/oauth2/token",
-      GAMARR_IGDB_BASE_URL: "http://127.0.0.1:4100/v4"
+      GAMARR_IGDB_BASE_URL: "http://127.0.0.1:4100/v4",
+      GAMARR_IA_BASE_URL: "http://127.0.0.1:4100",
+      GAMARR_DOWNLOAD_DIRECTORY: `${process.cwd()}/test-results/e2e/downloads`
     }
   }]
 });

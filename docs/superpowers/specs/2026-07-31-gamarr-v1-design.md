@@ -2,7 +2,7 @@
 
 ## Summary
 
-Gamarr is a self-hosted Arr-style application for finding and downloading games. It presents an IGDB-backed game catalog, filters discovery by platform, searches user-configured Newznab indexers for releases, sends a selected NZB to SABnzbd, and keeps a library and download-attempt history.
+Gamarr is a self-hosted Arr-style application for finding and downloading games. It presents an IGDB-backed game catalog, filters discovery by platform, searches user-configured Newznab indexers and the Internet Archive for releases, sends a selected NZB to SABnzbd or streams a selected Internet Archive file to disk, and keeps a library and download-attempt history.
 
 Version 1 is intentionally manual. It does not monitor indexers for newly posted releases, apply quality profiles, import or rename completed files, or support torrent clients.
 
@@ -127,6 +127,12 @@ Each result shows release name, source count, indexers, age, size, category, and
 
 Browser responses receive only opaque, random, 30-minute candidate IDs. Server-side candidate records bind the indexer and configuration revision, GUID, title, size, normalized same-origin download path, and source metadata. Raw download URLs, provider payloads, and credentials never enter browser DTOs.
 
+### Internet Archive source
+
+Alongside the enabled indexers, Gamarr issues one bounded query per release search to the Internet Archive's public `advancedsearch` API (`mediatype:software`, title phrase, 25 rows). No credentials or configuration are required; `GAMARR_IA_BASE_URL` overrides the origin for tests. Items are ranked by the same transparent signals (category evidence simply does not apply) and appear as an `internet-archive` source labeled **Internet Archive**, with a per-source warning on failure exactly like an indexer. Its candidates bind only the validated item identifier — the download URL is rebuilt server-side at submission time, so no URL policy is needed at search time.
+
+An Internet Archive candidate cannot be submitted as-is: items bundle many files. Opening its confirmation dialog calls `GET /api/releases/files?candidateId=…`, a read-only route that returns the item's original uploads (largest first, capped at 100) from the `metadata` API, filtered to names that are safe to write to disk. The user picks one file; its name joins the submission fingerprint.
+
 ### Download submission
 
 Gamarr resolves the opaque candidate, reconstructs the download request from saved indexer configuration, downloads the NZB on the server, validates the response with a default 20 MiB maximum size, and uploads the bytes to SABnzbd under a synthetic attempt-based filename. The maximum is configurable from 1 to 100 MiB. This avoids passing indexer credentials or provider GUIDs to SABnzbd in a release URL or filename.
@@ -136,6 +142,10 @@ Candidate download policy permits only HTTP(S), rejects userinfo and fragments, 
 Submission creates or updates the library entry and creates a download attempt in a database transaction before contacting SABnzbd. Each confirmation action generates a unique submission key and canonical request fingerprint that are reused by browser retries. Double-clicks and repeated requests with the same key and fingerprint return the existing attempt; key reuse with different input returns `409 Conflict`. A deliberate later **Search again** action generates a new key.
 
 Before network dispatch, Gamarr commits `Submitting`, records `sab_request_started_at`, and sends a stable `gamarr-{attemptId}` marker in SABnzbd's `nzbname`. On an acknowledgement containing exactly one nonempty job ID, the attempt becomes `Queued`. Any failure after dispatch begins becomes `Unknown`. At startup, stale `Submitting` attempts become `Unknown`; Gamarr reconciles them by exact marker against queue/history and never automatically resubmits them.
+
+### Internet Archive download submission
+
+An Internet Archive submission skips SABnzbd entirely. The service verifies the chosen file still exists in the item metadata, claims library entry and attempt in the same idempotent transaction (same submission-key and fingerprint rules), then marks the attempt `Downloading` and streams the file in the background to `{GAMARR_DOWNLOAD_DIRECTORY}/{identifier}/{fileName}` via a per-attempt `.part` file renamed on completion. Redirects are confined to the configured origin or `*.archive.org` over HTTPS; bytes are capped by `GAMARR_IA_MAX_BYTES` (default 8 GiB) with the limit enforced mid-stream; identifier and file name are validated against path traversal before any URL or filesystem use. Progress writes are throttled and read back through the normal reconcile poll, which simply skips non-Newznab attempts and no longer requires SABnzbd settings to return them. Completion sets `Completed` with the delivered byte count; any failure sets `Failed` and removes the partial file (and the item directory if left empty). At startup, in-flight Internet Archive attempts become `Failed` — a direct stream cannot outlive the process, and nothing is resumed or restarted automatically.
 
 ### Library
 
@@ -200,11 +210,11 @@ Platforms synchronize during first-run IGDB setup and on manual refresh. Opening
 
 ### `release_candidates`
 
-- Random candidate ID, expiry, indexer ID and configuration revision, GUID, title, size, normalized download path, category, and source snapshot.
+- Random candidate ID, expiry, source (`newznab` or `internet-archive`), nullable indexer ID and configuration revision, GUID (Newznab GUID or Internet Archive identifier), title, size, normalized download path, category, and source snapshot.
 
 ### `download_attempts`
 
-- ID, library entry ID, submission key, request fingerprint, normalized status, release title, immutable indexer name/source snapshot, nullable indexer ID, Newznab GUID, size, category, SABnzbd connection revision, stable marker, SABnzbd job ID, progress, failure detail, and lifecycle timestamps.
+- ID, library entry ID, submission key, request fingerprint, normalized status, source, release title, immutable indexer name/source snapshot, nullable indexer ID, Newznab GUID, Internet Archive file name, size, category, SABnzbd connection revision (0 when SABnzbd is not involved), stable marker, SABnzbd job ID, progress, failure detail, and lifecycle timestamps.
 - Unique constraint on submission key and partial unique constraint on SAB connection revision plus SAB job ID.
 - Terminal states never regress. Progress and size have database checks. All timestamps are UTC.
 

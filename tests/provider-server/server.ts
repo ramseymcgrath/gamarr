@@ -118,6 +118,51 @@ const server = createServer(async (request, response) => {
       }
     });
   }
+  if (url.pathname === "/advancedsearch.php") {
+    return json(response, {
+      response: {
+        docs: [{
+          identifier: "metroid-prime-4-beyond-usa",
+          title: "Metroid Prime 4: Beyond (USA)",
+          date: "2026-07-31T00:00:00Z",
+          downloads: 1234,
+          item_size: 2048
+        }]
+      }
+    });
+  }
+  if (url.pathname.startsWith("/metadata/")) {
+    return json(response, {
+      files: [
+        {
+          name: "Metroid.Prime.4.Beyond.(USA).zip",
+          size: "512",
+          format: "ZIP",
+          source: "original"
+        },
+        {
+          name: "Metroid.Prime.4.Beyond.(USA).chd",
+          size: "2048",
+          format: "CHD",
+          source: "original"
+        },
+        {
+          name: "metroid-prime-4-beyond-usa_files.xml",
+          size: "128",
+          format: "Metadata",
+          source: "metadata"
+        }
+      ]
+    });
+  }
+  if (url.pathname.startsWith("/download/")) {
+    const payload = Buffer.from("gamarr-fixture-rom-bytes");
+    response.writeHead(200, {
+      "content-type": "application/octet-stream",
+      "content-length": String(payload.length)
+    });
+    return response.end(payload);
+  }
   json(response, { error: "not found" }, 404);
 });
 

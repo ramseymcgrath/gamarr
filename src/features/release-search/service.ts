@@ -3,16 +3,27 @@ import { randomUUID } from "node:crypto";
 import type { CatalogRepository } from "@/features/catalog/ports";
 import type { SettingsRepository } from "@/features/settings/service";
 import {
+  selectCandidateFiles,
+  type SelectableFile
+} from "@/features/release-search/file-selection";
+import {
   deduplicateReleases,
   rankRelease
 } from "@/features/release-search/matcher";
-import type { RankedRelease } from "@/features/release-search/models";
+import {
+  INTERNET_ARCHIVE_INDEXER_ID,
+  INTERNET_ARCHIVE_INDEXER_NAME,
+  type RankedRelease,
+  type Release,
+  type ReleaseSourceType
+} from "@/features/release-search/models";
 import { planPrimaryQuery } from "@/features/release-search/query-planner";
 import type {
   CandidateRepository,
+  InternetArchiveSearchPort,
   NewznabClientFactory
 } from "@/features/release-search/ports";
-import { validationError } from "@/lib/errors";
+import { AppError, validationError } from "@/lib/errors";
 import {
   DownloadUrlPolicyError,
   validateDownloadUrl,
@@ -48,6 +59,7 @@ interface ReleaseSearchDependencies {
   settings: SettingsRepository;
   candidates: CandidateRepository;
   clientFactory: NewznabClientFactory;
+  internetArchive?: InternetArchiveSearchPort;
   now?: () => number;
   id?: () => string;
   overallTimeoutMs?: number;
@@ -62,13 +74,14 @@ export interface ReleaseSearchInput {
 export interface PublicReleaseSource {
   candidateId: string;
   indexerName: string;
+  source: ReleaseSourceType;
 }
 
 export interface PublicRelease {
   title: string;
   size: number | null;
   category: string | null;
-  publishedAt: number;
+  publishedAt: number | null;
   match: "Strong" | "Possible" | "Conflicting";
   score: number;
   supportingReasons: string[];
@@ -83,6 +96,10 @@ export interface ReleaseSearchResponse {
     indexerName: string;
     message: string;
   }>;
+}
+
+export interface CandidateFilesResponse {
+  files: SelectableFile[];
 }
 
 export class ReleaseSearchService {
@@ -119,7 +136,7 @@ export class ReleaseSearchService {
       overallTimeoutMs
     );
     try {
-      await this.forEachConcurrent(
+      const indexerFanOut = this.forEachConcurrent(
         indexers,
         this.dependencies.concurrency ?? 4,
         async (indexer) => {
@@ -163,6 +180,17 @@ export class ReleaseSearchService {
           }
         }
       );
+      await Promise.all([
+        indexerFanOut,
+        this.searchInternetArchive(game.name, game.alternativeNames, {
+          releaseYear: game.releaseYear,
+          selectedAliases: platform.aliases,
+          conflictingAliases,
+          signal: controller.signal,
+          ranked,
+          warnings
+        })
+      ]);
     } finally {
       clearTimeout(timeout);
     }
@@ -175,7 +203,36 @@ export class ReleaseSearchService {
       Map<DownloadUrlRejectionReason, number>
     >();
     const releases = deduplicateReleases(ranked).flatMap((release) => {
-      const sources = release.sources.flatMap((source) => {
+      const sources = release.sources.flatMap((source): PublicReleaseSource[] => {
+        if (source.source === "internet-archive") {
+          // IA items need no download-URL policy: the candidate carries only
+          // the validated item identifier, and the download URL is rebuilt
+          // server-side from operator configuration at submission time.
+          const candidateId = this.id();
+          this.dependencies.candidates.save({
+            id: candidateId,
+            expiresAt: timestamp + 30 * 60 * 1000,
+            source: "internet-archive",
+            indexerId: null,
+            indexerConfigRevision: 0,
+            guid: source.guid,
+            title: source.title,
+            size: source.size,
+            downloadPath: `/details/${source.guid}`,
+            category: null,
+            sourceSnapshot: JSON.stringify({
+              indexerName: INTERNET_ARCHIVE_INDEXER_NAME,
+              identifier: source.guid,
+              origin: new URL(source.downloadUrl).origin
+            }),
+            createdAt: timestamp
+          });
+          return [{
+            candidateId,
+            indexerName: INTERNET_ARCHIVE_INDEXER_NAME,
+            source: "internet-archive" as const
+          }];
+        }
         const indexer = indexers.find((candidate) => candidate.id === source.indexerId);
         if (!indexer) {
           throw validationError("Indexer changed during release search");
@@ -195,6 +252,7 @@ export class ReleaseSearchService {
         this.dependencies.candidates.save({
           id: candidateId,
           expiresAt: timestamp + 30 * 60 * 1000,
+          source: "newznab",
           indexerId: indexer.id,
           indexerConfigRevision: indexer.configRevision,
           guid: source.guid,
@@ -208,7 +266,11 @@ export class ReleaseSearchService {
           }),
           createdAt: timestamp
         });
-        return [{ candidateId, indexerName: indexer.name }];
+        return [{
+          candidateId,
+          indexerName: indexer.name,
+          source: "newznab" as const
+        }];
       });
       if (sources.length === 0) return [];
       return [{
@@ -232,6 +294,105 @@ export class ReleaseSearchService {
       });
     }
     return { releases, warnings };
+  }
+
+  /**
+   * Lists the files of the Internet Archive item behind a live candidate, so
+   * the user can pick which one to download. Read-only: the opaque candidate
+   * ID means a caller cannot aim this at anything the server did not already
+   * mint during a search.
+   */
+  async listCandidateFiles(
+    candidateId: string
+  ): Promise<CandidateFilesResponse> {
+    const candidate = this.dependencies.candidates.get(candidateId);
+    // Expiry and absence deliberately collapse into this single 404:
+    // `SqliteCandidateRepository.get` filters on
+    // `and(eq(id), gt(expiresAt, now()))` and returns null for both, so the
+    // endpoint cannot be used as an existence oracle for candidate IDs.
+    if (!candidate) {
+      throw new AppError("NOT_FOUND", 404, "Release candidate has expired");
+    }
+    if (candidate.source !== "internet-archive") {
+      throw validationError("Candidate is not an Internet Archive item");
+    }
+    const internetArchive = this.dependencies.internetArchive;
+    if (!internetArchive) {
+      // Unreachable in a normal composition root — an IA candidate can only
+      // exist if a search ran with the port wired in — but a misconfigured
+      // deployment must fail loudly rather than report an empty item.
+      throw new AppError(
+        "UNAVAILABLE",
+        503,
+        "Internet Archive source is not configured"
+      );
+    }
+    // The item is addressed by the candidate's guid: the candidate ID is a
+    // server-minted handle and means nothing upstream.
+    const files = await internetArchive.listFiles(candidate.guid);
+    return { files: selectCandidateFiles(files) };
+  }
+
+  /**
+   * Queries the Internet Archive as one more bounded source inside the same
+   * overall deadline. Items become ordinary ranked releases with no category
+   * evidence; a failure here only produces a warning, like any indexer.
+   */
+  private async searchInternetArchive(
+    title: string,
+    alternativeNames: string[],
+    context: {
+      releaseYear: number | null;
+      selectedAliases: string[];
+      conflictingAliases: string[];
+      signal: AbortSignal;
+      ranked: RankedRelease[];
+      warnings: ReleaseSearchResponse["warnings"];
+    }
+  ): Promise<void> {
+    const internetArchive = this.dependencies.internetArchive;
+    if (!internetArchive) return;
+    try {
+      const result = await internetArchive.search(
+        { title },
+        context.signal
+      );
+      context.warnings.push(...result.warnings.map((message) => ({
+        indexerId: INTERNET_ARCHIVE_INDEXER_ID,
+        indexerName: INTERNET_ARCHIVE_INDEXER_NAME,
+        message
+      })));
+      for (const item of result.items) {
+        const release: Release = {
+          guid: item.identifier,
+          title: item.title,
+          source: "internet-archive",
+          indexerId: INTERNET_ARCHIVE_INDEXER_ID,
+          indexerName: INTERNET_ARCHIVE_INDEXER_NAME,
+          downloadUrl: item.detailsUrl,
+          size: item.size,
+          category: null,
+          publishedAt: item.publishedAt
+        };
+        context.ranked.push(rankRelease({
+          release,
+          canonicalTitle: title,
+          alternativeNames,
+          selectedAliases: context.selectedAliases,
+          conflictingAliases: context.conflictingAliases,
+          releaseYear: context.releaseYear,
+          categoryIds: []
+        }));
+      }
+    } catch {
+      context.warnings.push({
+        indexerId: INTERNET_ARCHIVE_INDEXER_ID,
+        indexerName: INTERNET_ARCHIVE_INDEXER_NAME,
+        message: context.signal.aborted
+          ? "Internet Archive search timed out"
+          : "Internet Archive search failed"
+      });
+    }
   }
 
   private async forEachConcurrent<T>(

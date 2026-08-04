@@ -1,4 +1,5 @@
 import type { NzbUpload, SabJob } from "@/features/downloads/models";
+import type { InternetArchiveFile } from "@/features/release-search/models";
 import type { ReleaseCandidateRecord } from "@/features/release-search/ports";
 import type { IndexerRecord } from "@/features/settings/models";
 import { AppError } from "@/lib/errors";
@@ -34,4 +35,31 @@ export interface NzbFetcherPort {
     indexer: IndexerRecord;
     maxBytes: number;
   }): Promise<Uint8Array>;
+}
+
+/**
+ * Direct server-side download of one file from an Internet Archive item.
+ * Implemented by the internet-archive integration (client metadata lookup
+ * plus streaming downloader); injected into DownloadService as a single
+ * narrowed port.
+ */
+export interface InternetArchiveDownloadPort {
+  getFileInfo(input: {
+    identifier: string;
+    fileName: string;
+  }): Promise<InternetArchiveFile | null>;
+  download(input: {
+    identifier: string;
+    fileName: string;
+    destinationDir: string;
+    attemptId: string;
+    maxBytes: number;
+    onProgress: (received: number, total: number | null) => void;
+  }): Promise<{ bytes: number; filePath: string }>;
+}
+
+export interface InternetArchiveDownloadConfig
+  extends InternetArchiveDownloadPort {
+  downloadDir: string;
+  maxBytes: number;
 }

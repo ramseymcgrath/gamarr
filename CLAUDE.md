@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Gamarr is a LAN-hosted game catalog and **manual** Usenet download manager: it searches IGDB by platform, searches Newznab-compatible indexers for a selected game, explains its match evidence, and sends a chosen NZB to SABnzbd. It deliberately does not monitor wanted games, choose downloads automatically, or run a background scheduler when idle. It has no user login — the trust boundary is the LAN plus an operator-configured origin allowlist.
+Gamarr is a LAN-hosted game catalog and **manual** download manager: it searches IGDB by platform, searches Newznab-compatible indexers and the Internet Archive for a selected game, explains its match evidence, and sends a chosen NZB to SABnzbd or downloads a chosen Internet Archive file directly to disk. It deliberately does not monitor wanted games, choose downloads automatically, or run a background scheduler when idle. It has no user login — the trust boundary is the LAN plus an operator-configured origin allowlist.
 
 Design spec: `docs/superpowers/specs/2026-07-31-gamarr-v1-design.md` (authoritative for the download lifecycle, data model, and security requirements).
 
@@ -68,9 +68,11 @@ Handlers declare a narrow structural interface for the service they need (e.g. `
 
 `src/features/<name>/` uses a consistent quintet: `models.ts` (domain types), `ports.ts` (interfaces for anything external), `repository.ts` (the only place Drizzle is used, named `Sqlite*Repository`), `service.ts` (orchestration, depends only on ports), plus colocated `*.test.ts`. React screens for a feature live in the same directory (`discover-screen.tsx`, `settings-screen.tsx`, …).
 
-`src/integrations/<vendor>/` holds the concrete adapters (igdb, newznab, sabnzbd) that satisfy those ports. Services receive them via constructor injection — often as a factory (`clientFactory: (indexer) => new NewznabClient(...)`) since indexers are configured at runtime.
+`src/integrations/<vendor>/` holds the concrete adapters (igdb, newznab, sabnzbd, internet-archive) that satisfy those ports. Services receive them via constructor injection — often as a factory (`clientFactory: (indexer) => new NewznabClient(...)`) since indexers are configured at runtime.
 
-The boundary to preserve: features reach the outside world only through their ports, and `dependencies.ts` is what binds a port to a concrete adapter. Features do not import integration *clients*. (The one deliberate exception is `release-search/service.ts` importing `newznab/url-policy` — a pure validation module with no I/O.)
+The boundary to preserve: features reach the outside world only through their ports, and `dependencies.ts` is what binds a port to a concrete adapter. Features do not import integration *clients*. (The two deliberate exceptions are pure validation modules with no I/O: `newznab/url-policy` in `release-search/service.ts`, and `internet-archive/path-policy` in the downloads service and files handler.)
+
+The Internet Archive source is a second release source *and* a second download path: items are searched via the public `advancedsearch` API, the user picks one file from the item (`GET /api/releases/files`), and the server streams it to `GAMARR_DOWNLOAD_DIRECTORY` in the background — no SABnzbd involved. Its attempts reuse the normal lifecycle (`Pending` → `Downloading` → `Completed`/`Failed`) and appear in Library and Activity like any other attempt; a restart fails in-flight rows instead of resuming them.
 
 ### Database
 
@@ -88,7 +90,7 @@ better-sqlite3 is **synchronous**: transactions must stay short and must never c
 
 **Errors:** throw `AppError` (or the `validationError` / `forbiddenError` helpers) from `src/lib/errors.ts` and let `errorResponse()` in `src/app/api/error-response.ts` serialize it. Anything that is not an `AppError` becomes a generic 500 — never let a raw upstream error message through, since it may carry a key.
 
-**Download submission is idempotent.** The client supplies a `submissionKey`; the service computes a `requestFingerprint` and, on replay, either returns the existing attempt or fails if the same key arrives with different content. The `Unknown` status means an ambiguous outcome (e.g. a lost SABnzbd acknowledgement) — it is reconciled against a durable `sabMarker`, never resubmitted automatically. Status writes use monotonic compare-and-set so a stale response cannot overwrite a terminal state.
+**Download submission is idempotent.** The client supplies a `submissionKey`; the service computes a `requestFingerprint` and, on replay, either returns the existing attempt or fails if the same key arrives with different content. What goes into that hash is chosen by the candidate's *source*, never by which optional fields happen to be present: Newznab hashes `[candidateId, gameId, platformId]` (the shape earlier versions wrote, so rows in deployed databases keep matching) and Internet Archive appends the selected file name verbatim, whitespace included. On replay the source is read back off the stored attempt, because the candidate it came from has a 30-minute TTL while the attempt row is permanent. The `Unknown` status means an ambiguous outcome (e.g. a lost SABnzbd acknowledgement) — it is reconciled against a durable `sabMarker`, never resubmitted automatically. `SqliteDownloadRepository.update` is a conditional `UPDATE ... WHERE status NOT IN ('Completed','Failed')`, so once an attempt is terminal no later write lands on it — not a status change, and not a bare progress or heartbeat patch — and a refused write returns the unchanged row rather than throwing.
 
 **Indexer failures are per-indexer.** One failing indexer produces a warning alongside the other indexers' successful results; it must not fail the whole search. Newznab download URLs are validated by `url-policy.ts` (same-origin as the indexer, no credentials or fragments, http/https only) and NZBs are size-bounded via `read-bounded-response.ts` and never written to disk.
 
@@ -118,3 +120,7 @@ Multi-stage build; the runner stage copies the Next.js standalone output plus a 
 | `GAMARR_ALLOWED_ORIGINS` | none — required | Comma-separated exact browser origins allowed to mutate state |
 | `GAMARR_API_TOKEN` | none | Optional bearer token for trusted automation |
 | `GAMARR_TRUST_PROXY` | `false` | Honor forwarded host/protocol; only safe behind a trusted reverse proxy |
+| `GAMARR_IA_BASE_URL` | `https://archive.org` | Internet Archive API origin (overridden in e2e like `GAMARR_IGDB_BASE_URL`) |
+| `GAMARR_DOWNLOAD_DIRECTORY` | `/config/downloads` | Where Internet Archive files are streamed (`{dir}/{identifier}/{file}`) |
+| `GAMARR_IA_MAX_BYTES` | `8589934592` (8 GiB) | Per-file streaming ceiling for Internet Archive downloads |
+| `GAMARR_IA_METADATA_MAX_BYTES` | `16777216` (16 MiB) | Ceiling for an Internet Archive item's `/metadata/` file manifest; raise it for items with very large file lists |

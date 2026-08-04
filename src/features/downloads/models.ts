@@ -1,3 +1,5 @@
+import type { ReleaseSourceType } from "@/features/release-search/models";
+
 export type DownloadStatus =
   | "Pending"
   | "Submitting"
@@ -6,6 +8,20 @@ export type DownloadStatus =
   | "Completed"
   | "Failed"
   | "Unknown";
+
+/**
+ * Statuses an attempt can never leave. `Unknown` is deliberately absent: it
+ * means "outcome not established yet" and reconcile is expected to resolve it
+ * into a real terminal status later.
+ */
+export const TERMINAL_DOWNLOAD_STATUSES: readonly DownloadStatus[] = [
+  "Completed",
+  "Failed"
+];
+
+export function isTerminalDownloadStatus(status: DownloadStatus): boolean {
+  return TERMINAL_DOWNLOAD_STATUSES.includes(status);
+}
 
 export interface NzbUpload {
   filename: string;
@@ -27,11 +43,13 @@ export interface DownloadAttempt {
   submissionKey: string;
   requestFingerprint: string;
   status: DownloadStatus;
+  source: ReleaseSourceType;
   releaseTitle: string;
   indexerId: string | null;
   indexerNameSnapshot: string;
   indexerUrlSnapshot: string | null;
   newznabGuid: string | null;
+  iaFileName: string | null;
   size: number | null;
   category: string | null;
   sabnzbdConfigRevision: number;
@@ -61,4 +79,14 @@ export interface SubmitDownloadInput {
   candidateId: string;
   gameId: number;
   platformId: number;
+  /**
+   * Required for Internet Archive candidates, which bundle many files per
+   * item; ignored for Newznab candidates, whose fingerprint never includes it
+   * so a replay carrying one still matches.
+   *
+   * Whitespace is significant. The name is matched against Internet Archive
+   * metadata by exact equality and becomes both a URL path segment and the
+   * file name on disk, so " Game.zip" is a different file from "Game.zip".
+   */
+  fileName?: string;
 }

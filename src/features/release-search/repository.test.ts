@@ -41,6 +41,7 @@ describe("SqliteCandidateRepository", () => {
     const candidate = {
       id: "candidate",
       expiresAt: 2_000,
+      source: "newznab" as const,
       indexerId: "indexer",
       indexerConfigRevision: 1,
       guid: "guid",
@@ -63,6 +64,7 @@ describe("SqliteCandidateRepository", () => {
     candidates.save({
       id: "expired",
       expiresAt: 2_000,
+      source: "newznab",
       indexerId: "indexer",
       indexerConfigRevision: 1,
       guid: "guid",
@@ -83,6 +85,7 @@ describe("SqliteCandidateRepository", () => {
     const record = (id: string, expiresAt: number) => ({
       id,
       expiresAt,
+      source: "newznab" as const,
       indexerId: "indexer",
       indexerConfigRevision: 1,
       guid: `guid-${id}`,
