@@ -12,7 +12,19 @@
 
 ## Global Constraints
 
-- Node 24, pnpm via corepack. Gates: `pnpm lint`, `pnpm typecheck`, `pnpm test`.
+- Node **≥ 24** (`package.json` `engines`), pnpm via corepack. This checkout runs
+  Node 26.5.0 and the suite is green on it — do not treat 24 as a pin or stop
+  because the installed version is higher.
+- `.codebase-memory/artifact.json` and `.codebase-memory/graph.db.zst` churn
+  whenever the MCP index is regenerated. They are expected to be dirty, are not
+  part of any task, and must never be staged.
+- **Test snippets in this plan specify required behaviour, not literal text.**
+  Each test file has its own harness; wire the assertions into the harness that
+  is already there rather than inventing helpers. `downloads/repository.test.ts`
+  gives you `setup(): { database, repository }` and
+  `attempt(overrides): DownloadAttempt`, and rows are inserted through
+  `repository.claimSubmission({ library, attempt })`. Read the file before
+  adding to it.
 - **Migrations in `drizzle/` are immutable once committed.** Generate new ones with `pnpm db:generate`; never edit an applied file.
 - **better-sqlite3 is synchronous.** Transactions stay short and contain no `await`. Claim the row first, do network I/O outside the transaction.
 - **Secrets never reach the client.** The qBittorrent password is on the same footing as an indexer API key: never in a response, an error message, a log, or a React Query key. `Public*Settings` shapes replace each secret with a boolean.
@@ -46,29 +58,65 @@
 
 Add to `src/features/downloads/repository.test.ts`:
 
+First add `torrentHash: null` to the defaults in the file's existing
+`attempt()` factory, then add a `library` constant next to it so the two new
+tests do not repeat it:
+
 ```ts
-it("round-trips a torrent attempt's hash and source", () => {
-  const { repository, seed } = setup(); // reuse the file's existing harness
-  const attempt = seed({
-    source: "internet-archive-torrent",
-    torrentHash: null
+const library = {
+  id: "library-1-130",
+  gameId: 1,
+  platformId: 130,
+  createdAt: 1,
+  updatedAt: 1
+};
+```
+
+Then the tests, using the file's real `setup()` and `attempt()` helpers:
+
+```ts
+it("round-trips a torrent attempt's source and hash", () => {
+  const { repository } = setup();
+  repository.claimSubmission({
+    library,
+    attempt: attempt({
+      source: "internet-archive-torrent",
+      newznabGuid: null,
+      indexerUrlSnapshot: null,
+      sabnzbdConfigRevision: 0,
+      torrentHash: null
+    })
   });
-  const updated = repository.update(attempt.id, {
+  const updated = repository.update("attempt", {
     status: "Queued",
-    torrentHash: "8c212779b4abde7c6bc608063a0d008b7e40ce32"
+    torrentHash: "8c212779b4abde7c6bc608063a0d008b7e40ce32",
+    updatedAt: 2
   });
   expect(updated.source).toBe("internet-archive-torrent");
   expect(updated.torrentHash).toBe("8c212779b4abde7c6bc608063a0d008b7e40ce32");
 });
 
 it("refuses a torrent write once the attempt is terminal", () => {
-  const { repository, seed } = setup();
-  const attempt = seed({ source: "internet-archive-torrent" });
-  repository.update(attempt.id, { status: "Completed" });
-  const after = repository.update(attempt.id, { torrentHash: "deadbeef" });
+  const { repository } = setup();
+  repository.claimSubmission({
+    library,
+    attempt: attempt({
+      source: "internet-archive-torrent",
+      newznabGuid: null,
+      indexerUrlSnapshot: null,
+      sabnzbdConfigRevision: 0,
+      torrentHash: null
+    })
+  });
+  repository.update("attempt", { status: "Completed", completedAt: 3, updatedAt: 3 });
+  const after = repository.update("attempt", { torrentHash: "deadbeef", updatedAt: 4 });
   expect(after.torrentHash).toBeNull();
 });
 ```
+
+The second test pins the existing conditional-update invariant: `update` is an
+`UPDATE ... WHERE status NOT IN ('Completed','Failed')`, so a refused write
+returns the unchanged row rather than throwing.
 
 - [ ] **Step 2: Run it and confirm it fails**
 
