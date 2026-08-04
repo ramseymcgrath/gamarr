@@ -75,6 +75,26 @@ describe("download HTTP handlers", () => {
     expect(body).toMatchObject({ id: "attempt", status: "Queued" });
   });
 
+  it("rejects an unknown delivery value", async () => {
+    const submit = vi.fn(async () => attempt);
+    const response = await handleSubmitDownload(
+      request("/api/downloads", {
+        submissionKey: "key",
+        candidateId: "candidate",
+        gameId: 1,
+        platformId: 130,
+        delivery: "magnet"
+      }),
+      {
+        service: { submit, reconcile: vi.fn() },
+        policy: parseOriginPolicy("http://gamarr.local")
+      }
+    );
+
+    expect(response.status).toBe(400);
+    expect(submit).not.toHaveBeenCalled();
+  });
+
   it("reconciles only requested attempt IDs behind the mutation guard", async () => {
     const reconcile = vi.fn(async () => [attempt]);
     const response = await handleReconcileDownloads(

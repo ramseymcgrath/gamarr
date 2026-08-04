@@ -3,25 +3,34 @@ import "server-only";
 import { getDatabase } from "@/db/client";
 import { SqliteDownloadRepository } from "@/features/downloads/repository";
 import { DownloadService } from "@/features/downloads/service";
+import { selectItemTorrent } from "@/features/release-search/file-selection";
 import { SqliteCandidateRepository } from "@/features/release-search/repository";
 import { SqliteSettingsRepository } from "@/features/settings/repository";
 import { InternetArchiveClient } from "@/integrations/internet-archive/client";
 import { InternetArchiveDownloader } from "@/integrations/internet-archive/downloader";
 import { NewznabNzbFetcher } from "@/integrations/newznab/download";
+import { QbittorrentClient } from "@/integrations/qbittorrent/client";
 import { SabnzbdClient } from "@/integrations/sabnzbd/client";
 import { byteLimitFromEnv } from "@/lib/env";
 import { parseOriginPolicy } from "@/lib/trusted-mutation";
 
 const DEFAULT_IA_MAX_BYTES = 8 * 1024 * 1024 * 1024;
+const DEFAULT_IA_TORRENT_MAX_BYTES = 8 * 1024 * 1024;
 
 function internetArchiveMaxBytes(): number {
   return byteLimitFromEnv(process.env.GAMARR_IA_MAX_BYTES)
     ?? DEFAULT_IA_MAX_BYTES;
 }
 
+function internetArchiveTorrentMaxBytes(): number {
+  return byteLimitFromEnv(process.env.GAMARR_IA_TORRENT_MAX_BYTES)
+    ?? DEFAULT_IA_TORRENT_MAX_BYTES;
+}
+
 function buildDownloadService() {
   const database = getDatabase();
   const repository = new SqliteDownloadRepository(database);
+  const settings = new SqliteSettingsRepository(database);
   const iaBaseUrl = process.env.GAMARR_IA_BASE_URL;
   // getFileInfo() delegates to listFiles(), so the submit path needs the same
   // metadata ceiling the file picker gets from the releases composition root.
@@ -33,7 +42,7 @@ function buildDownloadService() {
   const service = new DownloadService({
     repository,
     candidates: new SqliteCandidateRepository(database),
-    settings: new SqliteSettingsRepository(database),
+    settings,
     nzbFetcher: new NewznabNzbFetcher(),
     sabFactory: (settings) => new SabnzbdClient({
       baseUrl: settings.baseUrl,
@@ -46,6 +55,30 @@ function buildDownloadService() {
       download: (input) => iaDownloader.download(input),
       downloadDir: process.env.GAMARR_DOWNLOAD_DIRECTORY ?? "/config/downloads",
       maxBytes: internetArchiveMaxBytes()
+    },
+    internetArchiveTorrent: {
+      findTorrent: async (identifier) =>
+        selectItemTorrent(await iaClient.listFiles(identifier)),
+      fetchTorrent: (identifier, fileName) =>
+        iaClient.fetchTorrent(
+          identifier,
+          fileName,
+          internetArchiveTorrentMaxBytes()
+        ),
+      client: () => {
+        const qbit = settings.getQbittorrent();
+        if (!qbit?.password) return null;
+        return new QbittorrentClient({
+          baseUrl: qbit.baseUrl,
+          username: qbit.username,
+          password: qbit.password
+        });
+      },
+      // Lazy, like `client()` above: this function runs during startup
+      // recovery, which must tolerate a database whose migrations have not run
+      // yet. An eager read here queries `qbittorrent_settings` before it
+      // exists and defeats `isSchemaNotReady`.
+      defaultCategory: () => settings.getQbittorrent()?.defaultCategory ?? null
     }
   });
   return { service, repository };

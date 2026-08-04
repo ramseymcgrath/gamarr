@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 
 import type {
@@ -6,7 +5,10 @@ import type {
   SubmissionClaimInput
 } from "@/features/downloads/models";
 import { isTerminalDownloadStatus } from "@/features/downloads/models";
-import { SabnzbdUploadError } from "@/features/downloads/port";
+import {
+  SabnzbdUploadError,
+  TorrentAddError
+} from "@/features/downloads/port";
 import type { DownloadRepository } from "@/features/downloads/repository";
 import { DownloadService } from "@/features/downloads/service";
 import type { CandidateRepository } from "@/features/release-search/ports";
@@ -300,9 +302,11 @@ describe("DownloadService", () => {
   it("still matches a legacy Newznab fingerprint written before file selection existed", async () => {
     const repository = new MemoryDownloads();
     const service = newznabService(repository);
-    const legacyFingerprint = createHash("sha256")
-      .update(JSON.stringify(["candidate-a", 1, 130]))
-      .digest("hex");
+    // Literal SHA-256 of JSON.stringify(["candidate-a", 1, 130]). Recomputing
+    // this expectation would let an incompatible fingerprint change silently
+    // invalidate every deployed Newznab replay.
+    const legacyFingerprint =
+      "f0422f33b09f2cb694977563c0a76941b8615836a92927f617ea2919de1ccc4f";
     repository.attempts.set("legacy", {
       id: "legacy",
       libraryEntryId: "library-1-130",
@@ -702,6 +706,234 @@ describe("DownloadService Internet Archive submissions", () => {
     repository: MemoryDownloads,
     port: ReturnType<typeof iaPort>["port"]
   ) => buildWithClock(repository, port, () => 1_000);
+
+  const torrentInput = (overrides: Partial<{
+    submissionKey: string;
+    delivery: "file" | "torrent";
+    fileName: string;
+  }> = {}) => ({
+    submissionKey: "torrent-key",
+    candidateId: "candidate-ia",
+    gameId: 1,
+    platformId: 130,
+    delivery: "torrent" as const,
+    ...overrides
+  });
+
+  const torrentSetup = (overrides: {
+    hash?: string | null;
+    itemTorrent?: { name: string; size: number | null } | null;
+    clientConfigured?: boolean;
+    addError?: unknown;
+    fetchError?: unknown;
+  } = {}) => {
+    const repository = new MemoryDownloads();
+    const add = vi.fn(async () => {
+      if (overrides.addError !== undefined) throw overrides.addError;
+      return { hash: overrides.hash === undefined ? "abc123" : overrides.hash };
+    });
+    const findTorrent = vi.fn(async () => overrides.itemTorrent === undefined
+      ? { name: "game-item_archive.torrent", size: 2048 }
+      : overrides.itemTorrent);
+    const fetchTorrent = vi.fn(async () => {
+      if (overrides.fetchError !== undefined) throw overrides.fetchError;
+      return new Uint8Array([1, 2, 3]);
+    });
+    const scheduleHeartbeat = vi.fn(() => () => undefined);
+    const service = new DownloadService({
+      repository,
+      candidates: iaCandidates,
+      settings: noSabSettings,
+      nzbFetcher: { fetch: async () => new Uint8Array() },
+      sabFactory: () => ({
+        upload: async () => {
+          throw new Error("SABnzbd must not be used for torrent submissions");
+        },
+        getQueue: async () => [],
+        getHistory: async () => [],
+        testConnection: async () => undefined
+      }),
+      internetArchiveTorrent: {
+        findTorrent,
+        fetchTorrent,
+        client: () => overrides.clientConfigured === false ? null : {
+          add,
+          list: async () => [],
+          testConnection: async () => undefined
+        },
+        defaultCategory: () => "archive"
+      },
+      id: () => "attempt-1",
+      now: () => 1_000,
+      scheduleHeartbeat
+    });
+    return {
+      service,
+      repository,
+      add,
+      findTorrent,
+      fetchTorrent,
+      scheduleHeartbeat
+    };
+  };
+
+  it("submits a torrent, records its hash, and does not start a heartbeat", async () => {
+    const {
+      service,
+      repository,
+      add,
+      fetchTorrent,
+      scheduleHeartbeat
+    } = torrentSetup();
+
+    const attempt = await service.submit(torrentInput());
+
+    expect(attempt).toMatchObject({
+      status: "Queued",
+      source: "internet-archive-torrent",
+      iaFileName: null,
+      torrentHash: "abc123",
+      category: "archive"
+    });
+    expect(repository.get(attempt.id)?.torrentHash).toBe("abc123");
+    expect(fetchTorrent).toHaveBeenCalledWith(
+      "game-item",
+      "game-item_archive.torrent"
+    );
+    expect(add).toHaveBeenCalledWith({
+      torrent: new Uint8Array([1, 2, 3]),
+      filename: "game-item_archive.torrent",
+      category: "archive",
+      tag: `gamarr-${attempt.id}`
+    });
+    expect(scheduleHeartbeat).not.toHaveBeenCalled();
+  });
+
+  it("queues a torrent when qBittorrent reports no hash", async () => {
+    const { service } = torrentSetup({ hash: null });
+
+    const attempt = await service.submit(torrentInput());
+
+    expect(attempt).toMatchObject({ status: "Queued", torrentHash: null });
+  });
+
+  it("replays an identical torrent submission without adding it again", async () => {
+    const { service, add } = torrentSetup();
+    const request = torrentInput();
+
+    const first = await service.submit(request);
+    const replay = await service.submit(request);
+
+    expect(replay.id).toBe(first.id);
+    expect(add).toHaveBeenCalledTimes(1);
+  });
+
+  it("conflicts when a torrent key is replayed as a direct file", async () => {
+    const { service } = torrentSetup();
+    await service.submit(torrentInput());
+
+    await expect(service.submit(torrentInput({
+      delivery: "file",
+      fileName: "Game.zip"
+    }))).rejects.toMatchObject({ code: "CONFLICT", status: 409 });
+  });
+
+  it("marks a rejected torrent Failed with its safe AppError detail", async () => {
+    const { service } = torrentSetup({
+      addError: new TorrentAddError(
+        "rejected",
+        "qBittorrent rejected the torrent"
+      )
+    });
+
+    const attempt = await service.submit(torrentInput());
+
+    expect(attempt).toMatchObject({
+      status: "Failed",
+      failureDetail: "qBittorrent rejected the torrent"
+    });
+  });
+
+  it("leaves a torrent Unknown when its acknowledgement is ambiguous", async () => {
+    const { service } = torrentSetup({
+      addError: new TorrentAddError(
+        "ambiguous",
+        "qBittorrent did not confirm the torrent"
+      )
+    });
+
+    const attempt = await service.submit(torrentInput());
+
+    expect(attempt).toMatchObject({
+      status: "Unknown",
+      failureDetail: "qBittorrent did not confirm the torrent"
+    });
+  });
+
+  it("redacts a raw qBittorrent error from failure detail", async () => {
+    const { service } = torrentSetup({
+      addError: new Error("request failed at http://admin:secret@qbit.test")
+    });
+
+    const attempt = await service.submit(torrentInput());
+
+    expect(attempt).toMatchObject({
+      status: "Unknown",
+      failureDetail: "qBittorrent acknowledgement was not confirmed"
+    });
+    expect(attempt.failureDetail).not.toContain("admin:secret");
+  });
+
+  it("rejects a torrent submission when qBittorrent is not configured", async () => {
+    const { service, repository } = torrentSetup({ clientConfigured: false });
+
+    await expect(service.submit(torrentInput())).rejects.toMatchObject({
+      code: "VALIDATION",
+      status: 400,
+      message: "qBittorrent is not configured"
+    });
+    expect(repository.list()).toHaveLength(0);
+  });
+
+  it("rejects a torrent submission for an item with no torrent", async () => {
+    const { service, repository } = torrentSetup({ itemTorrent: null });
+
+    await expect(service.submit(torrentInput())).rejects.toMatchObject({
+      code: "VALIDATION",
+      status: 400,
+      message: "This item has no torrent; download a file instead"
+    });
+    expect(repository.list()).toHaveLength(0);
+  });
+
+  it("rejects a torrent submission that also names a file", async () => {
+    const { service, findTorrent, repository } = torrentSetup();
+
+    await expect(service.submit(torrentInput({ fileName: "Game.zip" })))
+      .rejects.toMatchObject({
+        code: "VALIDATION",
+        status: 400,
+        message: "A torrent covers the whole item; do not select a file"
+      });
+    expect(findTorrent).not.toHaveBeenCalled();
+    expect(repository.list()).toHaveLength(0);
+  });
+
+  it("fails torrent retrieval without exposing a raw upstream error", async () => {
+    const { service, add } = torrentSetup({
+      fetchError: new Error(
+        "fetch failed for https://user:secret@archive.invalid/torrent"
+      )
+    });
+
+    const attempt = await service.submit(torrentInput());
+
+    expect(attempt).toMatchObject({
+      status: "Failed",
+      failureDetail: "Torrent retrieval failed"
+    });
+    expect(add).not.toHaveBeenCalled();
+  });
 
   it("claims, downloads outside the request, and completes without SABnzbd", async () => {
     const repository = new MemoryDownloads();
