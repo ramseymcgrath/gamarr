@@ -6,7 +6,11 @@ import type {
   InternetArchiveSearchResult
 } from "@/features/release-search/models";
 import { isValidInternetArchiveIdentifier } from "@/integrations/internet-archive/path-policy";
-import { readBoundedJson } from "@/integrations/read-bounded-response";
+import { assertAllowedArchiveTarget } from "@/integrations/internet-archive/redirect-policy";
+import {
+  readBoundedJson,
+  readBoundedResponse
+} from "@/integrations/read-bounded-response";
 import { AppError, validationError } from "@/lib/errors";
 
 const DEFAULT_BASE_URL = "https://archive.org";
@@ -32,6 +36,7 @@ const DEFAULT_MAX_SEARCH_BYTES = 2 * 1024 * 1024;
  * remaining few items are reachable by raising GAMARR_IA_METADATA_MAX_BYTES.
  */
 const DEFAULT_MAX_METADATA_BYTES = 16 * 1024 * 1024;
+const MAX_TORRENT_REDIRECTS = 3;
 
 type FetchOperation = "search" | "metadata";
 
@@ -255,6 +260,84 @@ export class InternetArchiveClient {
   ): Promise<InternetArchiveFile | null> {
     const files = await this.listFiles(identifier, signal);
     return files.find((file) => file.name === fileName) ?? null;
+  }
+
+  async fetchTorrent(
+    identifier: string,
+    fileName: string,
+    maxBytes: number,
+    signal?: AbortSignal
+  ): Promise<Uint8Array> {
+    if (!isValidInternetArchiveIdentifier(identifier)) {
+      throw validationError("Invalid Internet Archive identifier");
+    }
+    const baseOrigin = new URL(this.baseUrl).origin;
+    let target = new URL(
+      `/download/${encodeURIComponent(identifier)}/`
+        + encodeURIComponent(fileName),
+      `${baseOrigin}/`
+    );
+    for (
+      let redirects = 0;
+      redirects <= MAX_TORRENT_REDIRECTS;
+      redirects += 1
+    ) {
+      const timeoutSignal = AbortSignal.timeout(this.timeoutMs);
+      let response: Response;
+      try {
+        response = await this.request(target, {
+          headers: { accept: "application/octet-stream" },
+          redirect: "manual",
+          signal: signal
+            ? AbortSignal.any([signal, timeoutSignal])
+            : timeoutSignal
+        });
+      } catch (error) {
+        throw new AppError(
+          "UNAVAILABLE",
+          502,
+          "Internet Archive torrent retrieval failed",
+          { cause: error }
+        );
+      }
+      if (response.status >= 300 && response.status < 400) {
+        const location = response.headers.get("location");
+        await response.body?.cancel().catch(() => undefined);
+        if (!location || redirects === MAX_TORRENT_REDIRECTS) {
+          throw new AppError(
+            "UNAVAILABLE",
+            502,
+            "Internet Archive returned an invalid redirect"
+          );
+        }
+        const redirected = new URL(location, target);
+        assertAllowedArchiveTarget(redirected, baseOrigin);
+        target = redirected;
+        continue;
+      }
+      if (!response.ok) {
+        await response.body?.cancel().catch(() => undefined);
+        throw new AppError(
+          "UNAVAILABLE",
+          502,
+          "Internet Archive torrent retrieval failed"
+        );
+      }
+      return readBoundedResponse(
+        response,
+        maxBytes,
+        () => new AppError(
+          "UNAVAILABLE",
+          502,
+          "Internet Archive torrent exceeded the size limit"
+        )
+      );
+    }
+    throw new AppError(
+      "UNAVAILABLE",
+      502,
+      "Internet Archive redirect limit exceeded"
+    );
   }
 
   private async fetchJson(

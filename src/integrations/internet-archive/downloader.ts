@@ -9,6 +9,7 @@ import {
   isSafeInternetArchiveFileName,
   isValidInternetArchiveIdentifier
 } from "@/integrations/internet-archive/path-policy";
+import { assertAllowedArchiveTarget } from "@/integrations/internet-archive/redirect-policy";
 import { AppError, validationError } from "@/lib/errors";
 
 const DEFAULT_BASE_URL = "https://archive.org";
@@ -217,7 +218,7 @@ export class InternetArchiveDownloader {
           );
         }
         const redirected = new URL(location, target);
-        this.assertAllowedTarget(redirected, baseOrigin);
+        assertAllowedArchiveTarget(redirected, baseOrigin);
         target = redirected;
         continue;
       }
@@ -236,20 +237,6 @@ export class InternetArchiveDownloader {
       502,
       "Internet Archive redirect limit exceeded"
     );
-  }
-
-  private assertAllowedTarget(target: URL, baseOrigin: string): void {
-    const archiveHost = target.hostname === "archive.org" ||
-      target.hostname.endsWith(".archive.org");
-    const allowed = target.origin === baseOrigin ||
-      (target.protocol === "https:" && archiveHost);
-    if (!allowed || target.username || target.password || target.hash) {
-      throw new AppError(
-        "UNAVAILABLE",
-        502,
-        "Internet Archive returned an unsafe redirect"
-      );
-    }
   }
 
   private stalledError(): AppError {

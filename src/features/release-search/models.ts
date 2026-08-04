@@ -58,6 +58,12 @@ export interface InternetArchiveFile {
   source: string | null;
 }
 
+/** The whole-item torrent Internet Archive derives for most items. */
+export interface ItemTorrent {
+  name: string;
+  size: number | null;
+}
+
 export interface InternetArchiveSearchResult {
   items: InternetArchiveItem[];
   warnings: string[];
