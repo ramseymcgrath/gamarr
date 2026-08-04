@@ -49,6 +49,10 @@
 - Modify: `src/features/downloads/repository.ts`
 - Create: `drizzle/0004_*.sql` (generated)
 - Test: `src/features/downloads/repository.test.ts`, `src/db/migrate.test.ts`
+- Modify (construction sites — see Step 5b): `src/features/downloads/service.ts`,
+  `src/features/downloads/service.test.ts`,
+  `src/app/api/downloads/dependencies.test.ts`,
+  `src/app/api/downloads/handlers.test.ts`
 
 **Interfaces:**
 - Consumes: nothing.
@@ -189,6 +193,28 @@ Leave `download_attempts.source` alone: it carries no CHECK constraint, so the t
 
 In `src/features/downloads/repository.ts`, add `torrentHash: row.torrentHash` to `mapAttempt`, and make sure `claimSubmission` inserts it. `update` already spreads a partial patch, so it needs no change beyond the type widening.
 
+- [ ] **Step 5b: Fix every `DownloadAttempt` construction site**
+
+`torrentHash` is a required property, so every place that builds a whole
+`DownloadAttempt` now fails to compile. This is Task 1's own cost — adding a
+field means updating its constructors — not later service work. Add
+`torrentHash: null` immediately after `iaFileName` in each of:
+
+- `src/features/downloads/service.ts` — both `claimSubmission` attempt literals
+  (the Newznab path and the Internet Archive path).
+- `src/features/downloads/service.test.ts` — the attempt fixtures.
+- `src/app/api/downloads/dependencies.test.ts` — the attempt fixtures.
+- `src/app/api/downloads/handlers.test.ts` — the attempt fixtures.
+
+Where `service.ts` types a local as `ReleaseSourceType` for an attempt's source,
+widen it to `AttemptSourceType`. Make **no** behavioural change here: no new
+branch, no `delivery` handling, no torrent logic. That is Task 7. This step is
+purely making the widened type compile.
+
+Run `pnpm typecheck` and confirm it is clean before moving on. If it still
+reports a construction site not listed above, fix that one too and note it in
+your summary.
+
 - [ ] **Step 6: Generate the migration**
 
 Run: `pnpm db:generate`
@@ -202,7 +228,11 @@ Expected: PASS.
 - [ ] **Step 8: Commit**
 
 ```bash
-git add src/db/schema.ts src/features/downloads/models.ts src/features/downloads/repository.ts src/features/downloads/repository.test.ts drizzle/
+git add src/db/schema.ts src/features/downloads/models.ts \
+  src/features/downloads/repository.ts src/features/downloads/repository.test.ts \
+  src/features/downloads/service.ts src/features/downloads/service.test.ts \
+  src/app/api/downloads/dependencies.test.ts src/app/api/downloads/handlers.test.ts \
+  drizzle/
 git commit -m "feat(db): add qbittorrent settings and attempt torrent hash"
 ```
 
