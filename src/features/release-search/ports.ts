@@ -43,3 +43,9 @@ export interface CandidateRepository {
 }
 
 export type NewznabClientFactory = (indexer: IndexerRecord) => NewznabPort;
+
+/** Lists the configured indexers without exposing a settings repository. */
+export type ListReleaseIndexersPort = () => IndexerRecord[];
+
+/** Narrow read-only port used to report whether torrent delivery is usable. */
+export type TorrentClientConfiguredPort = () => boolean;
