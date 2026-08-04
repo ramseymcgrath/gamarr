@@ -23,7 +23,44 @@ function loginOk(): Response {
   });
 }
 
+/**
+ * What qBittorrent 5.x actually answers `auth/login` with, verified against a
+ * live v5.2.3 / WebAPI 2.15.1 instance: HTTP 204, no body, and a session
+ * cookie named `QBT_SID_<webui-port>` rather than the bare `SID` the WebUI
+ * documentation describes. The `expires` attribute carries a comma, which is
+ * why the parser cannot treat commas as cookie separators.
+ */
+function loginOkModern(): Response {
+  return new Response(null, {
+    status: 204,
+    headers: {
+      "set-cookie":
+        "QBT_SID_8080=Xk9rT2mQ4vB8nL1pZ0wYcE7hJ3sA6dF5; HttpOnly; "
+        + "SameSite=Lax; expires=Tue, 04-Aug-2026 18:06:55 GMT; path=/"
+    }
+  });
+}
+
 describe("QbittorrentClient", () => {
+  it("authenticates against a qBittorrent 5.x QBT_SID cookie and 204", async () => {
+    const calls: Request[] = [];
+    const fetchImpl = vi.fn(async (
+      input: RequestInfo | URL,
+      init?: RequestInit
+    ) => {
+      const url = String(input);
+      calls.push(new Request(url, init));
+      if (url.includes("/auth/login")) return loginOkModern();
+      return Response.json([]);
+    }) as unknown as typeof fetch;
+
+    await client(fetchImpl).list();
+
+    const listing = calls.find((call) => call.url.includes("/torrents/info"));
+    expect(listing!.headers.get("cookie"))
+      .toBe("QBT_SID_8080=Xk9rT2mQ4vB8nL1pZ0wYcE7hJ3sA6dF5");
+  });
+
   it("logs in once and reuses the SID cookie", async () => {
     const calls: Request[] = [];
     const fetchImpl = vi.fn(async (

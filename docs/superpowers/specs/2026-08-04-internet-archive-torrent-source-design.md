@@ -44,9 +44,18 @@ becomes a BitTorrent peer.
 - The torrent covers the **entire item**, not a file. Its size is the item
   size, which the search document already reports as `item_size`.
 - `POST /api/v2/auth/login` takes form-encoded `username`/`password` and
-  returns a `SID` cookie. qBittorrent rejects requests whose `Referer` does not
-  match its own host unless the operator disabled that check, so the adapter
-  always sends one.
+  returns a session cookie. qBittorrent rejects requests whose `Referer` does
+  not match its own host unless the operator disabled that check, so the
+  adapter always sends one.
+
+  **The WebUI documentation is wrong about this response, verified against a
+  live v5.2.3 / WebAPI 2.15.1 instance.** The docs describe `200` with a body
+  of `Ok.` and a cookie named `SID`. What 5.x actually returns is **`204` with
+  no body** and a cookie named **`QBT_SID_<webui-port>`** (e.g.
+  `QBT_SID_8080`). The adapter accepts either name and replays the `name=value`
+  pair verbatim, because the name is part of what the server expects back. Its
+  `expires` attribute contains a comma, so the parser must not treat commas as
+  cookie separators.
 - `POST /api/v2/torrents/add` is `multipart/form-data` with a `torrents` part
   carrying the raw bytes, plus optional `category` and `tags`. WebAPI 2.14.0
   and later respond with JSON `{ added_torrent_ids, success_count,

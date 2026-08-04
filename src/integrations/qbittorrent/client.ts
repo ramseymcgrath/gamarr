@@ -231,15 +231,27 @@ export class QbittorrentClient implements TorrentClientPort {
         "Could not authenticate with qBittorrent"
       );
     }
-    const sid = setCookie?.match(/(?:^|[,;]\s*)SID=([^,;]+)/i)?.[1]?.trim();
-    if (!sid) {
+    // qBittorrent 4.x set a bare `SID`; 5.x names the session cookie
+    // `QBT_SID_<webui-port>` (verified against v5.2.3 / WebAPI 2.15.1, which
+    // returns `QBT_SID_8080` and answers the login with 204 and no body).
+    // Both names are accepted and the pair is replayed verbatim, because the
+    // name is part of what the server expects back.
+    //
+    // The value is bounded by `[^,;]` rather than split on commas: the header
+    // carries an `expires=Tue, 04-Aug-2026 ...` attribute whose comma would
+    // otherwise look like a cookie separator.
+    const cookie = setCookie
+      ?.match(/(?:^|[,;]\s*)((?:QBT_)?SID(?:_\d+)?)=([^,;]+)/i);
+    const name = cookie?.[1];
+    const value = cookie?.[2]?.trim();
+    if (!name || !value) {
       throw new AppError(
         "UNAVAILABLE",
         502,
         "Could not authenticate with qBittorrent"
       );
     }
-    this.sidCookie = `SID=${sid}`;
+    this.sidCookie = `${name}=${value}`;
   }
 
   private ensureLogin(): Promise<void> {
