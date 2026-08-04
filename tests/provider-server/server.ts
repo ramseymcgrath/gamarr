@@ -3,6 +3,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { fixtureState } from "@tests/provider-server/state";
 
 const port = Number(process.env.GAMARR_FIXTURE_PORT ?? 4100);
+const torrentPayload = Buffer.from("gamarr-fixture-torrent-bytes");
 
 function body(request: IncomingMessage): Promise<Buffer> {
   return new Promise((resolve, reject) => {
@@ -21,6 +22,12 @@ function json(response: ServerResponse, value: unknown, status = 200) {
 function xml(response: ServerResponse, value: string) {
   response.writeHead(200, { "content-type": "application/xml" });
   response.end(value);
+}
+
+function hasQbittorrentSession(request: IncomingMessage): boolean {
+  const cookies = request.headers.cookie?.split(";").map((value) => value.trim());
+  return cookies?.includes("SID=fixture-sid") === true &&
+    request.headers.referer === `http://127.0.0.1:${port}`;
 }
 
 const server = createServer(async (request, response) => {
@@ -118,6 +125,67 @@ const server = createServer(async (request, response) => {
       }
     });
   }
+  if (
+    request.method === "POST" &&
+    url.pathname === "/qbittorrent/api/v2/auth/login"
+  ) {
+    const credentials = new URLSearchParams((await body(request)).toString("utf8"));
+    if (
+      credentials.get("username") !== "fixture-user" ||
+      credentials.get("password") !== "fixture-password"
+    ) {
+      response.writeHead(403, { "content-type": "text/plain" });
+      return response.end("Fails.");
+    }
+    response.writeHead(200, {
+      "content-type": "text/plain",
+      "set-cookie": "SID=fixture-sid; Path=/; HttpOnly"
+    });
+    return response.end("Ok.");
+  }
+  if (
+    request.method === "POST" &&
+    url.pathname === "/qbittorrent/api/v2/torrents/add"
+  ) {
+    if (!hasQbittorrentSession(request)) {
+      return json(response, { error: "forbidden" }, 403);
+    }
+    const payload = (await body(request)).toString("utf8");
+    const tag = payload.match(/name="tags"\r\n\r\n([^\r\n]+)/)?.[1] ?? "";
+    if (
+      tag.length === 0 ||
+      !payload.includes('name="torrents"; filename="') ||
+      !payload.includes(torrentPayload.toString("utf8"))
+    ) {
+      return json(response, { error: "invalid torrent" }, 415);
+    }
+    fixtureState.torrent = { tag, polls: 0 };
+    return json(response, {
+      added_torrent_ids: ["abc123"],
+      success_count: 1,
+      pending_count: 0,
+      failure_count: 0
+    });
+  }
+  if (
+    request.method === "GET" &&
+    url.pathname === "/qbittorrent/api/v2/torrents/info"
+  ) {
+    if (!hasQbittorrentSession(request)) {
+      return json(response, { error: "forbidden" }, 403);
+    }
+    if (fixtureState.torrent === null) return json(response, []);
+    fixtureState.torrent.polls += 1;
+    const complete = fixtureState.torrent.polls >= 2;
+    return json(response, [{
+      hash: "abc123",
+      tags: fixtureState.torrent.tag,
+      state: complete ? "uploading" : "downloading",
+      progress: complete ? 1 : 0.5,
+      name: "metroid-prime-4-beyond-usa",
+      size: 2048
+    }]);
+  }
   if (url.pathname === "/advancedsearch.php") {
     return json(response, {
       response: {
@@ -132,6 +200,7 @@ const server = createServer(async (request, response) => {
     });
   }
   if (url.pathname.startsWith("/metadata/")) {
+    const identifier = url.pathname.slice("/metadata/".length);
     return json(response, {
       files: [
         {
@@ -147,6 +216,12 @@ const server = createServer(async (request, response) => {
           source: "original"
         },
         {
+          name: `${identifier}_archive.torrent`,
+          size: String(torrentPayload.length),
+          format: "Archive BitTorrent",
+          source: "metadata"
+        },
+        {
           name: "metroid-prime-4-beyond-usa_files.xml",
           size: "128",
           format: "Metadata",
@@ -156,6 +231,16 @@ const server = createServer(async (request, response) => {
     });
   }
   if (url.pathname.startsWith("/download/")) {
+    const segments = url.pathname.split("/").filter(Boolean);
+    const identifier = segments[1];
+    const fileName = segments[2];
+    if (fileName === `${identifier}_archive.torrent`) {
+      response.writeHead(200, {
+        "content-type": "application/x-bittorrent",
+        "content-length": String(torrentPayload.length)
+      });
+      return response.end(torrentPayload);
+    }
     const payload = Buffer.from("gamarr-fixture-rom-bytes");
     response.writeHead(200, {
       "content-type": "application/octet-stream",

@@ -76,6 +76,7 @@ again.
 | `GAMARR_ALLOWED_ORIGINS` | none | Comma-separated exact browser origins allowed to mutate state |
 | `GAMARR_API_TOKEN` | none | Optional bearer token for trusted automation |
 | `GAMARR_TRUST_PROXY` | `false` | Honor forwarded host/protocol only behind a trusted reverse proxy |
+| `GAMARR_IA_TORRENT_MAX_BYTES` | `8388608` (8 MiB) | Ceiling for an Internet Archive item's `.torrent` metainfo |
 
 Gamarr intentionally has no user login in this LAN-oriented release. Do not
 publish it directly to the internet. When using a reverse proxy, terminate

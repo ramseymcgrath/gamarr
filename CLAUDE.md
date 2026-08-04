@@ -72,7 +72,7 @@ Handlers declare a narrow structural interface for the service they need (e.g. `
 
 The boundary to preserve: features reach the outside world only through their ports, and `dependencies.ts` is what binds a port to a concrete adapter. Features do not import integration *clients*. (The two deliberate exceptions are pure validation modules with no I/O: `newznab/url-policy` in `release-search/service.ts`, and `internet-archive/path-policy` in the downloads service and files handler.)
 
-The Internet Archive source is a second release source *and* a second download path: items are searched via the public `advancedsearch` API, the user picks one file from the item (`GET /api/releases/files`), and the server streams it to `GAMARR_DOWNLOAD_DIRECTORY` in the background — no SABnzbd involved. Its attempts reuse the normal lifecycle (`Pending` → `Downloading` → `Completed`/`Failed`) and appear in Library and Activity like any other attempt; a restart fails in-flight rows instead of resuming them.
+The Internet Archive source is a second release source *and* a second download path: items are searched via the public `advancedsearch` API, the user picks one file from the item (`GET /api/releases/files`), and the server streams it to `GAMARR_DOWNLOAD_DIRECTORY` in the background — no SABnzbd involved. Its attempts reuse the normal lifecycle (`Pending` → `Downloading` → `Completed`/`Failed`) and appear in Library and Activity like any other attempt; a restart fails in-flight rows instead of resuming them. An item may instead be handed to qBittorrent as a whole-item torrent; those attempts survive a restart, while direct downloads do not.
 
 ### Database
 
@@ -124,3 +124,4 @@ Multi-stage build; the runner stage copies the Next.js standalone output plus a 
 | `GAMARR_DOWNLOAD_DIRECTORY` | `/config/downloads` | Where Internet Archive files are streamed (`{dir}/{identifier}/{file}`) |
 | `GAMARR_IA_MAX_BYTES` | `8589934592` (8 GiB) | Per-file streaming ceiling for Internet Archive downloads |
 | `GAMARR_IA_METADATA_MAX_BYTES` | `16777216` (16 MiB) | Ceiling for an Internet Archive item's `/metadata/` file manifest; raise it for items with very large file lists |
+| `GAMARR_IA_TORRENT_MAX_BYTES` | `8388608` (8 MiB) | Ceiling for an Internet Archive item's `.torrent` metainfo |
