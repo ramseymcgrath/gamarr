@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
 
 import type { CatalogRepository } from "@/features/catalog/ports";
-import type { SettingsRepository } from "@/features/settings/service";
 import {
   selectCandidateFiles,
+  selectItemTorrent,
   type SelectableFile
 } from "@/features/release-search/file-selection";
 import {
@@ -13,6 +13,7 @@ import {
 import {
   INTERNET_ARCHIVE_INDEXER_ID,
   INTERNET_ARCHIVE_INDEXER_NAME,
+  type ItemTorrent,
   type RankedRelease,
   type Release,
   type ReleaseSourceType
@@ -21,7 +22,9 @@ import { planPrimaryQuery } from "@/features/release-search/query-planner";
 import type {
   CandidateRepository,
   InternetArchiveSearchPort,
-  NewznabClientFactory
+  ListReleaseIndexersPort,
+  NewznabClientFactory,
+  TorrentClientConfiguredPort
 } from "@/features/release-search/ports";
 import { AppError, validationError } from "@/lib/errors";
 import {
@@ -56,10 +59,11 @@ function unsafeDownloadUrlWarning(
 
 interface ReleaseSearchDependencies {
   catalog: CatalogRepository;
-  settings: SettingsRepository;
+  listIndexers: ListReleaseIndexersPort;
   candidates: CandidateRepository;
   clientFactory: NewznabClientFactory;
   internetArchive?: InternetArchiveSearchPort;
+  torrentClientConfigured: TorrentClientConfiguredPort;
   now?: () => number;
   id?: () => string;
   overallTimeoutMs?: number;
@@ -100,6 +104,10 @@ export interface ReleaseSearchResponse {
 
 export interface CandidateFilesResponse {
   files: SelectableFile[];
+  /** Null when the item has not been derived and has no torrent. */
+  torrent: ItemTorrent | null;
+  /** Reported separately so an available torrent is not hidden when disabled. */
+  torrentClientConfigured: boolean;
 }
 
 export class ReleaseSearchService {
@@ -124,7 +132,7 @@ export class ReleaseSearchService {
     const conflictingAliases = this.dependencies.catalog.listPlatforms()
       .filter((candidate) => candidate.id !== platform.id)
       .flatMap((candidate) => candidate.aliases);
-    const indexers = this.dependencies.settings.listIndexers()
+    const indexers = this.dependencies.listIndexers()
       .filter((indexer) => indexer.enabled && indexer.deletedAt === null);
     const ranked: RankedRelease[] = [];
     const warnings: ReleaseSearchResponse["warnings"] = [];
@@ -330,7 +338,11 @@ export class ReleaseSearchService {
     // The item is addressed by the candidate's guid: the candidate ID is a
     // server-minted handle and means nothing upstream.
     const files = await internetArchive.listFiles(candidate.guid);
-    return { files: selectCandidateFiles(files) };
+    return {
+      files: selectCandidateFiles(files),
+      torrent: selectItemTorrent(files),
+      torrentClientConfigured: this.dependencies.torrentClientConfigured()
+    };
   }
 
   /**

@@ -211,7 +211,9 @@ describe("handleListCandidateFiles", () => {
       files: [
         { name: "big.zip", size: 20, format: "ZIP" },
         { name: "unknown.bin", size: null, format: "Binary" }
-      ]
+      ],
+      torrent: { name: "game_archive.torrent", size: 42 },
+      torrentClientConfigured: true
     }));
 
     const response = await handleListCandidateFiles(
@@ -229,7 +231,9 @@ describe("handleListCandidateFiles", () => {
       files: [
         { name: "big.zip", size: 20, format: "ZIP" },
         { name: "unknown.bin", size: null, format: "Binary" }
-      ]
+      ],
+      torrent: { name: "game_archive.torrent", size: 42 },
+      torrentClientConfigured: true
     });
   });
 

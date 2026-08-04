@@ -12,13 +12,14 @@ import { parseOriginPolicy } from "@/lib/trusted-mutation";
 
 export function releaseSearchDependencies() {
   const database = getDatabase();
+  const settings = new SqliteSettingsRepository(database);
   return {
     // Both release routes go through the service: candidate lookup and file
     // selection are domain policy, so no repository or integration client is
     // handed to a handler directly.
     service: new ReleaseSearchService({
       catalog: new SqliteCatalogRepository(database),
-      settings: new SqliteSettingsRepository(database),
+      listIndexers: () => settings.listIndexers(),
       candidates: new SqliteCandidateRepository(database),
       clientFactory: (indexer) => new NewznabClient({
         id: indexer.id,
@@ -32,7 +33,10 @@ export function releaseSearchDependencies() {
         maxMetadataBytes: byteLimitFromEnv(
           process.env.GAMARR_IA_METADATA_MAX_BYTES
         )
-      })
+      }),
+      torrentClientConfigured: () => Boolean(
+        settings.getQbittorrent()?.password
+      )
     }),
     policy: parseOriginPolicy(process.env.GAMARR_ALLOWED_ORIGINS ?? "", {
       trustedProxy: process.env.GAMARR_TRUST_PROXY === "true",
