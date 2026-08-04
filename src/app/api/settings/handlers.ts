@@ -48,6 +48,19 @@ export async function handlePutSabnzbd(
   }
 }
 
+export async function handlePutQbittorrent(
+  request: Request,
+  dependencies: MutationDependencies
+): Promise<Response> {
+  try {
+    assertTrustedMutation(request, dependencies.policy);
+    dependencies.service.saveQbittorrent(await request.json());
+    return Response.json(dependencies.service.getRedacted());
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+
 export async function handlePostIndexer(
   request: Request,
   dependencies: MutationDependencies
