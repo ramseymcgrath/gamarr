@@ -15,8 +15,10 @@ import {
 import {
   SabnzbdUploadError,
   type InternetArchiveDownloadConfig,
+  type InternetArchiveTorrentConfig,
   type NzbFetcherPort,
-  type SabnzbdPort
+  type SabnzbdPort,
+  TorrentAddError
 } from "@/features/downloads/port";
 import type { DownloadRepository } from "@/features/downloads/repository";
 import { INTERNET_ARCHIVE_INDEXER_NAME } from "@/features/release-search/models";
@@ -39,6 +41,7 @@ interface DownloadServiceDependencies {
   nzbFetcher: NzbFetcherPort;
   sabFactory: (settings: SabnzbdSettingsRecord) => SabnzbdPort;
   internetArchive?: InternetArchiveDownloadConfig;
+  internetArchiveTorrent?: InternetArchiveTorrentConfig;
   now?: () => number;
   id?: () => string;
   /**
@@ -91,7 +94,9 @@ function fingerprint(
 ): string {
   const identity = source === "internet-archive"
     ? [input.candidateId, input.gameId, input.platformId, selectedFileName(input)]
-    : [input.candidateId, input.gameId, input.platformId];
+    : source === "internet-archive-torrent"
+      ? [input.candidateId, input.gameId, input.platformId, "torrent"]
+      : [input.candidateId, input.gameId, input.platformId];
   return createHash("sha256")
     .update(JSON.stringify(identity))
     .digest("hex");
@@ -168,7 +173,9 @@ export class DownloadService {
     const candidate = this.dependencies.candidates.get(input.candidateId);
     if (!candidate) throw validationError("Release candidate has expired");
     if (candidate.source === "internet-archive") {
-      return this.submitInternetArchive(input, candidate);
+      return input.delivery === "torrent"
+        ? this.submitInternetArchiveTorrent(input, candidate)
+        : this.submitInternetArchive(input, candidate);
     }
     const requestFingerprint = fingerprint(input, candidate.source);
     const sabSettings = this.dependencies.settings.getSabnzbd();
@@ -276,6 +283,130 @@ export class DownloadService {
         failureDetail: rejected && error instanceof Error
           ? error.message
           : "SABnzbd acknowledgement was not confirmed",
+        updatedAt: this.now()
+      });
+    }
+  }
+
+  /**
+   * Internet Archive torrent path: claim a durable attempt, fetch bounded
+   * metainfo, and hand it to qBittorrent. qBittorrent owns the payload after
+   * submission, so this path deliberately has no direct-download heartbeat.
+   */
+  private async submitInternetArchiveTorrent(
+    input: SubmitDownloadInput,
+    candidate: ReleaseCandidateRecord
+  ): Promise<DownloadAttempt> {
+    if (input.fileName !== undefined) {
+      throw validationError(
+        "A torrent covers the whole item; do not select a file"
+      );
+    }
+    const config = this.dependencies.internetArchiveTorrent;
+    if (!config) {
+      throw validationError("Internet Archive torrents are not configured");
+    }
+    const client = config.client();
+    if (!client) throw validationError("qBittorrent is not configured");
+
+    const identifier = candidate.guid;
+    if (!isValidInternetArchiveIdentifier(identifier)) {
+      throw validationError("Release candidate is not usable; search again");
+    }
+    const torrent = await config.findTorrent(identifier);
+    if (!torrent) {
+      throw validationError("This item has no torrent; download a file instead");
+    }
+
+    const snapshot = JSON.parse(candidate.sourceSnapshot) as {
+      indexerName?: string;
+      origin?: string;
+    };
+    const timestamp = this.now();
+    const attemptId = this.id();
+    const sabMarker = `gamarr-${attemptId}`;
+    const claimed = this.dependencies.repository.claimSubmission({
+      library: {
+        id: `library-${input.gameId}-${input.platformId}`,
+        gameId: input.gameId,
+        platformId: input.platformId,
+        createdAt: timestamp,
+        updatedAt: timestamp
+      },
+      attempt: {
+        id: attemptId,
+        libraryEntryId: `library-${input.gameId}-${input.platformId}`,
+        submissionKey: input.submissionKey,
+        requestFingerprint: fingerprint(input, "internet-archive-torrent"),
+        status: "Pending",
+        source: "internet-archive-torrent",
+        releaseTitle: candidate.title,
+        indexerId: null,
+        indexerNameSnapshot: snapshot.indexerName
+          ?? INTERNET_ARCHIVE_INDEXER_NAME,
+        indexerUrlSnapshot: snapshot.origin ?? null,
+        newznabGuid: null,
+        iaFileName: null,
+        torrentHash: null,
+        size: candidate.size,
+        category: config.defaultCategory(),
+        sabnzbdConfigRevision: 0,
+        sabMarker,
+        sabJobId: null,
+        progress: 0,
+        failureDetail: null,
+        sabRequestStartedAt: null,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        completedAt: null
+      }
+    });
+    if (!claimed.created) {
+      return this.assertSameRequest(claimed.attempt, input);
+    }
+
+    let bytes: Uint8Array;
+    try {
+      bytes = await config.fetchTorrent(identifier, torrent.name);
+    } catch (error) {
+      return this.dependencies.repository.update(attemptId, {
+        status: "Failed",
+        failureDetail: error instanceof AppError
+          ? error.message
+          : "Torrent retrieval failed",
+        updatedAt: this.now()
+      });
+    }
+
+    const submittingAt = this.now();
+    this.dependencies.repository.update(attemptId, {
+      status: "Submitting",
+      sabRequestStartedAt: submittingAt,
+      updatedAt: submittingAt
+    });
+    try {
+      const result = await client.add({
+        torrent: bytes,
+        filename: torrent.name,
+        category: config.defaultCategory(),
+        tag: sabMarker
+      });
+      return this.dependencies.repository.update(attemptId, {
+        status: "Queued",
+        torrentHash: result.hash,
+        updatedAt: this.now()
+      });
+    } catch (error) {
+      if (error instanceof TorrentAddError) {
+        return this.dependencies.repository.update(attemptId, {
+          status: error.outcome === "rejected" ? "Failed" : "Unknown",
+          failureDetail: error.message,
+          updatedAt: this.now()
+        });
+      }
+      return this.dependencies.repository.update(attemptId, {
+        status: "Unknown",
+        failureDetail: "qBittorrent acknowledgement was not confirmed",
         updatedAt: this.now()
       });
     }
@@ -519,7 +650,15 @@ export class DownloadService {
     attempt: DownloadAttempt,
     input: SubmitDownloadInput
   ): DownloadAttempt {
-    if (attempt.requestFingerprint !== fingerprint(input, attempt.source)) {
+    const changedInternetArchiveDelivery =
+      (attempt.source === "internet-archive-torrent"
+        && input.delivery !== "torrent")
+      || (attempt.source === "internet-archive"
+        && input.delivery === "torrent");
+    if (
+      changedInternetArchiveDelivery
+      || attempt.requestFingerprint !== fingerprint(input, attempt.source)
+    ) {
       throw new AppError(
         "CONFLICT",
         409,
