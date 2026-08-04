@@ -4,11 +4,13 @@ import type { Database } from "@/db/client";
 import {
   igdbSettings,
   indexers,
+  qbittorrentSettings,
   sabnzbdSettings
 } from "@/db/schema";
 import type {
   IgdbSettingsRecord,
   IndexerRecord,
+  QbittorrentSettingsRecord,
   SabnzbdSettingsRecord
 } from "@/features/settings/models";
 import type { SettingsRepository } from "@/features/settings/service";
@@ -85,6 +87,43 @@ export class SqliteSettingsRepository implements SettingsRepository {
     this.database.update(sabnzbdSettings)
       .set({ lastTestStatus: status, lastTestedAt: testedAt })
       .where(eq(sabnzbdSettings.id, 1))
+      .run();
+  }
+
+  getQbittorrent(): QbittorrentSettingsRecord | null {
+    const row = this.database
+      .select()
+      .from(qbittorrentSettings)
+      .where(eq(qbittorrentSettings.id, 1))
+      .get();
+    if (!row) return null;
+    return {
+      baseUrl: row.baseUrl,
+      username: row.username,
+      password: row.password,
+      defaultCategory: row.defaultCategory,
+      lastTestStatus: row.lastTestStatus,
+      lastTestedAt: row.lastTestedAt,
+      configRevision: row.configRevision,
+      updatedAt: row.updatedAt
+    };
+  }
+
+  saveQbittorrent(value: QbittorrentSettingsRecord): void {
+    this.database
+      .insert(qbittorrentSettings)
+      .values({ id: 1, ...value })
+      .onConflictDoUpdate({
+        target: qbittorrentSettings.id,
+        set: value
+      })
+      .run();
+  }
+
+  recordQbittorrentTest(status: string, testedAt: number): void {
+    this.database.update(qbittorrentSettings)
+      .set({ lastTestStatus: status, lastTestedAt: testedAt })
+      .where(eq(qbittorrentSettings.id, 1))
       .run();
   }
 

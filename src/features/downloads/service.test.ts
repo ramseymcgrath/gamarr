@@ -112,6 +112,9 @@ const settings: SettingsRepository = {
     updatedAt: 1
   }),
   saveSabnzbd: () => undefined,
+  getQbittorrent: () => null,
+  saveQbittorrent: () => undefined,
+  recordQbittorrentTest: () => undefined,
   listIndexers: () => [{
     id: "indexer",
     name: "Indexer",

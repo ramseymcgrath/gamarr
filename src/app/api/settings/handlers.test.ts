@@ -4,6 +4,7 @@ import { SettingsService, type SettingsRepository } from "@/features/settings/se
 import type {
   IgdbSettingsRecord,
   IndexerRecord,
+  QbittorrentSettingsRecord,
   SabnzbdSettingsRecord
 } from "@/features/settings/models";
 import {
@@ -21,6 +22,9 @@ class MemoryRepository implements SettingsRepository {
   saveIgdb = (value: IgdbSettingsRecord) => { this.igdb = value; };
   getSabnzbd = (): SabnzbdSettingsRecord | null => null;
   saveSabnzbd = () => undefined;
+  getQbittorrent = (): QbittorrentSettingsRecord | null => null;
+  saveQbittorrent = () => undefined;
+  recordQbittorrentTest = () => undefined;
   listIndexers = (): IndexerRecord[] => this.indexers;
   saveIndexer = (value: IndexerRecord) => {
     const index = this.indexers.findIndex((item) => item.id === value.id);
@@ -88,6 +92,7 @@ describe("settings HTTP handlers", () => {
     expect(await response.json()).toEqual({
       igdb: null,
       indexers: [],
+      qbittorrent: null,
       sabnzbd: null
     });
   });

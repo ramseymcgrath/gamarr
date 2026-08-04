@@ -24,6 +24,7 @@ describe("SettingsScreen", () => {
         lastTestedAt: null,
         configRevision: 1
       },
+      qbittorrent: null,
       indexers: []
     }} />);
 

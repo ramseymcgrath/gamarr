@@ -27,6 +27,16 @@ export const sabnzbdSettingsInputSchema = z.object({
 
 export type SabnzbdSettingsInput = z.infer<typeof sabnzbdSettingsInputSchema>;
 
+export const qbittorrentSettingsInputSchema = z.object({
+  baseUrl: z.url(),
+  username: z.string().trim().min(1).max(255),
+  password: secretUpdateSchema,
+  defaultCategory: z.string().trim().max(255).nullable().default(null)
+});
+
+export type QbittorrentSettingsInput =
+  z.infer<typeof qbittorrentSettingsInputSchema>;
+
 export const indexerInputSchema = z.object({
   id: z.string().min(1).optional(),
   name: z.string().trim().min(1).max(255),
@@ -53,6 +63,17 @@ export interface SabnzbdSettingsRecord {
   apiKey: string;
   defaultCategory: string | null;
   maxNzbBytes: number;
+  lastTestStatus: string | null;
+  lastTestedAt: number | null;
+  configRevision: number;
+  updatedAt: number;
+}
+
+export interface QbittorrentSettingsRecord {
+  baseUrl: string;
+  username: string;
+  password: string;
+  defaultCategory: string | null;
   lastTestStatus: string | null;
   lastTestedAt: number | null;
   configRevision: number;
@@ -93,6 +114,16 @@ export interface PublicSabnzbdSettings {
   configRevision: number;
 }
 
+export interface PublicQbittorrentSettings {
+  baseUrl: string;
+  username: string;
+  hasPassword: boolean;
+  defaultCategory: string | null;
+  lastTestStatus: string | null;
+  lastTestedAt: number | null;
+  configRevision: number;
+}
+
 export interface PublicIndexer {
   id: string;
   name: string;
@@ -109,5 +140,6 @@ export interface PublicIndexer {
 export interface PublicSettings {
   igdb: PublicIgdbSettings | null;
   sabnzbd: PublicSabnzbdSettings | null;
+  qbittorrent: PublicQbittorrentSettings | null;
   indexers: PublicIndexer[];
 }
