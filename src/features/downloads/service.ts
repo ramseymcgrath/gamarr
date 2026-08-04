@@ -125,6 +125,42 @@ function statusFromJob(
 }
 
 /**
+ * qBittorrent states, mapped the same way SABnzbd history is: only
+ * `Completed` and `Failed` are terminal, and an unrecognised state returns
+ * null meaning "no verdict yet". Writing a terminal status on a state this
+ * table does not know would be permanent, because reconcile never revisits a
+ * Completed or Failed attempt.
+ */
+const torrentStatuses: Readonly<Record<string, DownloadStatus>> = {
+  uploading: "Completed",
+  stalledUP: "Completed",
+  pausedUP: "Completed",
+  queuedUP: "Completed",
+  forcedUP: "Completed",
+  checkingUP: "Completed",
+  error: "Failed",
+  missingFiles: "Failed",
+  downloading: "Downloading",
+  stalledDL: "Downloading",
+  metaDL: "Downloading",
+  forcedDL: "Downloading",
+  checkingDL: "Downloading",
+  allocating: "Downloading",
+  queuedDL: "Queued",
+  pausedDL: "Queued",
+  checkingResumeData: "Queued",
+  moving: "Queued"
+};
+
+function statusFromTorrent(state: string): DownloadStatus | null {
+  return torrentStatuses[state] ?? null;
+}
+
+function torrentProgress(progress: number): number {
+  return Math.min(100, Math.max(0, Math.round(progress)));
+}
+
+/**
  * True only when the upload provably never reached SABnzbd's queue. Anything
  * else — a timeout, an aborted connection, a 5xx, an unreadable acknowledgement
  * — may have been accepted, so it must stay Unknown rather than terminal.
@@ -575,21 +611,27 @@ export class DownloadService {
   }
 
   async reconcile(ids?: string[]): Promise<DownloadAttempt[]> {
-    const settings = this.dependencies.settings.getSabnzbd();
-    if (!settings?.apiKey) return this.selected(ids);
-    const sab = this.dependencies.sabFactory(settings);
-    let queue;
-    let history;
-    try {
-      [queue, history] = await Promise.all([
-        sab.getQueue(),
-        sab.getHistory()
-      ]);
-    } catch {
-      return this.selected(ids);
-    }
+    const attempts = this.selected(ids);
     const timestamp = this.now();
-    for (const attempt of this.selected(ids)) {
+    await Promise.allSettled([
+      this.reconcileSabnzbd(attempts, timestamp),
+      this.reconcileTorrents(attempts, timestamp)
+    ]);
+    return this.selected(ids);
+  }
+
+  private async reconcileSabnzbd(
+    attempts: DownloadAttempt[],
+    timestamp: number
+  ): Promise<void> {
+    const settings = this.dependencies.settings.getSabnzbd();
+    if (!settings?.apiKey) return;
+    const sab = this.dependencies.sabFactory(settings);
+    const [queue, history] = await Promise.all([
+      sab.getQueue(),
+      sab.getHistory()
+    ]);
+    for (const attempt of attempts) {
       if (isTerminalDownloadStatus(attempt.status)) continue;
       // Direct downloads own their status already; there is no SABnzbd job
       // to reconcile them against.
@@ -613,7 +655,37 @@ export class DownloadService {
         updatedAt: timestamp
       });
     }
-    return this.selected(ids);
+  }
+
+  private async reconcileTorrents(
+    attempts: DownloadAttempt[],
+    timestamp: number
+  ): Promise<void> {
+    const client = this.dependencies.internetArchiveTorrent?.client();
+    if (!client) return;
+    const torrents = await client.list();
+    for (const attempt of attempts) {
+      if (isTerminalDownloadStatus(attempt.status)) continue;
+      if (attempt.source !== "internet-archive-torrent") continue;
+      const torrent = attempt.torrentHash === null
+        ? torrents.find((job) => job.tags.includes(attempt.sabMarker))
+        : torrents.find((job) => job.hash === attempt.torrentHash);
+      if (!torrent) continue;
+      const status = statusFromTorrent(torrent.state);
+      if (status === null) continue;
+      this.dependencies.repository.update(attempt.id, {
+        status,
+        progress: status === "Completed"
+          ? 100
+          : torrentProgress(torrent.progress),
+        ...(attempt.torrentHash === null
+          ? { torrentHash: torrent.hash }
+          : {}),
+        failureDetail: status === "Failed" ? torrent.state : null,
+        completedAt: status === "Completed" ? timestamp : null,
+        updatedAt: timestamp
+      });
+    }
   }
 
   recoverStaleSubmissions(maxAgeMs = 60_000): void {

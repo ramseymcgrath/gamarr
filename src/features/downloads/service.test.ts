@@ -7,7 +7,8 @@ import type {
 import { isTerminalDownloadStatus } from "@/features/downloads/models";
 import {
   SabnzbdUploadError,
-  TorrentAddError
+  TorrentAddError,
+  type TorrentJob
 } from "@/features/downloads/port";
 import type { DownloadRepository } from "@/features/downloads/repository";
 import { DownloadService } from "@/features/downloads/service";
@@ -726,6 +727,11 @@ describe("DownloadService Internet Archive submissions", () => {
     clientConfigured?: boolean;
     addError?: unknown;
     fetchError?: unknown;
+    torrents?: TorrentJob[];
+    listError?: unknown;
+    sabConfigured?: boolean;
+    sabError?: unknown;
+    now?: () => number;
   } = {}) => {
     const repository = new MemoryDownloads();
     const add = vi.fn(async () => {
@@ -739,17 +745,24 @@ describe("DownloadService Internet Archive submissions", () => {
       if (overrides.fetchError !== undefined) throw overrides.fetchError;
       return new Uint8Array([1, 2, 3]);
     });
+    const list = vi.fn(async () => {
+      if (overrides.listError !== undefined) throw overrides.listError;
+      return overrides.torrents ?? [];
+    });
     const scheduleHeartbeat = vi.fn(() => () => undefined);
     const service = new DownloadService({
       repository,
       candidates: iaCandidates,
-      settings: noSabSettings,
+      settings: overrides.sabConfigured ? settings : noSabSettings,
       nzbFetcher: { fetch: async () => new Uint8Array() },
       sabFactory: () => ({
         upload: async () => {
           throw new Error("SABnzbd must not be used for torrent submissions");
         },
-        getQueue: async () => [],
+        getQueue: async () => {
+          if (overrides.sabError !== undefined) throw overrides.sabError;
+          return [];
+        },
         getHistory: async () => [],
         testConnection: async () => undefined
       }),
@@ -758,24 +771,245 @@ describe("DownloadService Internet Archive submissions", () => {
         fetchTorrent,
         client: () => overrides.clientConfigured === false ? null : {
           add,
-          list: async () => [],
+          list,
           testConnection: async () => undefined
         },
         defaultCategory: () => "archive"
       },
       id: () => "attempt-1",
-      now: () => 1_000,
+      now: overrides.now ?? (() => 1_000),
       scheduleHeartbeat
     });
     return {
       service,
       repository,
       add,
+      list,
       findTorrent,
       fetchTorrent,
       scheduleHeartbeat
     };
   };
+
+  const queuedTorrent = async (overrides: Parameters<typeof torrentSetup>[0] = {}) => {
+    const torrents: TorrentJob[] = [];
+    const setup = torrentSetup({ ...overrides, torrents });
+    const attempt = await setup.service.submit(torrentInput());
+    return { ...setup, attempt, torrents };
+  };
+
+  it.each([
+    ["uploading", "Completed", 100],
+    ["stalledUP", "Completed", 100],
+    ["pausedUP", "Completed", 100],
+    ["queuedUP", "Completed", 100],
+    ["forcedUP", "Completed", 100],
+    ["checkingUP", "Completed", 100],
+    ["error", "Failed", 50],
+    ["missingFiles", "Failed", 50],
+    ["downloading", "Downloading", 50],
+    ["stalledDL", "Downloading", 50],
+    ["metaDL", "Downloading", 50],
+    ["forcedDL", "Downloading", 50],
+    ["checkingDL", "Downloading", 50],
+    ["allocating", "Downloading", 50],
+    ["queuedDL", "Queued", 50],
+    ["pausedDL", "Queued", 50],
+    ["checkingResumeData", "Queued", 50],
+    ["moving", "Queued", 50]
+  ] as const)("maps torrent state %s to %s", async (
+    state,
+    expectedStatus,
+    expectedProgress
+  ) => {
+    const { service, attempt, torrents } = await queuedTorrent();
+    torrents.push({
+      hash: "abc123",
+      tags: [attempt.sabMarker],
+      state,
+      progress: 50
+    });
+
+    const [result] = await service.reconcile([attempt.id]);
+
+    expect(result).toMatchObject({
+      status: expectedStatus,
+      progress: expectedProgress
+    });
+  });
+
+  it("leaves an unrecognised torrent state untouched", async () => {
+    const { service, attempt, torrents, list } = await queuedTorrent();
+    torrents.push({
+      hash: "abc123",
+      tags: [attempt.sabMarker],
+      state: "someFutureState",
+      progress: 50
+    });
+
+    const [result] = await service.reconcile([attempt.id]);
+
+    expect(result).toMatchObject({
+      status: "Queued",
+      progress: 0,
+      failureDetail: null,
+      completedAt: null
+    });
+    expect(list).toHaveBeenCalledOnce();
+  });
+
+  it("matches by tag and records the hash when none was returned by add", async () => {
+    const { service, attempt, torrents } = await queuedTorrent({ hash: null });
+    torrents.push({
+      hash: "abc123",
+      tags: ["other", attempt.sabMarker],
+      state: "uploading",
+      progress: 75
+    });
+
+    const [result] = await service.reconcile([attempt.id]);
+
+    expect(result).toMatchObject({
+      status: "Completed",
+      progress: 100,
+      torrentHash: "abc123",
+      failureDetail: null,
+      completedAt: 1_000
+    });
+  });
+
+  it("does not fall back to a matching tag when a different hash is recorded", async () => {
+    const { service, attempt, torrents, list } = await queuedTorrent();
+    torrents.push({
+      hash: "different-hash",
+      tags: [attempt.sabMarker],
+      state: "uploading",
+      progress: 100
+    });
+
+    const [result] = await service.reconcile([attempt.id]);
+
+    expect(result?.status).toBe("Queued");
+    expect(list).toHaveBeenCalledOnce();
+  });
+
+  it("clamps torrent progress to the attempt constraint", async () => {
+    const { service, attempt, torrents } = await queuedTorrent();
+    torrents.push({
+      hash: "abc123",
+      tags: [],
+      state: "downloading",
+      progress: 125
+    });
+
+    const [result] = await service.reconcile([attempt.id]);
+
+    expect(result).toMatchObject({ status: "Downloading", progress: 100 });
+  });
+
+  it("reconciles torrents with SABnzbd entirely unconfigured", async () => {
+    const { service, attempt, torrents } = await queuedTorrent();
+    torrents.push({
+      hash: "abc123",
+      tags: [attempt.sabMarker],
+      state: "uploading",
+      progress: 100
+    });
+
+    const [result] = await service.reconcile([attempt.id]);
+
+    expect(result?.status).toBe("Completed");
+  });
+
+  it("reconciles torrents when SABnzbd reconciliation fails", async () => {
+    const { service, attempt, torrents } = await queuedTorrent({
+      sabConfigured: true,
+      sabError: new Error("SABnzbd unavailable")
+    });
+    torrents.push({
+      hash: "abc123",
+      tags: [attempt.sabMarker],
+      state: "uploading",
+      progress: 100
+    });
+
+    const [result] = await service.reconcile([attempt.id]);
+
+    expect(result?.status).toBe("Completed");
+  });
+
+  it("still reconciles SABnzbd when torrent reconciliation fails", async () => {
+    const repository = new MemoryDownloads();
+    const list = vi.fn(async () => {
+      throw new Error("qBittorrent unavailable");
+    });
+    const service = new DownloadService({
+      repository,
+      candidates,
+      settings,
+      nzbFetcher: { fetch: async () => new Uint8Array([1]) },
+      sabFactory: () => ({
+        upload: async () => ({ jobId: "job" }),
+        getQueue: async () => [],
+        getHistory: async () => [{
+          jobId: "job",
+          marker: "gamarr-attempt-1",
+          status: "Completed",
+          progress: 100
+        }],
+        testConnection: async () => undefined
+      }),
+      internetArchiveTorrent: {
+        findTorrent: async () => null,
+        fetchTorrent: async () => new Uint8Array(),
+        client: () => ({
+          add: async () => ({ hash: null }),
+          list,
+          testConnection: async () => undefined
+        }),
+        defaultCategory: () => null
+      },
+      id: () => "attempt-1",
+      now: () => 2_000
+    });
+    const attempt = await service.submit(input({ submissionKey: "qbit-down" }));
+
+    const [result] = await service.reconcile([attempt.id]);
+
+    expect(result?.status).toBe("Completed");
+    expect(list).toHaveBeenCalledOnce();
+  });
+
+  it("swallows a torrent lookup failure and leaves its attempt reconcilable", async () => {
+    const { service, attempt, list } = await queuedTorrent({
+      listError: new Error("qBittorrent unavailable")
+    });
+
+    const [result] = await service.reconcile([attempt.id]);
+
+    expect(result?.status).toBe("Queued");
+    expect(list).toHaveBeenCalledOnce();
+  });
+
+  it("does not fail an in-flight torrent attempt during stale recovery", async () => {
+    const now = 1_000_000;
+    const { service, repository, attempt } = await queuedTorrent({
+      now: () => now
+    });
+    repository.update(attempt.id, {
+      status: "Downloading",
+      progress: 50,
+      updatedAt: now - 120_000
+    });
+
+    service.recoverStaleSubmissions(0);
+
+    expect(repository.get(attempt.id)).toMatchObject({
+      status: "Downloading",
+      progress: 50,
+      failureDetail: null
+    });
+  });
 
   it("submits a torrent, records its hash, and does not start a heartbeat", async () => {
     const {
