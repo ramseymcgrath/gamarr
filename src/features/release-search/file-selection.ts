@@ -10,7 +10,10 @@
  * "Game.zip" — nothing here trims or normalises.
  */
 
-import type { InternetArchiveFile } from "@/features/release-search/models";
+import type {
+  InternetArchiveFile,
+  ItemTorrent
+} from "@/features/release-search/models";
 import { isSafeInternetArchiveFileName } from "@/integrations/internet-archive/path-policy";
 
 /**
@@ -46,4 +49,24 @@ export function selectCandidateFiles(
     .sort((left, right) => (right.size ?? 0) - (left.size ?? 0))
     .slice(0, MAX_SELECTABLE_FILES)
     .map(({ name, size, format }) => ({ name, size, format }));
+}
+
+/**
+ * Internet Archive derives one `{identifier}_archive.torrent` per item,
+ * covering the entire item rather than any single file. It lives in the
+ * manifest as `source: "metadata"`, which is exactly why
+ * `selectCandidateFiles` never returns it — downloading it as a file would
+ * save a metainfo stub, not a game.
+ *
+ * Items that have not been derived have no torrent at all, so absence is a
+ * normal answer and never an error.
+ */
+export function selectItemTorrent(
+  files: InternetArchiveFile[]
+): ItemTorrent | null {
+  const found = files.find((file) =>
+    file.source === "metadata"
+    && file.name.endsWith("_archive.torrent")
+    && isSafeInternetArchiveFileName(file.name));
+  return found ? { name: found.name, size: found.size } : null;
 }

@@ -1,7 +1,17 @@
 import { describe, expect, it } from "vitest";
 
-import { selectCandidateFiles } from "@/features/release-search/file-selection";
+import {
+  selectCandidateFiles,
+  selectItemTorrent
+} from "@/features/release-search/file-selection";
 import type { InternetArchiveFile } from "@/features/release-search/models";
+
+const torrentFile = {
+  name: "doom2_archive.torrent",
+  size: 41_234,
+  format: "Archive BitTorrent",
+  source: "metadata"
+};
 
 describe("selectCandidateFiles", () => {
   it("lists original uploads largest-first and hides bookkeeping files", () => {
@@ -91,5 +101,56 @@ describe("selectCandidateFiles", () => {
       size: 51,
       format: "ZIP"
     });
+  });
+});
+
+describe("selectItemTorrent", () => {
+  it("finds the item torrent in the manifest", () => {
+    expect(selectItemTorrent([
+      { name: "doom2.zip", size: 12_000, format: "ZIP", source: "original" },
+      torrentFile
+    ])).toEqual({ name: "doom2_archive.torrent", size: 41_234 });
+  });
+
+  it("returns null when the item has not been derived", () => {
+    expect(selectItemTorrent([
+      { name: "doom2.zip", size: 12_000, format: "ZIP", source: "original" }
+    ])).toBeNull();
+  });
+
+  it("rejects a torrent whose name fails the path policy", () => {
+    expect(selectItemTorrent([{
+      name: "../escape_archive.torrent",
+      size: 1,
+      format: null,
+      source: "metadata"
+    }])).toBeNull();
+  });
+
+  it("returns the torrent name verbatim", () => {
+    expect(selectItemTorrent([{
+      name: " doom2_archive.torrent",
+      size: 1,
+      format: "Archive BitTorrent",
+      source: "metadata"
+    }])).toEqual({ name: " doom2_archive.torrent", size: 1 });
+  });
+
+  it("never lists the torrent among selectable files", () => {
+    const files = selectCandidateFiles([
+      { name: "doom2.zip", size: 12_000, format: "ZIP", source: "original" },
+      torrentFile
+    ]);
+
+    expect(files.map((file) => file.name)).toEqual(["doom2.zip"]);
+  });
+
+  it("still excludes the torrent when the item has no originals", () => {
+    const files = selectCandidateFiles([
+      { name: "doom2.iso", size: 900, format: "ISO", source: "derivative" },
+      torrentFile
+    ]);
+
+    expect(files.map((file) => file.name)).toEqual(["doom2.iso"]);
   });
 });

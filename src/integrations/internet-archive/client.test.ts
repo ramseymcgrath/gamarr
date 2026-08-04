@@ -264,3 +264,121 @@ describe("InternetArchiveClient response ceilings", () => {
     await expect(client.listFiles("huge-item")).resolves.toHaveLength(12_000);
   });
 });
+
+describe("InternetArchiveClient torrent fetch", () => {
+  it("returns torrent bytes and preserves the file name verbatim in the URL", async () => {
+    const request = vi.fn<(input: RequestInfo | URL) => Promise<Response>>(
+      async () => new Response(
+        new Uint8Array([1, 2, 3]),
+        { headers: { "content-type": "application/x-bittorrent" } }
+      )
+    );
+    const client = new InternetArchiveClient({ fetch: request });
+
+    const bytes = await client.fetchTorrent(
+      "game-item",
+      " game_archive.torrent ",
+      1024
+    );
+
+    expect(bytes).toEqual(new Uint8Array([1, 2, 3]));
+    const url = new URL(String(request.mock.calls[0]?.[0]));
+    expect(url.pathname).toBe(
+      "/download/game-item/%20game_archive.torrent%20"
+    );
+  });
+
+  it("rejects a torrent body that exceeds the byte ceiling", async () => {
+    const request = vi.fn(async () => new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(new Uint8Array(6));
+        controller.enqueue(new Uint8Array(6));
+        controller.close();
+      }
+    })));
+    const client = new InternetArchiveClient({ fetch: request });
+
+    await expect(client.fetchTorrent(
+      "game-item",
+      "game-item_archive.torrent",
+      10
+    )).rejects.toMatchObject({
+      code: "UNAVAILABLE",
+      status: 502,
+      message: "Internet Archive torrent exceeded the size limit"
+    });
+  });
+
+  it("rejects a failed torrent response with a safe AppError", async () => {
+    const request = vi.fn(async () => new Response("upstream detail", {
+      status: 503
+    }));
+    const client = new InternetArchiveClient({ fetch: request });
+
+    await expect(client.fetchTorrent(
+      "game-item",
+      "game-item_archive.torrent",
+      1024
+    )).rejects.toMatchObject({
+      code: "UNAVAILABLE",
+      status: 502,
+      message: "Internet Archive torrent retrieval failed"
+    });
+  });
+
+  it("follows a redirect to an archive.org node over HTTPS", async () => {
+    const request = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.hostname === "archive.org") {
+        return new Response(null, {
+          status: 302,
+          headers: {
+            location: "https://ia800300.us.archive.org/0/items/game-item/"
+              + "game-item_archive.torrent"
+          }
+        });
+      }
+      return new Response(new Uint8Array([9, 8, 7]));
+    });
+    const client = new InternetArchiveClient({ fetch: request });
+
+    await expect(client.fetchTorrent(
+      "game-item",
+      "game-item_archive.torrent",
+      1024
+    )).resolves.toEqual(new Uint8Array([9, 8, 7]));
+    expect(new URL(String(request.mock.calls[1]?.[0])).hostname)
+      .toBe("ia800300.us.archive.org");
+  });
+
+  it("rejects a redirect away from archive.org", async () => {
+    const request = vi.fn(async () => new Response(null, {
+      status: 302,
+      headers: { location: "https://evil.example/steal" }
+    }));
+    const client = new InternetArchiveClient({ fetch: request });
+
+    await expect(client.fetchTorrent(
+      "game-item",
+      "game-item_archive.torrent",
+      1024
+    )).rejects.toMatchObject({
+      code: "UNAVAILABLE",
+      status: 502,
+      message: "Internet Archive returned an unsafe redirect"
+    });
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects an unsafe identifier before any request", async () => {
+    const request = vi.fn(async () => new Response(new Uint8Array([1])));
+    const client = new InternetArchiveClient({ fetch: request });
+
+    await expect(client.fetchTorrent(
+      "../bad",
+      "game-item_archive.torrent",
+      1024
+    )).rejects.toMatchObject({ code: "VALIDATION" });
+    expect(request).not.toHaveBeenCalled();
+  });
+});
