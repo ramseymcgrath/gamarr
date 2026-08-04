@@ -18,6 +18,15 @@ interface CandidateFile {
   format: string | null;
 }
 
+interface ItemTorrent {
+  name: string;
+  size: number | null;
+}
+
+type DownloadSelection =
+  | { kind: "torrent" }
+  | { kind: "file"; name: string };
+
 function formatBytes(value: number | null): string {
   if (value === null) return "size unknown";
   const units = ["B", "KB", "MB", "GB", "TB"];
@@ -56,8 +65,10 @@ export function DownloadDialog({
   >("confirm");
   const [detail, setDetail] = useState<string | null>(null);
   const [files, setFiles] = useState<CandidateFile[] | null>(null);
+  const [torrent, setTorrent] = useState<ItemTorrent | null>(null);
+  const [torrentClientConfigured, setTorrentClientConfigured] = useState(false);
   const [filesError, setFilesError] = useState<string | null>(null);
-  const [selectedFile, setSelectedFile] = useState<string | null>(null);
+  const [selection, setSelection] = useState<DownloadSelection | null>(null);
   const [reloadToken, setReloadToken] = useState(0);
 
   // Internet Archive items bundle many files; the payload choice is part of
@@ -67,14 +78,18 @@ export function DownloadDialog({
     let cancelled = false;
     const load = async () => {
       setFiles(null);
+      setTorrent(null);
+      setTorrentClientConfigured(false);
       setFilesError(null);
-      setSelectedFile(null);
+      setSelection(null);
       try {
         const response = await fetch(
           `/api/releases/files?candidateId=${encodeURIComponent(candidateId)}`
         );
         const body = await response.json() as {
           files?: CandidateFile[];
+          torrent?: ItemTorrent | null;
+          torrentClientConfigured?: boolean;
           error?: { message?: string };
         };
         if (!response.ok) {
@@ -85,9 +100,12 @@ export function DownloadDialog({
         if (cancelled) return;
         const items = body.files ?? [];
         setFiles(items);
+        setTorrent(body.torrent ?? null);
+        setTorrentClientConfigured(body.torrentClientConfigured ?? false);
         // The endpoint already sorts largest-first, so the preselection is
-        // the most likely payload, and it remains only a default.
-        setSelectedFile(items[0]?.name ?? null);
+        // the most likely payload. Keep the established direct-download
+        // gesture even when the item also offers a torrent.
+        setSelection(items[0] ? { kind: "file", name: items[0].name } : null);
       } catch (error) {
         if (!cancelled) {
           setFilesError(error instanceof Error
@@ -114,7 +132,11 @@ export function DownloadDialog({
           candidateId,
           gameId,
           platformId,
-          ...(isArchive && selectedFile ? { fileName: selectedFile } : {})
+          ...(isArchive && selection?.kind === "torrent"
+            ? { delivery: "torrent" as const }
+            : isArchive && selection?.kind === "file"
+              ? { delivery: "file" as const, fileName: selection.name }
+              : {})
         })
       });
       const body = await response.json();
@@ -147,9 +169,11 @@ export function DownloadDialog({
                 title={title}
                 indexerName={indexerName}
                 files={files}
+                torrent={torrent}
+                torrentClientConfigured={torrentClientConfigured}
                 filesError={filesError}
-                selectedFile={selectedFile}
-                onSelectFile={setSelectedFile}
+                selection={selection}
+                onSelect={setSelection}
                 onRetry={() => setReloadToken((value) => value + 1)}
                 submitting={state === "submitting"}
                 onSubmit={() => void submit()}
@@ -175,7 +199,12 @@ export function DownloadDialog({
               </>
             )
           ) : (
-            <ResultState state={state} detail={detail} isArchive={isArchive} />
+            <ResultState
+              state={state}
+              detail={detail}
+              isArchive={isArchive}
+              isTorrent={isArchive && selection?.kind === "torrent"}
+            />
           )}
         </Dialog.Content>
       </Dialog.Portal>
@@ -187,9 +216,11 @@ function ArchiveConfirm({
   title,
   indexerName,
   files,
+  torrent,
+  torrentClientConfigured,
   filesError,
-  selectedFile,
-  onSelectFile,
+  selection,
+  onSelect,
   onRetry,
   submitting,
   onSubmit
@@ -197,20 +228,23 @@ function ArchiveConfirm({
   title: string;
   indexerName: string;
   files: CandidateFile[] | null;
+  torrent: ItemTorrent | null;
+  torrentClientConfigured: boolean;
   filesError: string | null;
-  selectedFile: string | null;
-  onSelectFile: (fileName: string) => void;
+  selection: DownloadSelection | null;
+  onSelect: (selection: DownloadSelection) => void;
   onRetry: () => void;
   submitting: boolean;
   onSubmit: () => void;
 }) {
+  const torrentSelected = selection?.kind === "torrent";
   return (
     <>
       <p className="eyebrow">CONFIRM DOWNLOAD</p>
       <Dialog.Title>Download from Internet Archive?</Dialog.Title>
       <Dialog.Description>
-        Gamarr will download the selected file from <strong>{indexerName}</strong>
-        {" "}and save it on this machine. Track progress in Activity.
+        Choose a file to save from <strong>{indexerName}</strong>, or send the
+        {" "}entire item to qBittorrent. Track progress in Activity.
       </Dialog.Description>
       <div className="dialog-release mono">{title}</div>
       {files === null && filesError === null && (
@@ -233,23 +267,44 @@ function ArchiveConfirm({
           </div>
         </>
       )}
-      {files !== null && files.length === 0 && filesError === null && (
+      {files !== null && files.length === 0 && torrent === null && filesError === null && (
         <p className="file-picker-status" role="status">
           This item has no downloadable files.
         </p>
       )}
-      {files !== null && files.length > 0 && (
+      {files !== null && (files.length > 0 || torrent !== null) && (
         <>
           <fieldset className="file-picker">
-            <legend>Select a file to download</legend>
+            <legend>Select what to download</legend>
+            {torrent !== null && (
+              <>
+                <label className="file-option">
+                  <input
+                    type="radio"
+                    name="internet-archive-download"
+                    value="torrent"
+                    checked={torrentSelected}
+                    disabled={!torrentClientConfigured}
+                    onChange={() => onSelect({ kind: "torrent" })}
+                  />
+                  <span className="file-option-name">Entire item (torrent)</span>
+                  <span className="file-option-meta mono">
+                    {torrentClientConfigured
+                      ? `${formatBytes(torrent.size)} · via qBittorrent`
+                      : "qBittorrent is not configured"}
+                  </span>
+                </label>
+                {files.length > 0 && <hr className="file-picker-divider" />}
+              </>
+            )}
             {files.map((file) => (
               <label className="file-option" key={file.name}>
                 <input
                   type="radio"
-                  name="internet-archive-file"
+                  name="internet-archive-download"
                   value={file.name}
-                  checked={selectedFile === file.name}
-                  onChange={() => onSelectFile(file.name)}
+                  checked={selection?.kind === "file" && selection.name === file.name}
+                  onChange={() => onSelect({ kind: "file", name: file.name })}
                 />
                 <span className="file-option-name">{file.name}</span>
                 <span className="file-option-meta mono">
@@ -264,9 +319,11 @@ function ArchiveConfirm({
             <Dialog.Close asChild>
               <Button variant="secondary">Cancel</Button>
             </Dialog.Close>
-            <Button onClick={onSubmit} disabled={submitting || !selectedFile}>
+            <Button onClick={onSubmit} disabled={submitting || selection === null}>
               <Download aria-hidden="true" />
-              {submitting ? "Starting download…" : "Download file"}
+              {submitting
+                ? torrentSelected ? "Sending to qBittorrent…" : "Starting download…"
+                : torrentSelected ? "Send to qBittorrent" : "Download file"}
             </Button>
           </div>
         </>
@@ -278,11 +335,13 @@ function ArchiveConfirm({
 function ResultState({
   state,
   detail,
-  isArchive
+  isArchive,
+  isTorrent
 }: {
   state: "queued" | "unknown" | "failed";
   detail: string | null;
   isArchive: boolean;
+  isTorrent: boolean;
 }) {
   const queued = state === "queued";
   return (
@@ -292,14 +351,18 @@ function ResultState({
         : <AlertTriangle className="dialog-result-icon warning-icon" aria-hidden="true" />}
       <Dialog.Title>
         {queued
-          ? isArchive ? "Download started" : "Added to SABnzbd"
+          ? isTorrent
+            ? "Added to qBittorrent"
+            : isArchive ? "Download started" : "Added to SABnzbd"
           : state === "unknown"
             ? "Submission status is unknown"
             : "Could not submit download"}
       </Dialog.Title>
       <Dialog.Description>
         {queued
-          ? isArchive
+          ? isTorrent
+            ? "The job is saved in your Gamarr library and queued in qBittorrent."
+            : isArchive
             ? "The job is saved in your Gamarr library and the file is downloading to this machine."
             : "The job is saved in your Gamarr library and queued for SABnzbd."
           : state === "unknown"

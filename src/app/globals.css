@@ -1087,6 +1087,13 @@ label {
   font-weight: 600;
 }
 
+.file-picker-divider {
+  width: 100%;
+  margin: 4px 0;
+  border: 0;
+  border-top: 1px solid var(--rule);
+}
+
 .file-option {
   display: flex;
   align-items: baseline;
