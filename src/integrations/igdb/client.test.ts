@@ -19,6 +19,24 @@ class FixedToken implements TokenPort {
 }
 
 describe("IgdbClient", () => {
+  it("filters searches by platform membership, not platform exclusivity", async () => {
+    const requests: IgdbRequest[] = [];
+    const executor: IgdbExecutor = {
+      execute: async (_token, request) => {
+        requests.push(request);
+        return [];
+      }
+    };
+
+    await new IgdbClient(new FixedToken(), executor).searchGames("Burnout 3", 8);
+
+    // Apicalypse `{...}` is an EXACT array match — `platforms = {8}` is IGDB's
+    // documented query for "PlayStation 2 exclusives" and hides every
+    // multiplatform game. `(...)` is array inclusion, which is what we mean.
+    expect(requests[0]!.where).toBe("platforms = (8)");
+    expect(requests[0]!.where).not.toContain("{");
+  });
+
   it("paginates platforms beyond one provider page", async () => {
     const requests: IgdbRequest[] = [];
     const executor: IgdbExecutor = {

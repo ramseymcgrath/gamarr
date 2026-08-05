@@ -157,7 +157,13 @@ export class IgdbClient implements IgdbPort {
         "cover.image_id"
       ],
       search: query,
-      where: `platforms = {${platformId}}`,
+      // `(...)` is array inclusion ("contains any of"), which is what
+      // "available on this platform" means. NOT `{...}`, which is Apicalypse's
+      // *exact array match*: `platforms = {8}` is IGDB's own documented idiom
+      // for "PlayStation 2 exclusives", so it silently hid every multiplatform
+      // game — Grand Theft Auto III, Burnout 3 and Jak II all returned zero
+      // hits for PS2 while PS2-only fan mods ranked fine.
+      where: `platforms = (${platformId})`,
       limit: 24,
       offset: 0
     }));
