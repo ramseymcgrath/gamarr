@@ -309,19 +309,33 @@ deduplicates on infohash and will not create a second entry. That is why
 `torrent_hash` carries no unique index, but it also means the second submission
 cannot be made to behave like a fresh download:
 
-- On a build that returns `added_torrent_ids`, a duplicate add reports a
-  failure, which is `ambiguous` rather than `rejected` — nothing is provably
-  wrong with the request, and the torrent may well be downloading. The attempt
-  becomes `Unknown`.
-- Reconcile then resolves it if qBittorrent applied the second tag to the
-  existing torrent, and leaves it `Unknown` if it did not.
+**Verified against qBittorrent v5.2.3 / WebAPI 2.15.1:** a duplicate add answers
+**`409 Conflict`** with the plain-text body `Conflict`, and applies no tag to the
+existing torrent. `409` is in the `rejected` set, so the second attempt becomes
+terminal **`Failed`**, not `Unknown`.
 
-`Unknown` is the correct outcome here and needs no special casing: it already
-means "the outcome is not established", is never resubmitted automatically, and
-is visible in Activity for the operator to resolve. Deduplicating submissions by
-infohash ahead of the add would require parsing bencode to compute the hash
-locally, which buys a better message for a rare case at the cost of a parser on
-the untrusted-input path. Out of scope.
+That is the right outcome and needs no special casing. The add provably placed
+nothing new in the client, which is exactly what `rejected` means, and `Failed`
+is honest: this attempt did not produce a download. The operator still has the
+first attempt tracking the real torrent.
+
+Deduplicating submissions by infohash ahead of the add would require parsing
+bencode to compute the hash locally, which buys a slightly better message for a
+rare case at the cost of a parser on the untrusted-input path. Out of scope.
+
+### Known limitation: the hash is usually absent
+
+`torrents/add` on v5.2.3 answers with `text/plain`, not the JSON
+`{ added_torrent_ids, ... }` the 2.14.0 changelog describes — the error path
+returns a bare `Conflict`, and a successful add yields no parseable hash. So in
+practice `add()` returns `{ hash: null }` against current qBittorrent, and
+**tag matching is the primary reconcile path rather than a legacy fallback.**
+
+This is why identity is the tag and the hash is only an optimisation. Nothing
+needs to change: `torrent_hash` stays nullable, reconcile already prefers it
+when present and falls back to `tags.includes(sabMarker)` when it is not, and
+the whole lifecycle was verified end to end on a live instance with the hash
+null throughout.
 
 ## Settings
 
