@@ -79,7 +79,23 @@ export class QbittorrentClient implements TorrentClientPort {
         method: "POST",
         body: form
       });
-    } catch {
+    } catch (error) {
+      // An AppError out of authenticatedRequest can only come from
+      // ensureLogin(), which runs before any torrent bytes leave — so nothing
+      // was submitted and the outcome is `rejected`, not `ambiguous`. Calling
+      // it ambiguous would park the attempt in `Unknown`, which is never
+      // resubmitted automatically and hides an actionable message like
+      // "Could not authenticate with qBittorrent" behind a vague one.
+      //
+      // Ambiguity is reserved for a failure during the POST itself, which may
+      // have reached the queue before the connection broke. Those surface as
+      // raw fetch errors, never AppError.
+      //
+      // Login messages are fixed strings written for a user, so forwarding one
+      // cannot leak the password or a credentialed URL.
+      if (error instanceof AppError) {
+        throw new TorrentAddError("rejected", error.message, { cause: error });
+      }
       throw new TorrentAddError(
         "ambiguous",
         "qBittorrent did not confirm the torrent submission"

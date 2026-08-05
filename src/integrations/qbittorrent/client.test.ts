@@ -61,6 +61,32 @@ describe("QbittorrentClient", () => {
       .toBe("QBT_SID_8080=Xk9rT2mQ4vB8nL1pZ0wYcE7hJ3sA6dF5");
   });
 
+  it("rejects rather than obscures an add that failed to authenticate", async () => {
+    let addCalls = 0;
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input).includes("/auth/login")) {
+        return new Response("Fails.", { status: 403 });
+      }
+      addCalls += 1;
+      return Response.json({});
+    }) as unknown as typeof fetch;
+
+    const error = await client(fetchImpl).add({
+      torrent: new Uint8Array([1]),
+      filename: "item.torrent",
+      category: null,
+      tag: "gamarr-1"
+    }).catch((value: unknown) => value);
+
+    // Nothing was submitted: ensureLogin() throws before any bytes leave. An
+    // "ambiguous" verdict would park the attempt in Unknown, which is never
+    // resubmitted automatically, and bury the actionable auth message.
+    expect(error).toBeInstanceOf(TorrentAddError);
+    expect((error as TorrentAddError).outcome).toBe("rejected");
+    expect((error as TorrentAddError).message).toMatch(/authenticate/i);
+    expect(addCalls).toBe(0);
+  });
+
   it("logs in once and reuses the SID cookie", async () => {
     const calls: Request[] = [];
     const fetchImpl = vi.fn(async (

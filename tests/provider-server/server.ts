@@ -24,9 +24,18 @@ function xml(response: ServerResponse, value: string) {
   response.end(value);
 }
 
+/**
+ * qBittorrent 5.x names its session cookie `QBT_SID_<webui-port>`, not the
+ * bare `SID` the WebUI documentation describes. The fixture uses the real
+ * name so the e2e run exercises the same parsing path a current server hits —
+ * a fixture that answered `SID` would keep passing even if the client
+ * regressed to matching only the documented name.
+ */
+const sessionCookie = `QBT_SID_${port}=fixture-sid`;
+
 function hasQbittorrentSession(request: IncomingMessage): boolean {
   const cookies = request.headers.cookie?.split(";").map((value) => value.trim());
-  return cookies?.includes("SID=fixture-sid") === true &&
+  return cookies?.includes(sessionCookie) === true &&
     request.headers.referer === `http://127.0.0.1:${port}`;
 }
 
@@ -137,11 +146,15 @@ const server = createServer(async (request, response) => {
       response.writeHead(403, { "content-type": "text/plain" });
       return response.end("Fails.");
     }
-    response.writeHead(200, {
-      "content-type": "text/plain",
-      "set-cookie": "SID=fixture-sid; Path=/; HttpOnly"
+    // 204 with no body, matching qBittorrent 5.x. The documented `200` plus
+    // an `Ok.` body is what 4.x returned. The `expires` attribute carries a
+    // comma on purpose: a parser that splits set-cookie on commas breaks here.
+    response.writeHead(204, {
+      "set-cookie":
+        `${sessionCookie}; HttpOnly; SameSite=Lax; `
+        + "expires=Tue, 04 Aug 2026 18:06:55 GMT; path=/"
     });
-    return response.end("Ok.");
+    return response.end();
   }
   if (
     request.method === "POST" &&
