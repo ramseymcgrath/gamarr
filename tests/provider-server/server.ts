@@ -75,7 +75,22 @@ const server = createServer(async (request, response) => {
         platforms: [130],
         genres: [{ name: "Platform" }],
         alternative_names: [],
-        release_dates: [{ platform: 130, y: 2024 }]
+        // Debuted on this platform: the platform release equals the first
+        // release anywhere, so the debut rule keeps it.
+        first_release_date: 1704067200,
+        release_dates: [{ platform: 130, y: 2024, date: 1704067200 }]
+      }, {
+        id: 220124,
+        name: "Fixture Late Port",
+        slug: "fixture-late-port",
+        summary: "Ported to this platform nineteen years after release.",
+        platforms: [130],
+        genres: [{ name: "Strategy" }],
+        alternative_names: [],
+        // First released in 2005, reached this platform in 2024. Far outside
+        // the 365 day window, so the shelf must not show it.
+        first_release_date: 1104537600,
+        release_dates: [{ platform: 130, y: 2024, date: 1704067200 }]
       }]);
     }
     return json(response, [{

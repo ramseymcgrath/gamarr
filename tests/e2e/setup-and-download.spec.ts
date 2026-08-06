@@ -40,6 +40,11 @@ test("configures providers and sends a selected release to SABnzbd", async ({
   await expect(page.getByRole("link", { name: /Fixture Popular Classic/ }))
     .toBeVisible();
 
+  // The debut rule must drop it: IGDB ranks it highly by global rating count,
+  // but it only reached this platform nineteen years after release.
+  await expect(page.getByRole("link", { name: /Fixture Late Port/ }))
+    .toHaveCount(0);
+
   // The axe scan at the end of this test runs on Library, and the 320px test
   // visits Discover with no platform selected, so neither one ever sees the
   // shelf. Scan it here, where it is on screen. Animations must settle first
