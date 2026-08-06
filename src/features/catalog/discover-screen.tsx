@@ -5,14 +5,13 @@ import {
   Search,
   SlidersHorizontal
 } from "lucide-react";
-import Image from "next/image";
 import Link from "next/link";
-import type { Route } from "next";
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 
 import { EmptyState } from "@/components/empty-state";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { GameCard } from "@/features/catalog/game-card";
 import type {
   GameSearchResult,
   PlatformView
@@ -32,7 +31,56 @@ export function DiscoverScreen({
   const [platformId, setPlatformId] = useState<number | null>(initialPlatformId);
   const [results, setResults] = useState<GameSearchResult[]>([]);
   const [state, setState] = useState<"idle" | "searching" | "done" | "error">("idle");
+  const [popularResult, setPopularResult] = useState<{
+    platformId: number;
+    games: GameSearchResult[] | "error";
+  } | null>(null);
+  const platformName = visible.find(
+    (platform) => platform.id === platformId
+  )?.name ?? "";
+  // Only a result tagged with the platform now selected may be shown.
+  const current = popularResult?.platformId === platformId
+    ? popularResult
+    : null;
+  const popularState: "loading" | "error" | "idle" = current
+    ? (current.games === "error" ? "error" : "idle")
+    : "loading";
+  const popular = current && current.games !== "error" ? current.games : [];
+  const showPopular = state === "idle" && platformId !== null && (
+    popularState !== "idle" || popular.length > 0
+  );
   const recent = visible.slice(0, 7);
+
+  useEffect(() => {
+    if (!platformId) return;
+    // Without this, clicking quickly between platforms lets a slow response
+    // land after a fast one. The platform tag on the result makes a late
+    // write harmless, but aborting also stops the wasted parse.
+    const controller = new AbortController();
+    fetch(`/api/catalog/popular?platformId=${platformId}`, {
+      cache: "no-store",
+      signal: controller.signal
+    })
+      .then(async (response) => {
+        if (!response.ok) throw new Error("Popular fetch failed");
+        setPopularResult({ platformId, games: await response.json() });
+      })
+      .catch(() => {
+        if (controller.signal.aborted) return;
+        setPopularResult({ platformId, games: "error" });
+      });
+    return () => controller.abort();
+  }, [platformId]);
+
+  const updateQuery = (value: string) => {
+    setQuery(value);
+    // Emptying the box returns Discover to its browse state, so the shelf is
+    // the real empty state for search rather than a one-shot splash.
+    if (!value.trim()) {
+      setResults([]);
+      setState("idle");
+    }
+  };
 
   const search = async (event: FormEvent) => {
     event.preventDefault();
@@ -133,7 +181,7 @@ export function DiscoverScreen({
               type="search"
               role="searchbox"
               value={query}
-              onChange={(event) => setQuery(event.target.value)}
+              onChange={(event) => updateQuery(event.target.value)}
               placeholder="Metroid Prime 4, Forza, Final Fantasy…"
             />
             <Button
@@ -144,6 +192,35 @@ export function DiscoverScreen({
               {state === "searching" ? "Searching…" : "Search games"}
             </Button>
           </form>
+
+          {showPopular && (
+            <section
+              aria-labelledby="popular-heading"
+              aria-busy={popularState === "loading"}
+              className="catalog-results"
+            >
+              <div className="result-heading">
+                <h2 id="popular-heading">Popular on {platformName}</h2>
+              </div>
+              {popularState === "loading" && (
+                <p className="popular-note">Loading popular titles…</p>
+              )}
+              {popularState === "error" && (
+                <p className="popular-note">Couldn&apos;t load popular titles.</p>
+              )}
+              {popular.length > 0 && (
+                <div className="game-grid">
+                  {popular.map((game) => (
+                    <GameCard
+                      game={game}
+                      href={`/discover/${game.id}?platformId=${platformId}&q=&returnTo=${encodeURIComponent(`/discover?platformId=${platformId}`)}`}
+                      key={game.id}
+                    />
+                  ))}
+                </div>
+              )}
+            </section>
+          )}
 
           <section aria-live="polite" className="catalog-results">
             {state === "error" && (
@@ -162,28 +239,11 @@ export function DiscoverScreen({
                 </div>
                 <div className="game-grid">
                   {results.map((game) => (
-                    <Link
-                      className="game-card"
-                      href={`/discover/${game.id}?platformId=${platformId}&q=${encodeURIComponent(query)}&returnTo=${encodeURIComponent(`/discover?platformId=${platformId}&q=${query}`)}` as Route}
+                    <GameCard
+                      game={game}
+                      href={`/discover/${game.id}?platformId=${platformId}&q=${encodeURIComponent(query)}&returnTo=${encodeURIComponent(`/discover?platformId=${platformId}&q=${query}`)}`}
                       key={game.id}
-                    >
-                      <div className="game-cover">
-                        {game.coverUrl ? (
-                          <Image
-                            src={game.coverUrl}
-                            alt=""
-                            fill
-                            sizes="(max-width: 720px) 45vw, 220px"
-                          />
-                        ) : (
-                          <Gamepad2 aria-hidden="true" />
-                        )}
-                      </div>
-                      <div>
-                        <h3>{game.name}</h3>
-                        <p>{game.releaseYear ?? "YEAR UNKNOWN"}</p>
-                      </div>
-                    </Link>
+                    />
                   ))}
                 </div>
               </>

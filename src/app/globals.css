@@ -749,6 +749,11 @@ label {
   margin-top: 34px;
 }
 
+.popular-note {
+  margin-top: 12px;
+  font-size: 0.85rem;
+}
+
 .result-heading {
   padding-bottom: 12px;
   border-bottom: 1px solid var(--rule);
