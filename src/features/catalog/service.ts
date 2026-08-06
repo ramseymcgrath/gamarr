@@ -3,6 +3,7 @@ import type {
   GameSearchResult,
   PlatformView
 } from "@/features/catalog/models";
+import { debutedOnPlatform } from "@/features/catalog/debut-window";
 import type {
   CatalogRepository,
   IgdbPort
@@ -14,7 +15,11 @@ import {
 import { validationError } from "@/lib/errors";
 
 const POPULAR_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-const POPULAR_LIMIT = 24;
+/**
+ * Candidates requested per refresh. Filtering happens after ranking, so this
+ * is a ceiling rather than the shelf length — every survivor is kept.
+ */
+const POPULAR_FETCH_LIMIT = 100;
 
 export class CatalogService {
   constructor(
@@ -98,10 +103,20 @@ export class CatalogService {
 
   private async refreshPopular(platformId: number): Promise<void> {
     const games = (
-      await this.getProvider().popularGames(platformId, POPULAR_LIMIT)
-    ).filter((game) => game.platformIds.includes(platformId));
+      await this.getProvider().popularGames(platformId, POPULAR_FETCH_LIMIT)
+    )
+      .filter((game) => game.platformIds.includes(platformId))
+      // IGDB has no per-platform popularity metric, so total_rating_count is
+      // a global count: without this, a late port of a PC hit outranks the
+      // console's own defining titles. Verified against live IGDB, the PS2
+      // shelf led with Max Payne, Mafia and Age of Empires II.
+      .filter((game) => debutedOnPlatform(game));
     // Everything past this point is synchronous better-sqlite3 work; the only
     // await in this method is the network call above.
+    //
+    // `games` is PopularCandidate[], which is assignable to GameSearchResult[].
+    // The repository writes an explicit column list, so the two timestamps are
+    // dropped on the way to SQLite and never reach the browser.
     const now = this.now();
     this.repository.upsertGames(games, now);
     this.repository.replacePopular(

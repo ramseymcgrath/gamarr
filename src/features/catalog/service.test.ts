@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { DEBUT_WINDOW_SECONDS } from "@/features/catalog/debut-window";
 import type {
   CatalogRepository,
   IgdbPort
@@ -125,6 +126,29 @@ function countingProvider(games = provider.popularGames) {
         return games(platformId, limit);
       }
     } satisfies IgdbPort
+  };
+}
+
+function candidate(
+  id: number,
+  overrides: Partial<{
+    firstReleaseDate: number | null;
+    platformReleaseDate: number | null;
+  }> = {}
+) {
+  return {
+    id,
+    name: `Game ${id}`,
+    slug: `game-${id}`,
+    summary: null,
+    coverUrl: null,
+    releaseYear: null,
+    genres: [],
+    alternativeNames: [],
+    platformIds: [130],
+    firstReleaseDate: 1_000_000_000,
+    platformReleaseDate: 1_000_000_000,
+    ...overrides
   };
 }
 
@@ -359,5 +383,96 @@ describe("CatalogService", () => {
 
     await expect(service.popular(130)).resolves.toEqual([]);
     expect(counting.calls).toBe(0);
+  });
+
+  it("drops a late port and keeps a console debut", async () => {
+    const repository = new MemoryCatalogRepository();
+    visiblePlatform(repository);
+    const service = new CatalogService(repository, {
+      ...provider,
+      popularGames: async () => [
+        candidate(1),
+        candidate(2, {
+          platformReleaseDate: 1_000_000_000 + DEBUT_WINDOW_SECONDS + 1
+        }),
+        candidate(3, {
+          platformReleaseDate: 1_000_000_000 + DEBUT_WINDOW_SECONDS
+        })
+      ]
+    }, () => 1_000);
+
+    await expect(service.popular(130)).resolves.toEqual([
+      expect.objectContaining({ id: 1 }),
+      expect.objectContaining({ id: 3 })
+    ]);
+  });
+
+  it("keeps a candidate whose dates IGDB omitted", async () => {
+    const repository = new MemoryCatalogRepository();
+    visiblePlatform(repository);
+    const service = new CatalogService(repository, {
+      ...provider,
+      popularGames: async () => [
+        candidate(1, { firstReleaseDate: null }),
+        candidate(2, { platformReleaseDate: null })
+      ]
+    }, () => 1_000);
+
+    await expect(service.popular(130)).resolves.toEqual([
+      expect.objectContaining({ id: 1 }),
+      expect.objectContaining({ id: 2 })
+    ]);
+  });
+
+  it("caches every survivor with no count cap and keeps provider order", async () => {
+    const repository = new MemoryCatalogRepository();
+    visiblePlatform(repository);
+    const many = Array.from({ length: 90 }, (_, index) => candidate(index + 1));
+    const service = new CatalogService(repository, {
+      ...provider,
+      popularGames: async () => many
+    }, () => 1_000);
+
+    await service.popular(130);
+
+    expect(repository.popular.get(130)?.gameIds).toHaveLength(90);
+    expect(repository.popular.get(130)?.gameIds.slice(0, 3)).toEqual([1, 2, 3]);
+  });
+
+  it("asks the provider for 100 candidates", async () => {
+    const repository = new MemoryCatalogRepository();
+    visiblePlatform(repository);
+    const limits: number[] = [];
+    const service = new CatalogService(repository, {
+      ...provider,
+      popularGames: async (_platformId: number, limit: number) => {
+        limits.push(limit);
+        return [candidate(1)];
+      }
+    }, () => 1_000);
+
+    await service.popular(130);
+
+    expect(limits).toEqual([100]);
+  });
+
+  it("caches an empty list when every candidate is a late port", async () => {
+    const repository = new MemoryCatalogRepository();
+    visiblePlatform(repository);
+    let calls = 0;
+    const service = new CatalogService(repository, {
+      ...provider,
+      popularGames: async () => {
+        calls += 1;
+        return [candidate(1, {
+          platformReleaseDate: 1_000_000_000 + DEBUT_WINDOW_SECONDS + 1
+        })];
+      }
+    }, () => 1_000);
+
+    await expect(service.popular(130)).resolves.toEqual([]);
+    // The empty result is cached, so a second visit must not re-ask IGDB.
+    await expect(service.popular(130)).resolves.toEqual([]);
+    expect(calls).toBe(1);
   });
 });
