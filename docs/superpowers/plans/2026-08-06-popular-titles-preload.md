@@ -1426,42 +1426,50 @@ In `src/features/catalog/discover-screen.tsx`, change the React import to `impor
 
 After Step 6 replaces both grids with `GameCard`, three imports become unused and will fail `pnpm lint`: `Image` from `next/image`, and the `Route` type from `next` (hrefs are now plain strings that `GameCard` casts). Remove both. Keep `Link` — the empty state still uses it — and keep `Gamepad2`, still used by the platform spine buttons.
 
-Add after the existing `useState` calls:
+Add after the existing `useState` calls.
+
+The result is stored **tagged with the platform it belongs to**, and the shelf's view state is derived from whether that tag matches the current selection. This is not incidental style — it is load-bearing for two reasons:
+
+1. **Correctness.** With a bare `popular` array, switching platform A → B leaves A's games in state while `showPopular` is already true for B, so A's cards render under B's heading for the whole loading window. Tagging makes that unrepresentable.
+2. **Lint.** `react-hooks/set-state-in-effect` rejects any synchronous `setState` in an effect body. Deriving the view state means every `setState` happens inside an async callback, which the rule allows. Do **not** satisfy the rule with an eslint-disable.
 
 ```tsx
-  const [popular, setPopular] = useState<GameSearchResult[]>([]);
-  const [popularState, setPopularState] =
-    useState<"idle" | "loading" | "error">("idle");
+  const [popularResult, setPopularResult] = useState<{
+    platformId: number;
+    games: GameSearchResult[] | "error";
+  } | null>(null);
   const platformName = visible.find(
     (platform) => platform.id === platformId
   )?.name ?? "";
+  // Only a result tagged with the platform now selected may be shown.
+  const current = popularResult?.platformId === platformId
+    ? popularResult
+    : null;
+  const popularState: "loading" | "error" | "idle" = current
+    ? (current.games === "error" ? "error" : "idle")
+    : "loading";
+  const popular = current && current.games !== "error" ? current.games : [];
   const showPopular = state === "idle" && platformId !== null && (
     popularState !== "idle" || popular.length > 0
   );
 
   useEffect(() => {
-    if (!platformId) {
-      setPopular([]);
-      setPopularState("idle");
-      return;
-    }
+    if (!platformId) return;
     // Without this, clicking quickly between platforms lets a slow response
-    // land after a fast one and render the wrong platform's shelf.
+    // land after a fast one. The platform tag on the result makes a late
+    // write harmless, but aborting also stops the wasted parse.
     const controller = new AbortController();
-    setPopularState("loading");
     fetch(`/api/catalog/popular?platformId=${platformId}`, {
       cache: "no-store",
       signal: controller.signal
     })
       .then(async (response) => {
         if (!response.ok) throw new Error("Popular fetch failed");
-        setPopular(await response.json());
-        setPopularState("idle");
+        setPopularResult({ platformId, games: await response.json() });
       })
       .catch(() => {
         if (controller.signal.aborted) return;
-        setPopular([]);
-        setPopularState("error");
+        setPopularResult({ platformId, games: "error" });
       });
     return () => controller.abort();
   }, [platformId]);
@@ -1550,12 +1558,12 @@ No color override — the note inherits body color so it cannot regress the axe 
 - [ ] **Step 8: Run the tests to verify they pass**
 
 Run: `pnpm test src/features/catalog/discover-screen.test.tsx`
-Expected: PASS, all six tests.
+Expected: PASS, all five tests.
 
 - [ ] **Step 9: Verify the whole suite**
 
 Run: `pnpm test && pnpm typecheck && pnpm lint`
-Expected: PASS.
+Expected: PASS. In particular `react-hooks/set-state-in-effect` must report nothing for `discover-screen.tsx` — if it fires, the derived-state shape from Step 4 was not followed. Fix the shape; do not add an eslint-disable.
 
 - [ ] **Step 10: Commit**
 
