@@ -25,6 +25,16 @@ export interface GameSearchResult {
   platformIds: number[];
 }
 
+/**
+ * A popular-shelf candidate before the debut rule has been applied. The two
+ * timestamps exist only to decide whether the game debuted on the selected
+ * platform; they are never persisted and never reach the browser.
+ */
+export interface PopularCandidate extends GameSearchResult {
+  firstReleaseDate: number | null;
+  platformReleaseDate: number | null;
+}
+
 export interface CatalogSearchInput {
   query: string;
   platformId: number;

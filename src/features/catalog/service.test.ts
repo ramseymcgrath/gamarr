@@ -93,7 +93,9 @@ const provider: IgdbPort = {
       releaseYear: 2025,
       genres: ["Adventure"],
       alternativeNames: ["Metroid Prime 4"],
-      platformIds: [130]
+      platformIds: [130],
+      firstReleaseDate: null,
+      platformReleaseDate: null
     }
   ]
 };
@@ -244,7 +246,9 @@ describe("CatalogService", () => {
         releaseYear: null,
         genres: [],
         alternativeNames: [],
-        platformIds: [8]
+        platformIds: [8],
+        firstReleaseDate: null,
+        platformReleaseDate: null
       }]
     }, () => 1_000);
 

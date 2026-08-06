@@ -3,7 +3,8 @@ import { z } from "zod";
 
 import type {
   GameSearchResult,
-  Platform
+  Platform,
+  PopularCandidate
 } from "@/features/catalog/models";
 import type { IgdbPort } from "@/features/catalog/ports";
 import { AppError } from "@/lib/errors";
@@ -97,9 +98,11 @@ const gameSchema = z.object({
   platforms: z.array(z.number().int().positive()).default([]),
   genres: z.array(z.object({ name: z.string() })).default([]),
   alternative_names: z.array(z.object({ name: z.string() })).default([]),
+  first_release_date: z.number().int().optional(),
   release_dates: z.array(z.object({
     platform: z.number().int().positive(),
-    y: z.number().int().optional()
+    y: z.number().int().optional(),
+    date: z.number().int().optional()
   })).default([]),
   cover: z.object({ image_id: z.string() }).optional()
 });
@@ -112,8 +115,10 @@ const GAME_FIELDS = [
   "platforms",
   "genres.name",
   "alternative_names.name",
+  "first_release_date",
   "release_dates.platform",
   "release_dates.y",
+  "release_dates.date",
   "cover.image_id"
 ];
 
@@ -134,6 +139,25 @@ function toGameSearchResult(
     genres: game.genres.map((genre) => genre.name),
     alternativeNames: game.alternative_names.map((name) => name.name),
     platformIds: game.platforms
+  };
+}
+
+function toPopularCandidate(
+  game: z.infer<typeof gameSchema>,
+  platformId: number
+): PopularCandidate {
+  // A platform can carry several dated entries, one per region. The earliest
+  // is the console's debut; taking a later regional date would make a game
+  // look like a port of itself.
+  const platformDates = game.release_dates
+    .filter((date) => date.platform === platformId && date.date !== undefined)
+    .map((date) => date.date as number);
+  return {
+    ...toGameSearchResult(game, platformId),
+    firstReleaseDate: game.first_release_date ?? null,
+    platformReleaseDate: platformDates.length > 0
+      ? Math.min(...platformDates)
+      : null
   };
 }
 
@@ -200,7 +224,7 @@ export class IgdbClient implements IgdbPort {
   async popularGames(
     platformId: number,
     limit: number
-  ): Promise<GameSearchResult[]> {
+  ): Promise<PopularCandidate[]> {
     const games = z.array(gameSchema).parse(await this.execute({
       endpoint: "/games",
       fields: GAME_FIELDS,
@@ -215,7 +239,7 @@ export class IgdbClient implements IgdbPort {
       offset: 0
     }));
 
-    return games.map((game) => toGameSearchResult(game, platformId));
+    return games.map((game) => toPopularCandidate(game, platformId));
   }
 
   private async execute(request: IgdbRequest): Promise<unknown> {

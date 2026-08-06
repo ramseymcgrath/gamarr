@@ -1,14 +1,15 @@
 import type {
   GameSearchResult,
   Platform,
-  PlatformView
+  PlatformView,
+  PopularCandidate
 } from "@/features/catalog/models";
 
 export interface IgdbPort {
   testConnection(): Promise<void>;
   listPlatforms(): Promise<Platform[]>;
   searchGames(query: string, platformId: number): Promise<GameSearchResult[]>;
-  popularGames(platformId: number, limit: number): Promise<GameSearchResult[]>;
+  popularGames(platformId: number, limit: number): Promise<PopularCandidate[]>;
 }
 
 export interface PopularGamesCache {

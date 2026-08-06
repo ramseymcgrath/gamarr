@@ -194,4 +194,70 @@ describe("IgdbClient", () => {
       })
     ]);
   });
+
+  it("requests the dates the debut rule needs", async () => {
+    const requests: IgdbRequest[] = [];
+    const executor: IgdbExecutor = {
+      execute: async (_token, request) => {
+        requests.push(request);
+        return [];
+      }
+    };
+
+    await new IgdbClient(new FixedToken(), executor).popularGames(8, 100);
+
+    expect(requests[0]!.fields).toContain("first_release_date");
+    expect(requests[0]!.fields).toContain("release_dates.date");
+    expect(requests[0]!.limit).toBe(100);
+  });
+
+  it("reports the earliest dated platform release across regions", async () => {
+    const executor: IgdbExecutor = {
+      execute: async () => [{
+        id: 1,
+        name: "Regional",
+        slug: "regional",
+        platforms: [8],
+        first_release_date: 1_000_000_000,
+        release_dates: [
+          // Deliberately out of order, and one entry belongs to another
+          // platform. A later regional release must not make a game look
+          // like a port of itself.
+          { platform: 8, y: 2002, date: 1_030_000_000 },
+          { platform: 6, y: 2001, date: 1_000_000_000 },
+          { platform: 8, y: 2001, date: 1_010_000_000 }
+        ]
+      }]
+    };
+
+    const games = await new IgdbClient(new FixedToken(), executor)
+      .popularGames(8, 100);
+
+    expect(games[0]).toMatchObject({
+      firstReleaseDate: 1_000_000_000,
+      platformReleaseDate: 1_010_000_000
+    });
+  });
+
+  it("reports null dates when IGDB omits them", async () => {
+    const executor: IgdbExecutor = {
+      execute: async () => [{
+        id: 2,
+        name: "Undated",
+        slug: "undated",
+        platforms: [8],
+        // No first_release_date, and the platform entry carries no date —
+        // the shape live IGDB returned for Resident Evil 4 on PS2.
+        release_dates: [{ platform: 8, y: 2005 }]
+      }]
+    };
+
+    const games = await new IgdbClient(new FixedToken(), executor)
+      .popularGames(8, 100);
+
+    expect(games[0]).toMatchObject({
+      firstReleaseDate: null,
+      platformReleaseDate: null
+    });
+  });
 });
