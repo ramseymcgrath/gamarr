@@ -12,7 +12,9 @@
 
 ## Global Constraints
 
-- Node 24 and pnpm. Commands: `pnpm lint`, `pnpm typecheck`, `pnpm test`, `pnpm test:e2e`.
+- Node **24 or newer** (a floor, not a pin — this machine runs v26.5.0 and the
+  full suite passes on it) and pnpm via corepack. Commands: `pnpm lint`,
+  `pnpm typecheck`, `pnpm test`, `pnpm test:e2e`.
 - **No migration in this feature.** `GameSearchResult` and the `platform_popular_games` table are unchanged. If you find yourself running `pnpm db:generate`, stop — something has gone wrong.
 - **IGDB dates are unix SECONDS, not milliseconds.** The window constant is in seconds. Do not multiply by 1000.
 - Apicalypse platform filtering uses `platforms = (id)` — array **inclusion**. Never `platforms = {id}`.
