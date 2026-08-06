@@ -624,7 +624,8 @@ describe("InFlightRefreshCoordinator", () => {
       })
     ]);
 
-    expect(keys.sort()).toEqual([8, 130]);
+    // Default Array.sort is lexicographic, which would leave [130, 8].
+    expect(keys.sort((a, b) => a - b)).toEqual([8, 130]);
   });
 
   it("allows a new run once the previous one settles", async () => {
