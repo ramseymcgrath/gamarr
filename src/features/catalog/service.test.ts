@@ -14,6 +14,7 @@ import { AppError } from "@/lib/errors";
 class MemoryCatalogRepository implements CatalogRepository {
   platforms = new Map<number, Platform & { visible: boolean; aliases: string[] }>();
   games = new Map<number, GameSearchResult>();
+  popular = new Map<number, { gameIds: number[]; fetchedAt: number }>();
 
   listPlatforms() {
     return [...this.platforms.values()];
@@ -45,6 +46,21 @@ class MemoryCatalogRepository implements CatalogRepository {
 
   getGame(id: number) {
     return this.games.get(id) ?? null;
+  }
+
+  getPopular(platformId: number) {
+    const entry = this.popular.get(platformId);
+    if (!entry) return null;
+    return {
+      fetchedAt: entry.fetchedAt,
+      games: entry.gameIds
+        .map((id) => this.games.get(id))
+        .filter((game): game is GameSearchResult => game !== undefined)
+    };
+  }
+
+  replacePopular(platformId: number, gameIds: number[], now: number) {
+    this.popular.set(platformId, { gameIds, fetchedAt: now });
   }
 }
 

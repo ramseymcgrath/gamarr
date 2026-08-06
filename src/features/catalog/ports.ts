@@ -10,6 +10,11 @@ export interface IgdbPort {
   searchGames(query: string, platformId: number): Promise<GameSearchResult[]>;
 }
 
+export interface PopularGamesCache {
+  games: GameSearchResult[];
+  fetchedAt: number;
+}
+
 export interface CatalogRepository {
   listPlatforms(): PlatformView[];
   getPlatform(id: number): PlatformView | null;
@@ -17,4 +22,6 @@ export interface CatalogRepository {
   setPlatformVisibility(id: number, visible: boolean, aliases: string[]): void;
   upsertGames(values: GameSearchResult[], now: number): void;
   getGame(id: number): GameSearchResult | null;
+  getPopular(platformId: number): PopularGamesCache | null;
+  replacePopular(platformId: number, gameIds: number[], now: number): void;
 }

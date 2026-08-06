@@ -43,7 +43,9 @@ const catalog: CatalogRepository = {
   upsertPlatforms: () => undefined,
   setPlatformVisibility: () => undefined,
   upsertGames: () => undefined,
-  getGame: (id) => id === 1 ? game : null
+  getGame: (id) => id === 1 ? game : null,
+  getPopular: () => null,
+  replacePopular: () => undefined
 };
 
 const indexers: IndexerRecord[] = [

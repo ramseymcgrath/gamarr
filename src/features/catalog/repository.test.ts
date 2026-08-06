@@ -72,4 +72,77 @@ describe("SqliteCatalogRepository", () => {
     });
     database.$client.close();
   });
+
+  it("round-trips a popular list in rank order", () => {
+    const { database, repository: catalog } = repository();
+    catalog.upsertPlatforms([{ id: 130, name: "Switch" }], 100);
+    catalog.upsertGames([
+      { id: 1, name: "First", slug: "first", summary: null, coverUrl: null,
+        releaseYear: null, genres: [], alternativeNames: [], platformIds: [130] },
+      { id: 2, name: "Second", slug: "second", summary: null, coverUrl: null,
+        releaseYear: null, genres: [], alternativeNames: [], platformIds: [130] },
+      { id: 3, name: "Third", slug: "third", summary: null, coverUrl: null,
+        releaseYear: null, genres: [], alternativeNames: [], platformIds: [130] }
+    ], 100);
+
+    catalog.replacePopular(130, [3, 1, 2], 500);
+
+    expect(catalog.getPopular(130)).toEqual({
+      fetchedAt: 500,
+      games: [
+        expect.objectContaining({ id: 3 }),
+        expect.objectContaining({ id: 1 }),
+        expect.objectContaining({ id: 2 })
+      ]
+    });
+    database.$client.close();
+  });
+
+  it("distinguishes an empty popular list from one never fetched", () => {
+    const { database, repository: catalog } = repository();
+    catalog.upsertPlatforms([{ id: 130, name: "Switch" }], 100);
+
+    expect(catalog.getPopular(130)).toBeNull();
+
+    catalog.replacePopular(130, [], 500);
+
+    expect(catalog.getPopular(130)).toEqual({ fetchedAt: 500, games: [] });
+    database.$client.close();
+  });
+
+  it("drops popular ids that are no longer cached games", () => {
+    const { database, repository: catalog } = repository();
+    catalog.upsertPlatforms([{ id: 130, name: "Switch" }], 100);
+    catalog.upsertGames([{
+      id: 1, name: "First", slug: "first", summary: null, coverUrl: null,
+      releaseYear: null, genres: [], alternativeNames: [], platformIds: [130]
+    }], 100);
+
+    catalog.replacePopular(130, [99, 1], 500);
+
+    expect(catalog.getPopular(130)?.games).toEqual([
+      expect.objectContaining({ id: 1 })
+    ]);
+    database.$client.close();
+  });
+
+  it("replaces a popular list rather than appending to it", () => {
+    const { database, repository: catalog } = repository();
+    catalog.upsertPlatforms([{ id: 130, name: "Switch" }], 100);
+    catalog.upsertGames([
+      { id: 1, name: "First", slug: "first", summary: null, coverUrl: null,
+        releaseYear: null, genres: [], alternativeNames: [], platformIds: [130] },
+      { id: 2, name: "Second", slug: "second", summary: null, coverUrl: null,
+        releaseYear: null, genres: [], alternativeNames: [], platformIds: [130] }
+    ], 100);
+
+    catalog.replacePopular(130, [1, 2], 500);
+    catalog.replacePopular(130, [2], 900);
+
+    expect(catalog.getPopular(130)).toEqual({
+      fetchedAt: 900,
+      games: [expect.objectContaining({ id: 2 })]
+    });
+    database.$client.close();
+  });
 });

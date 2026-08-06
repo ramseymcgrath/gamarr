@@ -42,6 +42,14 @@ export const platformSettings = sqliteTable("platform_settings", {
   categoryIds: jsonText<string[]>("category_ids").notNull().default([])
 });
 
+export const platformPopularGames = sqliteTable("platform_popular_games", {
+  platformId: integer("platform_id")
+    .primaryKey()
+    .references(() => platforms.id, { onDelete: "cascade" }),
+  gameIds: jsonText<number[]>("game_ids").notNull().default([]),
+  fetchedAt: integer("fetched_at").notNull()
+});
+
 export const indexers = sqliteTable("indexers", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
