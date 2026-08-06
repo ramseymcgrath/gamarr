@@ -1,5 +1,6 @@
 import { errorResponse } from "@/app/api/error-response";
 import type {
+  CandidateFilesResponse,
   ReleaseSearchInput,
   ReleaseSearchResponse
 } from "@/features/release-search/service";
@@ -11,6 +12,10 @@ import {
 
 interface ReleaseSearchHandlerService {
   search(input: ReleaseSearchInput): Promise<ReleaseSearchResponse | unknown>;
+}
+
+interface CandidateFilesHandlerService {
+  listCandidateFiles(candidateId: string): Promise<CandidateFilesResponse>;
 }
 
 export async function handleReleaseSearch(
@@ -38,6 +43,29 @@ export async function handleReleaseSearch(
       gameId: body.gameId as number,
       platformId: body.platformId as number
     });
+    return Response.json(response, {
+      headers: { "cache-control": "no-store" }
+    });
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+
+/**
+ * Lists the downloadable files of an Internet Archive item bound to a
+ * live release candidate. Read-only, so there is no mutation guard: the
+ * opaque candidate ID means the request cannot be aimed at anything the
+ * server did not already mint. Which files are selectable is release-search
+ * domain policy and lives in the feature slice, not here.
+ */
+export async function handleListCandidateFiles(
+  request: Request,
+  dependencies: { service: CandidateFilesHandlerService }
+): Promise<Response> {
+  try {
+    const candidateId = new URL(request.url).searchParams.get("candidateId");
+    if (!candidateId) throw validationError("candidateId is required");
+    const response = await dependencies.service.listCandidateFiles(candidateId);
     return Response.json(response, {
       headers: { "cache-control": "no-store" }
     });

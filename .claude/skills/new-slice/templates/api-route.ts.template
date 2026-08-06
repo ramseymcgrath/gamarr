@@ -1,0 +1,15 @@
+import { __feature__Dependencies } from "@/app/api/__feature__/dependencies";
+import { handleList__Feature__ } from "@/app/api/__feature__/handlers";
+
+// Thin shim. All real logic lives in handlers.ts so it can be tested without a
+// Next.js runtime.
+//
+// `runtime = "nodejs"` is mandatory: better-sqlite3 is a native module and
+// cannot run on edge. `dynamic = "force-dynamic"` keeps Next from caching a
+// response built from live database state.
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+export function GET(): Promise<Response> {
+  return handleList__Feature__(__feature__Dependencies());
+}

@@ -193,12 +193,14 @@ export class NewznabClient {
       releases.push({
         guid,
         title,
+        source: "newznab",
         indexerId: this.options.id,
         indexerName: this.options.name,
         downloadUrl,
         size: Number.isFinite(parsedSize) ? parsedSize : null,
         category: String(attribute("category") ?? asText(item.category) ?? "") || null,
-        publishedAt: Number.isFinite(published) ? published : 0
+        // `null`, not 0: an unparseable pubDate must not render as 1970.
+        publishedAt: Number.isFinite(published) ? published : null
       });
     }
     return { releases, warnings };

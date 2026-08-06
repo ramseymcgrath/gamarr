@@ -16,8 +16,10 @@ export interface ActivityItem {
   id: string;
   libraryEntryId: string;
   status: string;
+  source?: "newznab" | "internet-archive" | "internet-archive-torrent";
   releaseTitle: string;
   indexerName: string;
+  fileName?: string | null;
   size: number | null;
   category: string | null;
   progress: number;
@@ -101,7 +103,13 @@ export function ActivityScreen({ initial }: { initial: ActivityItem[] }) {
               </time>
               <div>
                 <strong>{item.releaseTitle}</strong>
-                <span>{item.indexerName} · {item.category ?? "Default category"}</span>
+                <span>
+                  {item.source === "internet-archive-torrent"
+                    ? "Internet Archive (torrent)"
+                    : <>{item.indexerName} · {item.source === "internet-archive"
+                      ? item.fileName ?? "Direct download"
+                      : item.category ?? "Default category"}</>}
+                </span>
                 {item.failureDetail && <span className="failure-detail">{item.failureDetail}</span>}
               </div>
               <StatusPill status={item.status} label={item.status} />

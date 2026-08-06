@@ -1,0 +1,13 @@
+import type { __Feature__Record } from "@/features/__feature__/models";
+
+// Everything this slice needs from the outside world, expressed as interfaces
+// it owns. `repository.ts` implements the SQLite side; adapters under
+// `src/integrations/` implement anything that talks to a third party.
+//
+// The service depends on these and nothing else, which is what lets its tests
+// inject plain object literals instead of mocking modules.
+
+export interface __Feature__Repository {
+  list(): __Feature__Record[];
+  get(id: string): __Feature__Record | null;
+}

@@ -1,8 +1,9 @@
-import { asc, eq } from "drizzle-orm";
+import { asc, eq, inArray } from "drizzle-orm";
 
 import type { Database } from "@/db/client";
 import {
   games,
+  platformPopularGames,
   platformSettings,
   platforms
 } from "@/db/schema";
@@ -11,7 +12,10 @@ import type {
   Platform,
   PlatformView
 } from "@/features/catalog/models";
-import type { CatalogRepository } from "@/features/catalog/ports";
+import type {
+  CatalogRepository,
+  PopularGamesCache
+} from "@/features/catalog/ports";
 
 export class SqliteCatalogRepository implements CatalogRepository {
   constructor(private readonly database: Database) {}
@@ -124,7 +128,51 @@ export class SqliteCatalogRepository implements CatalogRepository {
       .from(games)
       .where(eq(games.id, id))
       .get();
+    return row ? SqliteCatalogRepository.toGame(row) : null;
+  }
+
+  getPopular(platformId: number): PopularGamesCache | null {
+    const row = this.database
+      .select()
+      .from(platformPopularGames)
+      .where(eq(platformPopularGames.platformId, platformId))
+      .get();
     if (!row) return null;
+    if (row.gameIds.length === 0) {
+      return { games: [], fetchedAt: row.fetchedAt };
+    }
+    const cached = new Map(
+      this.database
+        .select()
+        .from(games)
+        .where(inArray(games.id, row.gameIds))
+        .all()
+        .map((game) => [game.id, SqliteCatalogRepository.toGame(game)])
+    );
+    return {
+      // SQLite does not preserve `IN` order, so rank is restored from the
+      // stored array. Ids whose game row is gone are dropped.
+      games: row.gameIds
+        .map((id) => cached.get(id))
+        .filter((game): game is GameSearchResult => game !== undefined),
+      fetchedAt: row.fetchedAt
+    };
+  }
+
+  replacePopular(platformId: number, gameIds: number[], now: number): void {
+    this.database
+      .insert(platformPopularGames)
+      .values({ platformId, gameIds, fetchedAt: now })
+      .onConflictDoUpdate({
+        target: platformPopularGames.platformId,
+        set: { gameIds, fetchedAt: now }
+      })
+      .run();
+  }
+
+  private static toGame(
+    row: typeof games.$inferSelect
+  ): GameSearchResult {
     return {
       id: row.id,
       name: row.title,

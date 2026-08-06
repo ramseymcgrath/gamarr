@@ -11,7 +11,10 @@ import { useMemo, useState } from "react";
 import { EmptyState } from "@/components/empty-state";
 import { StatusPill } from "@/components/status-pill";
 import { Button } from "@/components/ui/button";
-import type { PublicRelease } from "@/features/release-search/service";
+import type {
+  PublicRelease,
+  PublicReleaseSource
+} from "@/features/release-search/service";
 import { DownloadDialog } from "@/features/release-search/download-dialog";
 
 function formatBytes(value: number | null): string {
@@ -24,6 +27,21 @@ function formatBytes(value: number | null): string {
     unit += 1;
   }
   return `${size.toFixed(unit > 1 ? 1 : 0)} ${units[unit]}`;
+}
+
+function formatPublishedAt(value: number | null): string {
+  return value === null
+    ? "DATE UNKNOWN"
+    : new Date(value).toLocaleDateString();
+}
+
+/**
+ * MIN_SAFE_INTEGER, not -Infinity: `-Infinity - -Infinity` is NaN, which makes
+ * the comparator non-transitive as soon as two undated releases meet. Undated
+ * releases still sort last under "newest", exactly as before.
+ */
+function publishedOrder(release: PublicRelease): number {
+  return release.publishedAt ?? Number.MIN_SAFE_INTEGER;
 }
 
 export function ReleaseResults({
@@ -42,15 +60,16 @@ export function ReleaseResults({
     candidateId: string;
     title: string;
     indexerName: string;
+    source: PublicReleaseSource["source"];
   } | null>(null);
   const sorted = useMemo(() => [...releases].sort((left, right) => {
-    if (sort === "newest") return right.publishedAt - left.publishedAt;
+    if (sort === "newest") return publishedOrder(right) - publishedOrder(left);
     if (sort === "smallest") {
       return (left.size ?? Number.MAX_SAFE_INTEGER) -
         (right.size ?? Number.MAX_SAFE_INTEGER);
     }
     return right.score - left.score ||
-      right.publishedAt - left.publishedAt ||
+      publishedOrder(right) - publishedOrder(left) ||
       left.title.localeCompare(right.title);
   }), [releases, sort]);
 
@@ -108,7 +127,7 @@ export function ReleaseResults({
                 <div className="release-meta mono">
                   <span><HardDrive aria-hidden="true" /> {formatBytes(release.size)}</span>
                   <span>{release.category ?? "UNCATEGORIZED"}</span>
-                  <span>{new Date(release.publishedAt).toLocaleDateString()}</span>
+                  <span>{formatPublishedAt(release.publishedAt)}</span>
                 </div>
                 <div className="evidence">
                   {release.supportingReasons.map((reason) => (
@@ -130,10 +149,13 @@ export function ReleaseResults({
                     onClick={() => setSelection({
                       candidateId: source.candidateId,
                       title: release.title,
-                      indexerName: source.indexerName
+                      indexerName: source.indexerName,
+                      source: source.source
                     })}
                   >
-                    Send to SABnzbd
+                    {source.source === "internet-archive"
+                      ? "Download"
+                      : "Send to SABnzbd"}
                     <small>{source.indexerName}</small>
                   </Button>
                 ))}

@@ -35,6 +35,25 @@ test("configures providers and sends a selected release to SABnzbd", async ({
 
   await page.goto("/discover");
   await page.getByRole("button", { name: /Nintendo Switch/ }).click();
+  await expect(page.getByRole("heading", { name: "Popular on Nintendo Switch" }))
+    .toBeVisible();
+  await expect(page.getByRole("link", { name: /Fixture Popular Classic/ }))
+    .toBeVisible();
+
+  // The debut rule must drop it: IGDB ranks it highly by global rating count,
+  // but it only reached this platform nineteen years after release.
+  await expect(page.getByRole("link", { name: /Fixture Late Port/ }))
+    .toHaveCount(0);
+
+  // The axe scan at the end of this test runs on Library, and the 320px test
+  // visits Discover with no platform selected, so neither one ever sees the
+  // shelf. Scan it here, where it is on screen. Animations must settle first
+  // for the same compositing reason documented at the later scan.
+  await page.waitForFunction(() =>
+    document.getAnimations().every((animation) =>
+      animation.playState === "finished"));
+  expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
+
   await page.getByRole("searchbox").fill("Metroid");
   await page.getByRole("button", { name: "Search games" }).click();
   await page.getByRole("link", { name: /Metroid Prime 4: Beyond/ }).click();
@@ -47,6 +66,18 @@ test("configures providers and sends a selected release to SABnzbd", async ({
   await page.getByRole("link", { name: "Open library" }).click();
   await expect(page.getByRole("link", { name: /Metroid Prime 4: Beyond/ }))
     .toBeVisible();
+
+  // Every route is wrapped in .page, which fades in via the page-enter
+  // keyframes over 360ms. axe derives contrast from composited pixels, so
+  // scanning mid-fade measures a partially transparent element: the primary
+  // button was reported at roughly 44% opacity as #f6f7f2 on #8fa9d1 (2.2:1),
+  // with the exact ratio drifting between runs, while the settled colours are
+  // white on --blue #184fb3 at 7.48:1 — comfortably past AA and AAA.
+  // Let animations settle so the scan measures the real design. Both keyframes
+  // in globals.css are finite, so this cannot hang.
+  await page.waitForFunction(() =>
+    document.getAnimations().every((animation) =>
+      animation.playState === "finished"));
 
   const results = await new AxeBuilder({ page }).analyze();
   expect(results.violations).toEqual([]);

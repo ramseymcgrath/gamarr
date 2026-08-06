@@ -10,6 +10,7 @@ const lease = (response: Response) => ({
 const candidate = {
   id: "candidate",
   expiresAt: 2_000,
+  source: "newznab" as const,
   indexerId: "indexer",
   indexerConfigRevision: 1,
   guid: "guid",

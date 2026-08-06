@@ -54,6 +54,7 @@ export function SettingsScreen({
   const [busy, setBusy] = useState<string | null>(null);
   const [igdbSecret, setIgdbSecret] = useState("");
   const [sabKey, setSabKey] = useState("");
+  const [qbPassword, setQbPassword] = useState("");
 
   const run = async (label: string, action: () => Promise<unknown>) => {
     setBusy(label);
@@ -99,6 +100,23 @@ export function SettingsScreen({
       });
       await mutate("/api/settings/sabnzbd/test", "POST");
       setSabKey("");
+    });
+  };
+
+  const saveQbittorrent = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    void run("qBittorrent save", async () => {
+      await mutate("/api/settings/qbittorrent", "PUT", {
+        baseUrl: form.get("baseUrl"),
+        username: form.get("username"),
+        password: qbPassword
+          ? { action: "replace", value: qbPassword }
+          : { action: "retain" },
+        defaultCategory: String(form.get("defaultCategory") ?? "") || null
+      });
+      await mutate("/api/settings/qbittorrent/test", "POST");
+      setQbPassword("");
     });
   };
 
@@ -161,6 +179,11 @@ export function SettingsScreen({
                 type="password"
                 value={igdbSecret}
                 onChange={(event) => setIgdbSecret(event.target.value)}
+                // Blank submits `{ action: "retain" }`, which the service
+                // rejects with "A replacement secret is required" when nothing
+                // is stored yet. Required only in that case, so the retain
+                // path still works once a secret exists.
+                required={!settings.igdb?.hasClientSecret}
                 placeholder={settings.igdb?.hasClientSecret
                   ? "Leave blank to retain"
                   : "Required"}
@@ -212,6 +235,7 @@ export function SettingsScreen({
                 type="password"
                 value={sabKey}
                 onChange={(event) => setSabKey(event.target.value)}
+                required={!settings.sabnzbd?.hasApiKey}
                 placeholder={settings.sabnzbd?.hasApiKey
                   ? "Leave blank to retain"
                   : "Required"}
@@ -233,9 +257,70 @@ export function SettingsScreen({
           </form>
         </Card>
 
-        <Card id="platforms" className="settings-card settings-card-wide">
+        <Card id="qbittorrent" className="settings-card">
           <SettingsCardHeader
             number="03"
+            title="qBittorrent"
+            status={settings.qbittorrent?.lastTestStatus}
+          />
+          <p className="muted">
+            Gamarr sends selected Internet Archive torrents to qBittorrent.
+          </p>
+          <form onSubmit={saveQbittorrent} className="form-grid">
+            <label htmlFor="qbittorrent-base-url">
+              Base URL
+              <Input
+                id="qbittorrent-base-url"
+                name="baseUrl"
+                type="url"
+                required
+                placeholder="http://qbittorrent:8080"
+                defaultValue={settings.qbittorrent?.baseUrl}
+              />
+            </label>
+            <label htmlFor="qbittorrent-username">
+              Username
+              <Input
+                id="qbittorrent-username"
+                name="username"
+                required
+                defaultValue={settings.qbittorrent?.username}
+                autoComplete="username"
+              />
+            </label>
+            <label htmlFor="qbittorrent-password">
+              Password
+              <Input
+                id="qbittorrent-password"
+                type="password"
+                value={qbPassword}
+                onChange={(event) => setQbPassword(event.target.value)}
+                required={!settings.qbittorrent?.hasPassword}
+                placeholder={settings.qbittorrent?.hasPassword
+                  ? "Leave blank to retain"
+                  : "Required"}
+                autoComplete="new-password"
+              />
+              <CredentialState saved={settings.qbittorrent?.hasPassword ?? false} />
+            </label>
+            <label htmlFor="qbittorrent-default-category">
+              Default category
+              <Input
+                id="qbittorrent-default-category"
+                name="defaultCategory"
+                defaultValue={settings.qbittorrent?.defaultCategory ?? ""}
+                placeholder="games"
+              />
+            </label>
+            <Button type="submit" disabled={busy !== null}>
+              <Save aria-hidden="true" /> Save and test
+            </Button>
+          </form>
+        </Card>
+
+        <Card id="platforms" className="settings-card settings-card-wide">
+          <SettingsCardHeader
+            number="04"
             title="Platforms"
             status={platforms.some((platform) => platform.visible) ? "ready" : null}
           />
@@ -280,7 +365,7 @@ export function SettingsScreen({
 
         <Card id="indexers" className="settings-card settings-card-wide">
           <SettingsCardHeader
-            number="04"
+            number="05"
             title="Newznab indexers"
             status={settings.indexers.some((indexer) => indexer.enabled)
               ? "ready"

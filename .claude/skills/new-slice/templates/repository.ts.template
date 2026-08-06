@@ -1,0 +1,26 @@
+import "server-only";
+
+import type { Database } from "@/db/client";
+import type { __Feature__Record } from "@/features/__feature__/models";
+import type { __Feature__Repository } from "@/features/__feature__/ports";
+
+/**
+ * The only place in this slice that touches Drizzle.
+ *
+ * better-sqlite3 is synchronous, so every method here returns a value rather
+ * than a promise. Transactions must stay short and must never contain an
+ * `await` — holding the write lock across the event loop will hit the 250ms
+ * busy_timeout configured in db/client.ts. Claim the row first, then do network
+ * I/O outside the transaction.
+ */
+export class Sqlite__Feature__Repository implements __Feature__Repository {
+  constructor(private readonly database: Database) {}
+
+  list(): __Feature__Record[] {
+    throw new Error("Sqlite__Feature__Repository.list is not implemented");
+  }
+
+  get(_id: string): __Feature__Record | null {
+    throw new Error("Sqlite__Feature__Repository.get is not implemented");
+  }
+}

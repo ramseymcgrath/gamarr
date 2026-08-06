@@ -14,6 +14,16 @@ import type {
 class MemorySettingsRepository implements SettingsRepository {
   igdb: IgdbSettingsRecord | null = null;
   sabnzbd: SabnzbdSettingsRecord | null = null;
+  qbittorrent: {
+    baseUrl: string;
+    username: string;
+    password: string;
+    defaultCategory: string | null;
+    lastTestStatus: string | null;
+    lastTestedAt: number | null;
+    configRevision: number;
+    updatedAt: number;
+  } | null = null;
   indexers: IndexerRecord[] = [];
 
   getIgdb() {
@@ -30,6 +40,21 @@ class MemorySettingsRepository implements SettingsRepository {
 
   saveSabnzbd(value: SabnzbdSettingsRecord) {
     this.sabnzbd = value;
+  }
+
+  getQbittorrent() {
+    return this.qbittorrent;
+  }
+
+  saveQbittorrent(value: NonNullable<MemorySettingsRepository["qbittorrent"]>) {
+    this.qbittorrent = value;
+  }
+
+  recordQbittorrentTest(status: string, testedAt: number) {
+    if (this.qbittorrent) {
+      this.qbittorrent.lastTestStatus = status;
+      this.qbittorrent.lastTestedAt = testedAt;
+    }
   }
 
   listIndexers() {
@@ -57,6 +82,70 @@ class MemorySettingsRepository implements SettingsRepository {
 }
 
 describe("SettingsService", () => {
+  it("redacts the qBittorrent password", () => {
+    const repository = new MemorySettingsRepository();
+    const service = new SettingsService(repository);
+    repository.saveQbittorrent({
+      baseUrl: "http://qbit.lan:8080",
+      username: "admin",
+      password: "hunter2",
+      defaultCategory: "games",
+      lastTestStatus: null,
+      lastTestedAt: null,
+      configRevision: 1,
+      updatedAt: 1
+    });
+
+    const redacted = service.getRedacted();
+
+    expect(redacted.qbittorrent).toEqual({
+      baseUrl: "http://qbit.lan:8080",
+      username: "admin",
+      hasPassword: true,
+      defaultCategory: "games",
+      lastTestStatus: null,
+      lastTestedAt: null,
+      configRevision: 1
+    });
+    expect(JSON.stringify(redacted)).not.toContain("hunter2");
+  });
+
+  it("retains the stored qBittorrent password when the update says retain", () => {
+    const repository = new MemorySettingsRepository();
+    const service = new SettingsService(repository);
+    service.saveQbittorrent({
+      baseUrl: "http://qbit.lan:8080",
+      username: "admin",
+      password: { action: "replace", value: "hunter2" },
+      defaultCategory: null
+    });
+    service.saveQbittorrent({
+      baseUrl: "http://qbit.lan:9090",
+      username: "admin",
+      password: { action: "retain" },
+      defaultCategory: null
+    });
+
+    expect(repository.getQbittorrent()?.password).toBe("hunter2");
+  });
+
+  it("bumps the qBittorrent config revision only when something changed", () => {
+    const repository = new MemorySettingsRepository();
+    const service = new SettingsService(repository);
+    const input = {
+      baseUrl: "http://qbit.lan:8080",
+      username: "admin",
+      password: { action: "replace" as const, value: "hunter2" },
+      defaultCategory: null
+    };
+    service.saveQbittorrent(input);
+    const first = repository.getQbittorrent()!.configRevision;
+
+    service.saveQbittorrent({ ...input, password: { action: "retain" } });
+
+    expect(repository.getQbittorrent()!.configRevision).toBe(first);
+  });
+
   it("retains an existing IGDB secret without returning it", () => {
     const repository = new MemorySettingsRepository();
     const service = new SettingsService(repository, () => 1_000);

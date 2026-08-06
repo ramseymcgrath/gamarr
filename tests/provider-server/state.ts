@@ -5,9 +5,20 @@ export interface FixtureJob {
   progress: number;
 }
 
-export const fixtureState = {
+export interface FixtureTorrent {
+  tag: string;
+  polls: number;
+}
+
+export const fixtureState: {
+  jobs: FixtureJob[];
+  torrent: FixtureTorrent | null;
+  reset(): void;
+} = {
   jobs: [] as FixtureJob[],
+  torrent: null,
   reset() {
     this.jobs.splice(0);
+    this.torrent = null;
   }
 };

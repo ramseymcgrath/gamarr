@@ -4,23 +4,31 @@ import { SettingsService, type SettingsRepository } from "@/features/settings/se
 import type {
   IgdbSettingsRecord,
   IndexerRecord,
+  QbittorrentSettingsRecord,
   SabnzbdSettingsRecord
 } from "@/features/settings/models";
 import {
   handleDeleteIndexer,
   handleGetSettings,
   handlePutIndexer,
-  handlePutIgdb
+  handlePutIgdb,
+  handlePutQbittorrent
 } from "@/app/api/settings/handlers";
 import { parseOriginPolicy } from "@/lib/trusted-mutation";
 
 class MemoryRepository implements SettingsRepository {
   igdb: IgdbSettingsRecord | null = null;
+  qbittorrent: QbittorrentSettingsRecord | null = null;
   indexers: IndexerRecord[] = [];
   getIgdb = () => this.igdb;
   saveIgdb = (value: IgdbSettingsRecord) => { this.igdb = value; };
   getSabnzbd = (): SabnzbdSettingsRecord | null => null;
   saveSabnzbd = () => undefined;
+  getQbittorrent = () => this.qbittorrent;
+  saveQbittorrent = (value: QbittorrentSettingsRecord) => {
+    this.qbittorrent = value;
+  };
+  recordQbittorrentTest = () => undefined;
   listIndexers = (): IndexerRecord[] => this.indexers;
   saveIndexer = (value: IndexerRecord) => {
     const index = this.indexers.findIndex((item) => item.id === value.id);
@@ -53,6 +61,23 @@ function putRequest(origin = "http://gamarr.local") {
   });
 }
 
+function putQbittorrentRequest(origin = "http://gamarr.local") {
+  return new Request("http://gamarr.local/api/settings/qbittorrent", {
+    method: "PUT",
+    headers: {
+      host: "gamarr.local",
+      origin,
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({
+      baseUrl: "http://qbit.lan:8080",
+      username: "admin",
+      password: { action: "replace", value: "never-return-this" },
+      defaultCategory: "games"
+    })
+  });
+}
+
 describe("settings HTTP handlers", () => {
   it("saves IGDB settings and returns only the redacted model", async () => {
     const service = new SettingsService(new MemoryRepository(), () => 100);
@@ -79,6 +104,45 @@ describe("settings HTTP handlers", () => {
     });
   });
 
+  it("rejects a cross-origin qBittorrent update", async () => {
+    const repository = new MemoryRepository();
+    const service = new SettingsService(repository);
+
+    const response = await handlePutQbittorrent(
+      putQbittorrentRequest("http://attacker.test"),
+      { service, policy }
+    );
+
+    expect(response.status).toBe(403);
+    expect(repository.qbittorrent).toBeNull();
+  });
+
+  it("saves a qBittorrent update and returns only redacted settings", async () => {
+    const repository = new MemoryRepository();
+    const service = new SettingsService(repository, () => 100);
+
+    const response = await handlePutQbittorrent(
+      putQbittorrentRequest(),
+      { service, policy }
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(repository.qbittorrent).toMatchObject({
+      baseUrl: "http://qbit.lan:8080",
+      username: "admin",
+      password: "never-return-this",
+      defaultCategory: "games"
+    });
+    expect(body.qbittorrent).toMatchObject({
+      baseUrl: "http://qbit.lan:8080",
+      username: "admin",
+      hasPassword: true,
+      defaultCategory: "games"
+    });
+    expect(JSON.stringify(body)).not.toContain("never-return-this");
+  });
+
   it("gets a redacted settings snapshot", async () => {
     const service = new SettingsService(new MemoryRepository());
 
@@ -88,6 +152,7 @@ describe("settings HTTP handlers", () => {
     expect(await response.json()).toEqual({
       igdb: null,
       indexers: [],
+      qbittorrent: null,
       sabnzbd: null
     });
   });

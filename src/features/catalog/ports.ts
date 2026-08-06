@@ -1,13 +1,30 @@
 import type {
   GameSearchResult,
   Platform,
-  PlatformView
+  PlatformView,
+  PopularCandidate
 } from "@/features/catalog/models";
 
 export interface IgdbPort {
   testConnection(): Promise<void>;
   listPlatforms(): Promise<Platform[]>;
   searchGames(query: string, platformId: number): Promise<GameSearchResult[]>;
+  popularGames(platformId: number, limit: number): Promise<PopularCandidate[]>;
+}
+
+/**
+ * Which games the library already holds for a platform.
+ *
+ * Catalog must not read `library_entries` itself, so the library feature
+ * supplies this and `dependencies.ts` binds it.
+ */
+export interface LibraryMembershipPort {
+  gameIdsOnPlatform(platformId: number): number[];
+}
+
+export interface PopularGamesCache {
+  games: GameSearchResult[];
+  fetchedAt: number;
 }
 
 export interface CatalogRepository {
@@ -17,4 +34,6 @@ export interface CatalogRepository {
   setPlatformVisibility(id: number, visible: boolean, aliases: string[]): void;
   upsertGames(values: GameSearchResult[], now: number): void;
   getGame(id: number): GameSearchResult | null;
+  getPopular(platformId: number): PopularGamesCache | null;
+  replacePopular(platformId: number, gameIds: number[], now: number): void;
 }

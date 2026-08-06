@@ -25,6 +25,29 @@ export interface GameSearchResult {
   platformIds: number[];
 }
 
+/**
+ * A popular-shelf candidate before the debut rule has been applied. The two
+ * timestamps exist only to decide whether the game debuted on the selected
+ * platform; they are never persisted and never reach the browser.
+ */
+export interface PopularCandidate extends GameSearchResult {
+  firstReleaseDate: number | null;
+  platformReleaseDate: number | null;
+}
+
+/**
+ * A catalog result annotated with whether it is already in the library.
+ *
+ * Deliberately separate from `GameSearchResult`, which is persisted: library
+ * membership changes the moment a download is submitted, while the popular
+ * shelf is cached for seven days. Baking the flag into a cached row would
+ * leave a newly added game unbadged for up to a week, so it is computed on
+ * every read instead.
+ */
+export interface CatalogGameView extends GameSearchResult {
+  inLibrary: boolean;
+}
+
 export interface CatalogSearchInput {
   query: string;
   platformId: number;
