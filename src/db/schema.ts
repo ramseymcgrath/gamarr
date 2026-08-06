@@ -42,6 +42,14 @@ export const platformSettings = sqliteTable("platform_settings", {
   categoryIds: jsonText<string[]>("category_ids").notNull().default([])
 });
 
+export const platformPopularGames = sqliteTable("platform_popular_games", {
+  platformId: integer("platform_id")
+    .primaryKey()
+    .references(() => platforms.id, { onDelete: "cascade" }),
+  gameIds: jsonText<number[]>("game_ids").notNull().default([]),
+  fetchedAt: integer("fetched_at").notNull()
+});
+
 export const indexers = sqliteTable("indexers", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
@@ -106,6 +114,20 @@ export const sabnzbdSettings = sqliteTable("sabnzbd_settings", {
   )
 ]);
 
+export const qbittorrentSettings = sqliteTable("qbittorrent_settings", {
+  id: integer("id").primaryKey().default(1),
+  baseUrl: text("base_url").notNull(),
+  username: text("username").notNull(),
+  password: text("password").notNull(),
+  defaultCategory: text("default_category"),
+  lastTestStatus: text("last_test_status"),
+  lastTestedAt: integer("last_tested_at"),
+  configRevision: integer("config_revision").notNull().default(1),
+  updatedAt: integer("updated_at").notNull()
+}, (table) => [
+  check("qbittorrent_singleton", sql`${table.id} = 1`)
+]);
+
 export const libraryEntries = sqliteTable(
   "library_entries",
   {
@@ -129,8 +151,8 @@ export const releaseCandidates = sqliteTable(
   {
     id: text("id").primaryKey(),
     expiresAt: integer("expires_at").notNull(),
+    source: text("source").notNull().default("newznab"),
     indexerId: text("indexer_id")
-      .notNull()
       .references(() => indexers.id, { onDelete: "cascade" }),
     indexerConfigRevision: integer("indexer_config_revision").notNull(),
     guid: text("guid").notNull(),
@@ -142,7 +164,11 @@ export const releaseCandidates = sqliteTable(
     createdAt: integer("created_at").notNull()
   },
   (table) => [
-    index("release_candidates_expiry_idx").on(table.expiresAt)
+    index("release_candidates_expiry_idx").on(table.expiresAt),
+    check(
+      "release_candidates_source_valid",
+      sql`${table.source} in ('newznab', 'internet-archive')`
+    )
   ]
 );
 
@@ -156,11 +182,14 @@ export const downloadAttempts = sqliteTable(
     submissionKey: text("submission_key").notNull(),
     requestFingerprint: text("request_fingerprint").notNull(),
     status: text("status").notNull(),
+    source: text("source").notNull().default("newznab"),
     releaseTitle: text("release_title").notNull(),
     indexerId: text("indexer_id").references(() => indexers.id, { onDelete: "set null" }),
     indexerNameSnapshot: text("indexer_name_snapshot").notNull(),
     indexerUrlSnapshot: text("indexer_url_snapshot"),
     newznabGuid: text("newznab_guid"),
+    iaFileName: text("ia_file_name"),
+    torrentHash: text("torrent_hash"),
     size: integer("size"),
     category: text("category"),
     sabnzbdConfigRevision: integer("sabnzbd_config_revision").notNull(),

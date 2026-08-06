@@ -1,15 +1,20 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type {
   DownloadAttempt,
   SubmissionClaimInput
 } from "@/features/downloads/models";
-import { SabnzbdUploadError } from "@/features/downloads/port";
+import { isTerminalDownloadStatus } from "@/features/downloads/models";
+import {
+  SabnzbdUploadError,
+  TorrentAddError,
+  type TorrentJob
+} from "@/features/downloads/port";
 import type { DownloadRepository } from "@/features/downloads/repository";
 import { DownloadService } from "@/features/downloads/service";
 import type { CandidateRepository } from "@/features/release-search/ports";
 import type { SettingsRepository } from "@/features/settings/service";
-import { validationError } from "@/lib/errors";
+import { AppError, validationError } from "@/lib/errors";
 
 class MemoryDownloads implements DownloadRepository {
   attempts = new Map<string, DownloadAttempt>();
@@ -27,7 +32,12 @@ class MemoryDownloads implements DownloadRepository {
   }
 
   update(id: string, patch: Partial<DownloadAttempt>) {
-    const value = { ...this.attempts.get(id)!, ...patch };
+    const current = this.attempts.get(id);
+    if (!current) throw new Error("Download attempt does not exist");
+    // Mirrors SqliteDownloadRepository: a terminal row accepts no further
+    // writes, so a late callback cannot resurrect it.
+    if (isTerminalDownloadStatus(current.status)) return current;
+    const value = { ...current, ...patch };
     this.attempts.set(id, value);
     return value;
   }
@@ -50,11 +60,28 @@ class MemoryDownloads implements DownloadRepository {
       }
     }
   }
+
+  recoverStaleInternetArchiveDownloads(before: number, updatedAt: number) {
+    for (const attempt of this.attempts.values()) {
+      if (
+        attempt.source === "internet-archive" &&
+        (attempt.status === "Pending" || attempt.status === "Downloading") &&
+        attempt.updatedAt < before
+      ) {
+        this.update(attempt.id, {
+          status: "Failed",
+          failureDetail: "Download was interrupted before completion",
+          updatedAt
+        });
+      }
+    }
+  }
 }
 
 const candidate = {
   id: "candidate-a",
   expiresAt: 99_999,
+  source: "newznab" as const,
   indexerId: "indexer",
   indexerConfigRevision: 1,
   guid: "guid",
@@ -88,6 +115,9 @@ const settings: SettingsRepository = {
     updatedAt: 1
   }),
   saveSabnzbd: () => undefined,
+  getQbittorrent: () => null,
+  saveQbittorrent: () => undefined,
+  recordQbittorrentTest: () => undefined,
   listIndexers: () => [{
     id: "indexer",
     name: "Indexer",
@@ -110,12 +140,28 @@ const settings: SettingsRepository = {
 const input = (overrides: Partial<{
   submissionKey: string;
   candidateId: string;
+  fileName: string;
 }> = {}) => ({
   submissionKey: "same-key",
   candidateId: "candidate-a",
   gameId: 1,
   platformId: 130,
   ...overrides
+});
+
+const newznabService = (repository: MemoryDownloads) => new DownloadService({
+  repository,
+  candidates,
+  settings,
+  nzbFetcher: { fetch: async () => new Uint8Array([1]) },
+  sabFactory: () => ({
+    upload: async () => ({ jobId: "job" }),
+    getQueue: async () => [],
+    getHistory: async () => [],
+    testConnection: async () => undefined
+  }),
+  id: () => "attempt-1",
+  now: () => 1_000
 });
 
 describe("DownloadService", () => {
@@ -226,6 +272,75 @@ describe("DownloadService", () => {
     await service.submit(input());
     await expect(service.submit(input({ candidateId: "candidate-b" })))
       .rejects.toMatchObject({ code: "CONFLICT" });
+  });
+
+  it("replays a Newznab submission that carries an ignored file name", async () => {
+    const repository = new MemoryDownloads();
+    const service = newznabService(repository);
+
+    const first = await service.submit(input({ submissionKey: "nz-ignored" }));
+    const replay = await service.submit(input({
+      submissionKey: "nz-ignored",
+      fileName: "Game.zip"
+    }));
+
+    expect(replay.id).toBe(first.id);
+  });
+
+  it("replays a Newznab submission whose first request carried a file name", async () => {
+    const repository = new MemoryDownloads();
+    const service = newznabService(repository);
+
+    const first = await service.submit(input({
+      submissionKey: "nz-dropped",
+      fileName: "Game.zip"
+    }));
+    const replay = await service.submit(input({ submissionKey: "nz-dropped" }));
+
+    expect(replay.id).toBe(first.id);
+  });
+
+  it("still matches a legacy Newznab fingerprint written before file selection existed", async () => {
+    const repository = new MemoryDownloads();
+    const service = newznabService(repository);
+    // Literal SHA-256 of JSON.stringify(["candidate-a", 1, 130]). Recomputing
+    // this expectation would let an incompatible fingerprint change silently
+    // invalidate every deployed Newznab replay.
+    const legacyFingerprint =
+      "f0422f33b09f2cb694977563c0a76941b8615836a92927f617ea2919de1ccc4f";
+    repository.attempts.set("legacy", {
+      id: "legacy",
+      libraryEntryId: "library-1-130",
+      submissionKey: "legacy-key",
+      requestFingerprint: legacyFingerprint,
+      status: "Queued",
+      source: "newznab",
+      releaseTitle: "Game.NSW-GROUP",
+      indexerId: "indexer",
+      indexerNameSnapshot: "Indexer",
+      indexerUrlSnapshot: "https://indexer.test",
+      newznabGuid: "guid",
+      iaFileName: null,
+      torrentHash: null,
+      size: 1234,
+      category: "games",
+      sabnzbdConfigRevision: 1,
+      sabMarker: "gamarr-legacy",
+      sabJobId: "job",
+      progress: 0,
+      failureDetail: null,
+      sabRequestStartedAt: null,
+      createdAt: 1,
+      updatedAt: 1,
+      completedAt: null
+    });
+
+    const replay = await service.submit(input({
+      submissionKey: "legacy-key",
+      fileName: "Game.zip"
+    }));
+
+    expect(replay.id).toBe("legacy");
   });
 
   it("uses history precedence and never regresses a terminal attempt", async () => {
@@ -465,5 +580,979 @@ describe("DownloadService", () => {
       status: "Unknown",
       failureDetail: "SABnzbd acknowledgement was not confirmed"
     });
+  });
+});
+
+describe("DownloadService Internet Archive submissions", () => {
+  const iaCandidate = {
+    id: "candidate-ia",
+    expiresAt: 99_999,
+    source: "internet-archive" as const,
+    indexerId: null,
+    indexerConfigRevision: 0,
+    guid: "game-item",
+    title: "Game Name (USA)",
+    size: 4096,
+    downloadPath: "/details/game-item",
+    category: null,
+    sourceSnapshot: JSON.stringify({
+      indexerName: "Internet Archive",
+      identifier: "game-item",
+      origin: "https://archive.org"
+    }),
+    createdAt: 1
+  };
+
+  const iaCandidates: CandidateRepository = {
+    save: () => undefined,
+    get: (id) => id === "candidate-ia" ? iaCandidate : null
+  };
+
+  const noSabSettings: SettingsRepository = {
+    ...settings,
+    getSabnzbd: () => null
+  };
+
+  /** File names are matched by exact equality, exactly as the Internet Archive
+   * metadata lookup does — the padded entries exist so tests can prove the
+   * service never trims a name on its way upstream. */
+  const itemFiles = [
+    { name: "Game.zip", size: 512 },
+    { name: " Game.zip", size: 999 },
+    { name: " Game (USA).zip ", size: 777 }
+  ];
+
+  const iaPort = (overrides: {
+    download?: () => Promise<{ bytes: number; filePath: string }>;
+  } = {}) => {
+    const calls = {
+      downloads: 0,
+      fileInfo: 0,
+      requestedFileNames: [] as string[],
+      downloadedFileNames: [] as string[]
+    };
+    const port = {
+      getFileInfo: async (
+        { fileName }: { identifier: string; fileName: string }
+      ) => {
+        calls.fileInfo += 1;
+        calls.requestedFileNames.push(fileName);
+        const file = itemFiles.find((value) => value.name === fileName);
+        return file
+          ? { name: file.name, size: file.size, format: "ZIP", source: "original" }
+          : null;
+      },
+      download: async (input: {
+        fileName: string;
+        onProgress: (received: number, total: number | null) => void;
+      }) => {
+        calls.downloads += 1;
+        calls.downloadedFileNames.push(input.fileName);
+        if (overrides.download) return overrides.download();
+        input.onProgress(256, 512);
+        input.onProgress(512, 512);
+        return { bytes: 512, filePath: "/downloads/game-item/Game.zip" };
+      },
+      downloadDir: "/downloads",
+      maxBytes: 1_048_576
+    };
+    return { port, calls };
+  };
+
+  const iaInput = (overrides: Partial<{
+    submissionKey: string;
+    fileName: string;
+  }> = {}) => ({
+    submissionKey: "ia-key",
+    candidateId: "candidate-ia",
+    gameId: 1,
+    platformId: 130,
+    fileName: "Game.zip",
+    ...overrides
+  });
+
+  /** `build` freezes the clock at 1_000, which is younger than the stale
+   * window, so no fixture it produces can ever look stale. Tests that exercise
+   * recovery or the heartbeat inject their own clock here instead. */
+  const buildWithClock = (
+    repository: MemoryDownloads,
+    port: ReturnType<typeof iaPort>["port"],
+    now: () => number,
+    extra: {
+      scheduleHeartbeat?: (
+        callback: () => void,
+        intervalMs: number
+      ) => () => void;
+    } = {}
+  ) => new DownloadService({
+    repository,
+    candidates: iaCandidates,
+    settings: noSabSettings,
+    nzbFetcher: { fetch: async () => new Uint8Array() },
+    sabFactory: () => ({
+      upload: async () => {
+        throw new Error("SABnzbd must not be used for direct downloads");
+      },
+      getQueue: async () => [],
+      getHistory: async () => [],
+      testConnection: async () => undefined
+    }),
+    internetArchive: port,
+    id: () => "attempt-1",
+    now,
+    ...extra
+  });
+
+  const build = (
+    repository: MemoryDownloads,
+    port: ReturnType<typeof iaPort>["port"]
+  ) => buildWithClock(repository, port, () => 1_000);
+
+  const torrentInput = (overrides: Partial<{
+    submissionKey: string;
+    delivery: "file" | "torrent";
+    fileName: string;
+  }> = {}) => ({
+    submissionKey: "torrent-key",
+    candidateId: "candidate-ia",
+    gameId: 1,
+    platformId: 130,
+    delivery: "torrent" as const,
+    ...overrides
+  });
+
+  const torrentSetup = (overrides: {
+    hash?: string | null;
+    itemTorrent?: { name: string; size: number | null } | null;
+    clientConfigured?: boolean;
+    addError?: unknown;
+    fetchError?: unknown;
+    torrents?: TorrentJob[];
+    listError?: unknown;
+    sabConfigured?: boolean;
+    sabError?: unknown;
+    now?: () => number;
+  } = {}) => {
+    const repository = new MemoryDownloads();
+    const add = vi.fn(async () => {
+      if (overrides.addError !== undefined) throw overrides.addError;
+      return { hash: overrides.hash === undefined ? "abc123" : overrides.hash };
+    });
+    const findTorrent = vi.fn(async () => overrides.itemTorrent === undefined
+      ? { name: "game-item_archive.torrent", size: 2048 }
+      : overrides.itemTorrent);
+    const fetchTorrent = vi.fn(async () => {
+      if (overrides.fetchError !== undefined) throw overrides.fetchError;
+      return new Uint8Array([1, 2, 3]);
+    });
+    const list = vi.fn(async () => {
+      if (overrides.listError !== undefined) throw overrides.listError;
+      return overrides.torrents ?? [];
+    });
+    const scheduleHeartbeat = vi.fn(() => () => undefined);
+    const service = new DownloadService({
+      repository,
+      candidates: iaCandidates,
+      settings: overrides.sabConfigured ? settings : noSabSettings,
+      nzbFetcher: { fetch: async () => new Uint8Array() },
+      sabFactory: () => ({
+        upload: async () => {
+          throw new Error("SABnzbd must not be used for torrent submissions");
+        },
+        getQueue: async () => {
+          if (overrides.sabError !== undefined) throw overrides.sabError;
+          return [];
+        },
+        getHistory: async () => [],
+        testConnection: async () => undefined
+      }),
+      internetArchiveTorrent: {
+        findTorrent,
+        fetchTorrent,
+        client: () => overrides.clientConfigured === false ? null : {
+          add,
+          list,
+          testConnection: async () => undefined
+        },
+        defaultCategory: () => "archive"
+      },
+      id: () => "attempt-1",
+      now: overrides.now ?? (() => 1_000),
+      scheduleHeartbeat
+    });
+    return {
+      service,
+      repository,
+      add,
+      list,
+      findTorrent,
+      fetchTorrent,
+      scheduleHeartbeat
+    };
+  };
+
+  const queuedTorrent = async (overrides: Parameters<typeof torrentSetup>[0] = {}) => {
+    const torrents: TorrentJob[] = [];
+    const setup = torrentSetup({ ...overrides, torrents });
+    const attempt = await setup.service.submit(torrentInput());
+    return { ...setup, attempt, torrents };
+  };
+
+  it.each([
+    ["uploading", "Completed", 100],
+    ["stalledUP", "Completed", 100],
+    ["pausedUP", "Completed", 100],
+    ["queuedUP", "Completed", 100],
+    ["forcedUP", "Completed", 100],
+    ["checkingUP", "Completed", 100],
+    ["error", "Failed", 50],
+    ["missingFiles", "Failed", 50],
+    ["downloading", "Downloading", 50],
+    ["stalledDL", "Downloading", 50],
+    ["metaDL", "Downloading", 50],
+    ["forcedDL", "Downloading", 50],
+    ["checkingDL", "Downloading", 50],
+    ["allocating", "Downloading", 50],
+    ["queuedDL", "Queued", 50],
+    ["pausedDL", "Queued", 50],
+    ["checkingResumeData", "Queued", 50],
+    ["moving", "Queued", 50]
+  ] as const)("maps torrent state %s to %s", async (
+    state,
+    expectedStatus,
+    expectedProgress
+  ) => {
+    const { service, attempt, torrents } = await queuedTorrent();
+    torrents.push({
+      hash: "abc123",
+      tags: [attempt.sabMarker],
+      state,
+      progress: 50
+    });
+
+    const [result] = await service.reconcile([attempt.id]);
+
+    expect(result).toMatchObject({
+      status: expectedStatus,
+      progress: expectedProgress
+    });
+  });
+
+  it("leaves an unrecognised torrent state untouched", async () => {
+    const { service, attempt, torrents, list } = await queuedTorrent();
+    torrents.push({
+      hash: "abc123",
+      tags: [attempt.sabMarker],
+      state: "someFutureState",
+      progress: 50
+    });
+
+    const [result] = await service.reconcile([attempt.id]);
+
+    expect(result).toMatchObject({
+      status: "Queued",
+      progress: 0,
+      failureDetail: null,
+      completedAt: null
+    });
+    expect(list).toHaveBeenCalledOnce();
+  });
+
+  it("matches by tag and records the hash when none was returned by add", async () => {
+    const { service, attempt, torrents } = await queuedTorrent({ hash: null });
+    torrents.push({
+      hash: "abc123",
+      tags: ["other", attempt.sabMarker],
+      state: "uploading",
+      progress: 75
+    });
+
+    const [result] = await service.reconcile([attempt.id]);
+
+    expect(result).toMatchObject({
+      status: "Completed",
+      progress: 100,
+      torrentHash: "abc123",
+      failureDetail: null,
+      completedAt: 1_000
+    });
+  });
+
+  it("does not fall back to a matching tag when a different hash is recorded", async () => {
+    const { service, attempt, torrents, list } = await queuedTorrent();
+    torrents.push({
+      hash: "different-hash",
+      tags: [attempt.sabMarker],
+      state: "uploading",
+      progress: 100
+    });
+
+    const [result] = await service.reconcile([attempt.id]);
+
+    expect(result?.status).toBe("Queued");
+    expect(list).toHaveBeenCalledOnce();
+  });
+
+  it("clamps torrent progress to the attempt constraint", async () => {
+    const { service, attempt, torrents } = await queuedTorrent();
+    torrents.push({
+      hash: "abc123",
+      tags: [],
+      state: "downloading",
+      progress: 125
+    });
+
+    const [result] = await service.reconcile([attempt.id]);
+
+    expect(result).toMatchObject({ status: "Downloading", progress: 100 });
+  });
+
+  it("reconciles torrents with SABnzbd entirely unconfigured", async () => {
+    const { service, attempt, torrents } = await queuedTorrent();
+    torrents.push({
+      hash: "abc123",
+      tags: [attempt.sabMarker],
+      state: "uploading",
+      progress: 100
+    });
+
+    const [result] = await service.reconcile([attempt.id]);
+
+    expect(result?.status).toBe("Completed");
+  });
+
+  it("reconciles torrents when SABnzbd reconciliation fails", async () => {
+    const { service, attempt, torrents } = await queuedTorrent({
+      sabConfigured: true,
+      sabError: new Error("SABnzbd unavailable")
+    });
+    torrents.push({
+      hash: "abc123",
+      tags: [attempt.sabMarker],
+      state: "uploading",
+      progress: 100
+    });
+
+    const [result] = await service.reconcile([attempt.id]);
+
+    expect(result?.status).toBe("Completed");
+  });
+
+  it("still reconciles SABnzbd when torrent reconciliation fails", async () => {
+    const repository = new MemoryDownloads();
+    const list = vi.fn(async () => {
+      throw new Error("qBittorrent unavailable");
+    });
+    const service = new DownloadService({
+      repository,
+      candidates,
+      settings,
+      nzbFetcher: { fetch: async () => new Uint8Array([1]) },
+      sabFactory: () => ({
+        upload: async () => ({ jobId: "job" }),
+        getQueue: async () => [],
+        getHistory: async () => [{
+          jobId: "job",
+          marker: "gamarr-attempt-1",
+          status: "Completed",
+          progress: 100
+        }],
+        testConnection: async () => undefined
+      }),
+      internetArchiveTorrent: {
+        findTorrent: async () => null,
+        fetchTorrent: async () => new Uint8Array(),
+        client: () => ({
+          add: async () => ({ hash: null }),
+          list,
+          testConnection: async () => undefined
+        }),
+        defaultCategory: () => null
+      },
+      id: () => "attempt-1",
+      now: () => 2_000
+    });
+    const attempt = await service.submit(input({ submissionKey: "qbit-down" }));
+
+    const [result] = await service.reconcile([attempt.id]);
+
+    expect(result?.status).toBe("Completed");
+    expect(list).toHaveBeenCalledOnce();
+  });
+
+  it("swallows a torrent lookup failure and leaves its attempt reconcilable", async () => {
+    const { service, attempt, list } = await queuedTorrent({
+      listError: new Error("qBittorrent unavailable")
+    });
+
+    const [result] = await service.reconcile([attempt.id]);
+
+    expect(result?.status).toBe("Queued");
+    expect(list).toHaveBeenCalledOnce();
+  });
+
+  it("does not fail an in-flight torrent attempt during stale recovery", async () => {
+    const now = 1_000_000;
+    const { service, repository, attempt } = await queuedTorrent({
+      now: () => now
+    });
+    repository.update(attempt.id, {
+      status: "Downloading",
+      progress: 50,
+      updatedAt: now - 120_000
+    });
+
+    service.recoverStaleSubmissions(0);
+
+    expect(repository.get(attempt.id)).toMatchObject({
+      status: "Downloading",
+      progress: 50,
+      failureDetail: null
+    });
+  });
+
+  it("submits a torrent, records its hash, and does not start a heartbeat", async () => {
+    const {
+      service,
+      repository,
+      add,
+      fetchTorrent,
+      scheduleHeartbeat
+    } = torrentSetup();
+
+    const attempt = await service.submit(torrentInput());
+
+    expect(attempt).toMatchObject({
+      status: "Queued",
+      source: "internet-archive-torrent",
+      iaFileName: null,
+      torrentHash: "abc123",
+      category: "archive"
+    });
+    expect(repository.get(attempt.id)?.torrentHash).toBe("abc123");
+    expect(fetchTorrent).toHaveBeenCalledWith(
+      "game-item",
+      "game-item_archive.torrent"
+    );
+    expect(add).toHaveBeenCalledWith({
+      torrent: new Uint8Array([1, 2, 3]),
+      filename: "game-item_archive.torrent",
+      category: "archive",
+      tag: `gamarr-${attempt.id}`
+    });
+    expect(scheduleHeartbeat).not.toHaveBeenCalled();
+  });
+
+  it("queues a torrent when qBittorrent reports no hash", async () => {
+    const { service } = torrentSetup({ hash: null });
+
+    const attempt = await service.submit(torrentInput());
+
+    expect(attempt).toMatchObject({ status: "Queued", torrentHash: null });
+  });
+
+  it("replays an identical torrent submission without adding it again", async () => {
+    const { service, add } = torrentSetup();
+    const request = torrentInput();
+
+    const first = await service.submit(request);
+    const replay = await service.submit(request);
+
+    expect(replay.id).toBe(first.id);
+    expect(add).toHaveBeenCalledTimes(1);
+  });
+
+  it("conflicts when a torrent key is replayed as a direct file", async () => {
+    const { service } = torrentSetup();
+    await service.submit(torrentInput());
+
+    await expect(service.submit(torrentInput({
+      delivery: "file",
+      fileName: "Game.zip"
+    }))).rejects.toMatchObject({ code: "CONFLICT", status: 409 });
+  });
+
+  it("marks a rejected torrent Failed with its safe AppError detail", async () => {
+    const { service } = torrentSetup({
+      addError: new TorrentAddError(
+        "rejected",
+        "qBittorrent rejected the torrent"
+      )
+    });
+
+    const attempt = await service.submit(torrentInput());
+
+    expect(attempt).toMatchObject({
+      status: "Failed",
+      failureDetail: "qBittorrent rejected the torrent"
+    });
+  });
+
+  it("leaves a torrent Unknown when its acknowledgement is ambiguous", async () => {
+    const { service } = torrentSetup({
+      addError: new TorrentAddError(
+        "ambiguous",
+        "qBittorrent did not confirm the torrent"
+      )
+    });
+
+    const attempt = await service.submit(torrentInput());
+
+    expect(attempt).toMatchObject({
+      status: "Unknown",
+      failureDetail: "qBittorrent did not confirm the torrent"
+    });
+  });
+
+  it("redacts a raw qBittorrent error from failure detail", async () => {
+    const { service } = torrentSetup({
+      addError: new Error("request failed at http://admin:secret@qbit.test")
+    });
+
+    const attempt = await service.submit(torrentInput());
+
+    expect(attempt).toMatchObject({
+      status: "Unknown",
+      failureDetail: "qBittorrent acknowledgement was not confirmed"
+    });
+    expect(attempt.failureDetail).not.toContain("admin:secret");
+  });
+
+  it("rejects a torrent submission when qBittorrent is not configured", async () => {
+    const { service, repository } = torrentSetup({ clientConfigured: false });
+
+    await expect(service.submit(torrentInput())).rejects.toMatchObject({
+      code: "VALIDATION",
+      status: 400,
+      message: "qBittorrent is not configured"
+    });
+    expect(repository.list()).toHaveLength(0);
+  });
+
+  it("rejects a torrent submission for an item with no torrent", async () => {
+    const { service, repository } = torrentSetup({ itemTorrent: null });
+
+    await expect(service.submit(torrentInput())).rejects.toMatchObject({
+      code: "VALIDATION",
+      status: 400,
+      message: "This item has no torrent; download a file instead"
+    });
+    expect(repository.list()).toHaveLength(0);
+  });
+
+  it("rejects a torrent submission that also names a file", async () => {
+    const { service, findTorrent, repository } = torrentSetup();
+
+    await expect(service.submit(torrentInput({ fileName: "Game.zip" })))
+      .rejects.toMatchObject({
+        code: "VALIDATION",
+        status: 400,
+        message: "A torrent covers the whole item; do not select a file"
+      });
+    expect(findTorrent).not.toHaveBeenCalled();
+    expect(repository.list()).toHaveLength(0);
+  });
+
+  it("fails torrent retrieval without exposing a raw upstream error", async () => {
+    const { service, add } = torrentSetup({
+      fetchError: new Error(
+        "fetch failed for https://user:secret@archive.invalid/torrent"
+      )
+    });
+
+    const attempt = await service.submit(torrentInput());
+
+    expect(attempt).toMatchObject({
+      status: "Failed",
+      failureDetail: "Torrent retrieval failed"
+    });
+    expect(add).not.toHaveBeenCalled();
+  });
+
+  it("claims, downloads outside the request, and completes without SABnzbd", async () => {
+    const repository = new MemoryDownloads();
+    const { port, calls } = iaPort();
+    const service = build(repository, port);
+
+    const attempt = await service.submit(iaInput());
+
+    expect(attempt).toMatchObject({
+      status: "Downloading",
+      source: "internet-archive",
+      indexerId: null,
+      indexerNameSnapshot: "Internet Archive",
+      indexerUrlSnapshot: "https://archive.org",
+      iaFileName: "Game.zip",
+      sabJobId: null,
+      size: 512
+    });
+    await vi.waitFor(() => {
+      expect(repository.get(attempt.id)?.status).toBe("Completed");
+    });
+    expect(repository.get(attempt.id)).toMatchObject({
+      progress: 100,
+      size: 512,
+      completedAt: 1_000,
+      failureDetail: null
+    });
+    expect(calls.downloads).toBe(1);
+  });
+
+  it("marks the attempt Failed when the archive node fails mid-stream", async () => {
+    const repository = new MemoryDownloads();
+    const { port } = iaPort({
+      // AppError, matching what InternetArchiveDownloader actually throws —
+      // only those messages are written to be shown to an operator.
+      download: async () => {
+        throw new AppError(
+          "UNAVAILABLE",
+          502,
+          "Internet Archive file exceeded the size limit"
+        );
+      }
+    });
+    const service = build(repository, port);
+
+    const attempt = await service.submit(iaInput({ submissionKey: "ia-fail" }));
+
+    await vi.waitFor(() => {
+      expect(repository.get(attempt.id)?.status).toBe("Failed");
+    });
+    expect(repository.get(attempt.id)?.failureDetail)
+      .toBe("Internet Archive file exceeded the size limit");
+  });
+
+  it("does not persist the message of a non-AppError failure", async () => {
+    const repository = new MemoryDownloads();
+    // A raw node:fs error: its message carries the absolute download path, and
+    // `failureDetail` is persisted and rendered in Activity. Only AppError
+    // messages are written to be seen, so anything else must be replaced.
+    const { port } = iaPort({
+      download: async () => {
+        throw new Error(
+          "EACCES: permission denied, mkdir '/config/downloads/game-item'"
+        );
+      }
+    });
+    const service = build(repository, port);
+
+    const attempt = await service.submit(iaInput({ submissionKey: "ia-raw" }));
+
+    await vi.waitFor(() => {
+      expect(repository.get(attempt.id)?.status).toBe("Failed");
+    });
+    const detail = repository.get(attempt.id)?.failureDetail;
+    expect(detail).toBe("Internet Archive download failed");
+    expect(detail).not.toContain("/config/downloads");
+    expect(detail).not.toContain("EACCES");
+  });
+
+  it("replays the same submission key and conflicts on a different file", async () => {
+    const repository = new MemoryDownloads();
+    const { port, calls } = iaPort();
+    const service = build(repository, port);
+
+    const first = await service.submit(iaInput());
+    await vi.waitFor(() => {
+      expect(repository.get(first.id)?.status).toBe("Completed");
+    });
+    const second = await service.submit(iaInput());
+
+    expect(second.id).toBe(first.id);
+    expect(calls.downloads).toBe(1);
+    await expect(service.submit(iaInput({ fileName: "Other.zip" })))
+      .rejects.toMatchObject({ code: "CONFLICT" });
+  });
+
+  it("requires a file selection for Internet Archive candidates", async () => {
+    const repository = new MemoryDownloads();
+    const { port } = iaPort();
+    const service = build(repository, port);
+
+    await expect(service.submit({
+      submissionKey: "no-file",
+      candidateId: "candidate-ia",
+      gameId: 1,
+      platformId: 130
+    })).rejects.toMatchObject({ code: "VALIDATION" });
+    await expect(service.submit(iaInput({ fileName: "../escape" })))
+      .rejects.toMatchObject({ code: "VALIDATION" });
+    expect(repository.list()).toHaveLength(0);
+  });
+
+  it("rejects a file the item no longer lists before claiming anything", async () => {
+    const repository = new MemoryDownloads();
+    const { port } = iaPort();
+    const service = build(repository, port);
+
+    await expect(service.submit(iaInput({ fileName: "Missing.zip" })))
+      .rejects.toMatchObject({
+        code: "VALIDATION",
+        message: "The selected file is no longer available; search again"
+      });
+    expect(repository.list()).toHaveLength(0);
+  });
+
+  it("uses a listed file name verbatim when it carries surrounding whitespace", async () => {
+    const repository = new MemoryDownloads();
+    const { port, calls } = iaPort();
+    const service = build(repository, port);
+
+    const attempt = await service.submit(iaInput({
+      submissionKey: "ia-padded",
+      fileName: " Game (USA).zip "
+    }));
+
+    expect(calls.requestedFileNames).toEqual([" Game (USA).zip "]);
+    expect(attempt).toMatchObject({
+      status: "Downloading",
+      iaFileName: " Game (USA).zip ",
+      size: 777
+    });
+    await vi.waitFor(() => {
+      expect(repository.get(attempt.id)?.status).toBe("Completed");
+    });
+    expect(calls.downloadedFileNames).toEqual([" Game (USA).zip "]);
+  });
+
+  it("rejects a whitespace-only file name before touching the network", async () => {
+    const repository = new MemoryDownloads();
+    const { port, calls } = iaPort();
+    const service = build(repository, port);
+
+    await expect(service.submit(iaInput({ fileName: "   " })))
+      .rejects.toMatchObject({ code: "VALIDATION" });
+    expect(calls.fileInfo).toBe(0);
+    expect(repository.list()).toHaveLength(0);
+  });
+
+  it("treats two item files differing only by whitespace as different files", async () => {
+    const repository = new MemoryDownloads();
+    const { port } = iaPort();
+    const service = build(repository, port);
+
+    const padded = await service.submit(iaInput({
+      submissionKey: "ia-distinct",
+      fileName: " Game.zip"
+    }));
+
+    expect(padded).toMatchObject({ iaFileName: " Game.zip", size: 999 });
+  });
+
+  it("treats a padded Internet Archive name as a different submission", async () => {
+    const repository = new MemoryDownloads();
+    const { port } = iaPort();
+    const service = build(repository, port);
+
+    await service.submit(iaInput({ submissionKey: "ia-identity" }));
+
+    await expect(service.submit(iaInput({
+      submissionKey: "ia-identity",
+      fileName: " Game.zip"
+    }))).rejects.toMatchObject({ code: "CONFLICT" });
+  });
+
+  it("conflicts when an Internet Archive key is replayed with no file name", async () => {
+    const repository = new MemoryDownloads();
+    const { port } = iaPort();
+    const service = build(repository, port);
+
+    await service.submit(iaInput({ submissionKey: "ia-nofile" }));
+
+    await expect(service.submit({
+      submissionKey: "ia-nofile",
+      candidateId: "candidate-ia",
+      gameId: 1,
+      platformId: 130
+    })).rejects.toMatchObject({ code: "CONFLICT" });
+  });
+
+  it("returns Internet Archive attempts from reconcile without SABnzbd settings", async () => {
+    const repository = new MemoryDownloads();
+    const { port } = iaPort();
+    const service = build(repository, port);
+
+    const attempt = await service.submit(iaInput({ submissionKey: "ia-poll" }));
+    await vi.waitFor(() => {
+      expect(repository.get(attempt.id)?.status).toBe("Completed");
+    });
+
+    const [returned] = await service.reconcile([attempt.id]);
+    expect(returned).toMatchObject({ id: attempt.id, status: "Completed" });
+  });
+
+  const CLOCK = 1_000_000;
+
+  const fixture = (overrides: Partial<DownloadAttempt>): DownloadAttempt => ({
+    id: "seeded",
+    libraryEntryId: "library",
+    submissionKey: "seeded-key",
+    requestFingerprint: "fingerprint",
+    status: "Downloading",
+    source: "internet-archive",
+    releaseTitle: "Game",
+    indexerId: null,
+    indexerNameSnapshot: "Internet Archive",
+    indexerUrlSnapshot: "https://archive.org",
+    newznabGuid: null,
+    iaFileName: "Game.zip",
+    torrentHash: null,
+    size: null,
+    category: null,
+    sabnzbdConfigRevision: 0,
+    sabMarker: "gamarr-seeded",
+    sabJobId: null,
+    progress: 40,
+    failureDetail: null,
+    sabRequestStartedAt: null,
+    createdAt: 1,
+    updatedAt: CLOCK - 120_000,
+    completedAt: null,
+    ...overrides
+  });
+
+  it("fails abandoned Internet Archive downloads without touching live ones", () => {
+    const repository = new MemoryDownloads();
+    const live = fixture({ id: "ia-live", updatedAt: CLOCK - 1_000 });
+    repository.attempts.set("ia-stale", fixture({ id: "ia-stale" }));
+    repository.attempts.set("ia-pending", fixture({
+      id: "ia-pending",
+      status: "Pending"
+    }));
+    repository.attempts.set("ia-live", live);
+    repository.attempts.set("nz-stuck", fixture({
+      id: "nz-stuck",
+      source: "newznab",
+      submissionKey: "nz-key",
+      sabMarker: "gamarr-nz"
+    }));
+    const { port } = iaPort();
+    const service = buildWithClock(repository, port, () => CLOCK);
+
+    service.recoverStaleSubmissions();
+
+    expect(repository.get("ia-stale")).toMatchObject({
+      status: "Failed",
+      failureDetail: "Download was interrupted before completion"
+    });
+    expect(repository.get("ia-pending")?.status).toBe("Failed");
+    // Unchanged object identity of every field: a heartbeat this recent means
+    // the stream is alive, so recovery must not write to the row at all.
+    expect(repository.get("ia-live")).toEqual(live);
+    expect(repository.get("nz-stuck")?.status).toBe("Downloading");
+  });
+
+  it("leaves terminal Internet Archive attempts alone during recovery", () => {
+    const repository = new MemoryDownloads();
+    const completed = fixture({
+      id: "ia-done",
+      status: "Completed",
+      progress: 100,
+      completedAt: 5
+    });
+    const failed = fixture({
+      id: "ia-failed",
+      status: "Failed",
+      failureDetail: "earlier failure"
+    });
+    repository.attempts.set("ia-done", completed);
+    repository.attempts.set("ia-failed", failed);
+    const { port } = iaPort();
+    const service = buildWithClock(repository, port, () => CLOCK);
+
+    service.recoverStaleSubmissions();
+
+    expect(repository.get("ia-done")).toEqual(completed);
+    expect(repository.get("ia-failed")).toEqual(failed);
+  });
+
+  it("keeps a streaming download alive across a repeated recovery pass", async () => {
+    const repository = new MemoryDownloads();
+    let release: (() => void) | undefined;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { port } = iaPort({
+      download: async () => {
+        await blocked;
+        return { bytes: 512, filePath: "/downloads/game-item/Game.zip" };
+      }
+    });
+    const service = buildWithClock(repository, port, () => CLOCK);
+
+    const attempt = await service.submit(iaInput({ submissionKey: "ia-hmr" }));
+    service.recoverStaleSubmissions();
+
+    expect(repository.get(attempt.id)).toMatchObject({
+      status: "Downloading",
+      failureDetail: null
+    });
+
+    release?.();
+    await vi.waitFor(() => {
+      expect(repository.get(attempt.id)?.status).toBe("Completed");
+    });
+  });
+
+  it("heartbeats a stalled download that never reports progress", async () => {
+    const repository = new MemoryDownloads();
+    let clock = CLOCK;
+    let release: (() => void) | undefined;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { port } = iaPort({
+      download: async () => {
+        await blocked;
+        return { bytes: 512, filePath: "/downloads/game-item/Game.zip" };
+      }
+    });
+    let tick: (() => void) | undefined;
+    let cancelled = false;
+    const service = buildWithClock(repository, port, () => clock, {
+      scheduleHeartbeat: (callback) => {
+        tick = callback;
+        return () => {
+          cancelled = true;
+        };
+      }
+    });
+
+    const attempt = await service.submit(iaInput({ submissionKey: "ia-beat" }));
+    expect(repository.get(attempt.id)?.updatedAt).toBe(CLOCK);
+
+    clock = CLOCK + 5_000;
+    tick?.();
+
+    expect(repository.get(attempt.id)).toMatchObject({
+      status: "Downloading",
+      progress: 0,
+      updatedAt: CLOCK + 5_000
+    });
+
+    release?.();
+    await vi.waitFor(() => {
+      expect(repository.get(attempt.id)?.status).toBe("Completed");
+    });
+    expect(cancelled).toBe(true);
+  });
+
+  it("refuses to move a terminal attempt back to a non-terminal status", () => {
+    const repository = new MemoryDownloads();
+    const completed = fixture({
+      id: "ia-done",
+      status: "Completed",
+      progress: 100,
+      completedAt: 5
+    });
+    repository.attempts.set("ia-done", completed);
+
+    const result = repository.update("ia-done", {
+      status: "Downloading",
+      progress: 10
+    });
+
+    expect(result).toEqual(completed);
+    expect(repository.get("ia-done")).toEqual(completed);
   });
 });

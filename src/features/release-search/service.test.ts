@@ -6,10 +6,11 @@ import type {
 } from "@/features/catalog/models";
 import type { CatalogRepository } from "@/features/catalog/ports";
 import type { IndexerRecord } from "@/features/settings/models";
-import type { SettingsRepository } from "@/features/settings/service";
 import type {
   CandidateRepository,
-  NewznabPort
+  InternetArchiveSearchPort,
+  NewznabPort,
+  ReleaseCandidateRecord
 } from "@/features/release-search/ports";
 import { ReleaseSearchService } from "@/features/release-search/service";
 
@@ -42,7 +43,9 @@ const catalog: CatalogRepository = {
   upsertPlatforms: () => undefined,
   setPlatformVisibility: () => undefined,
   upsertGames: () => undefined,
-  getGame: (id) => id === 1 ? game : null
+  getGame: (id) => id === 1 ? game : null,
+  getPopular: () => null,
+  replacePopular: () => undefined
 };
 
 const indexers: IndexerRecord[] = [
@@ -78,16 +81,6 @@ const indexers: IndexerRecord[] = [
   }
 ];
 
-const settings: SettingsRepository = {
-  getIgdb: () => null,
-  saveIgdb: () => undefined,
-  getSabnzbd: () => null,
-  saveSabnzbd: () => undefined,
-  listIndexers: () => indexers,
-  saveIndexer: () => undefined,
-  deleteIndexer: () => undefined
-};
-
 class MemoryCandidates implements CandidateRepository {
   saved: Parameters<CandidateRepository["save"]>[0][] = [];
   save(value: Parameters<CandidateRepository["save"]>[0]) {
@@ -111,6 +104,7 @@ describe("ReleaseSearchService", () => {
           releases: [{
             guid: "one-guid",
             title: "Game.Name.NSW-GROUP",
+            source: "newznab" as const,
             indexerId: "one",
             indexerName: "One",
             downloadUrl: "https://one.test/api?t=get&id=one-guid&apikey=secret-one",
@@ -130,9 +124,10 @@ describe("ReleaseSearchService", () => {
     let nextId = 0;
     const service = new ReleaseSearchService({
       catalog,
-      settings,
+      listIndexers: () => indexers,
       candidates,
       clientFactory: (indexer) => clients[indexer.id]!,
+      torrentClientConfigured: () => false,
       id: () => `candidate-${++nextId}`,
       now: () => 1_000
     });
@@ -144,7 +139,8 @@ describe("ReleaseSearchService", () => {
         match: "Strong",
         sources: [{
           candidateId: "candidate-1",
-          indexerName: "One"
+          indexerName: "One",
+          source: "newznab"
         }]
       })
     ]);
@@ -163,6 +159,7 @@ describe("ReleaseSearchService", () => {
   const release = (overrides: Record<string, unknown>) => ({
     guid: "guid",
     title: "Game.Name.NSW-GROUP",
+    source: "newznab" as const,
     indexerId: "one",
     indexerName: "One",
     downloadUrl: "https://one.test/api?t=get&id=guid&apikey=secret-one",
@@ -201,9 +198,10 @@ describe("ReleaseSearchService", () => {
     let nextId = 0;
     const service = new ReleaseSearchService({
       catalog,
-      settings,
+      listIndexers: () => indexers,
       candidates,
       clientFactory: (indexer) => clients[indexer.id]!,
+      torrentClientConfigured: () => false,
       id: () => `candidate-${++nextId}`,
       now: () => 1_000
     });
@@ -260,9 +258,10 @@ describe("ReleaseSearchService", () => {
     let nextId = 0;
     const service = new ReleaseSearchService({
       catalog,
-      settings,
+      listIndexers: () => indexers,
       candidates,
       clientFactory: (indexer) => clients[indexer.id]!,
+      torrentClientConfigured: () => false,
       id: () => `candidate-${++nextId}`,
       now: () => 1_000
     });
@@ -272,7 +271,8 @@ describe("ReleaseSearchService", () => {
     expect(response.releases).toHaveLength(1);
     expect(response.releases[0]?.sources).toEqual([{
       candidateId: "candidate-1",
-      indexerName: "Two"
+      indexerName: "Two",
+      source: "newznab"
     }]);
     expect(response.warnings).toEqual([{
       indexerId: "one",
@@ -282,18 +282,108 @@ describe("ReleaseSearchService", () => {
     }]);
   });
 
+  it("merges Internet Archive items as their own source type", async () => {
+    const candidates = new MemoryCandidates();
+    let observedTitle = "";
+    let nextId = 0;
+    const service = new ReleaseSearchService({
+      catalog,
+      listIndexers: () => indexers,
+      candidates,
+      clientFactory: () => ({
+        search: async () => ({ releases: [], warnings: [] })
+      }),
+      torrentClientConfigured: () => false,
+      internetArchive: {
+        search: async ({ title }) => {
+          observedTitle = title;
+          return {
+            items: [{
+              identifier: "game-name-usa",
+              title: "Game Name (USA)",
+              detailsUrl: "https://archive.org/details/game-name-usa",
+              publishedAt: 30,
+              size: 4096,
+              downloads: 100
+            }],
+            warnings: []
+          };
+        },
+        listFiles: async () => []
+      },
+      id: () => `candidate-${++nextId}`,
+      now: () => 1_000
+    });
+
+    const response = await service.search({ gameId: 1, platformId: 130 });
+
+    expect(observedTitle).toBe("Game Name");
+    expect(response.warnings).toEqual([]);
+    expect(response.releases).toEqual([
+      expect.objectContaining({
+        title: "Game Name (USA)",
+        match: "Possible",
+        sources: [{
+          candidateId: "candidate-1",
+          indexerName: "Internet Archive",
+          source: "internet-archive"
+        }]
+      })
+    ]);
+    expect(candidates.saved[0]).toMatchObject({
+      source: "internet-archive",
+      indexerId: null,
+      guid: "game-name-usa",
+      downloadPath: "/details/game-name-usa"
+    });
+    // The IA candidate carries no indexer URL, credentials, or API key.
+    expect(JSON.stringify(response)).not.toContain("apikey");
+  });
+
+  it("keeps indexer results when the Internet Archive search fails", async () => {
+    const service = new ReleaseSearchService({
+      catalog,
+      listIndexers: () => indexers,
+      candidates: new MemoryCandidates(),
+      clientFactory: (indexer) => ({
+        search: async () => ({
+          releases: indexer.id === "one" ? [release({})] : [],
+          warnings: []
+        })
+      }),
+      torrentClientConfigured: () => false,
+      internetArchive: {
+        search: async () => {
+          throw new Error("connection refused");
+        },
+        listFiles: async () => []
+      }
+    });
+
+    const response = await service.search({ gameId: 1, platformId: 130 });
+
+    expect(response.releases).toHaveLength(1);
+    expect(response.releases[0]?.sources[0]?.source).toBe("newznab");
+    expect(response.warnings).toEqual([{
+      indexerId: "internet-archive",
+      indexerName: "Internet Archive",
+      message: "Internet Archive search failed"
+    }]);
+  });
+
   it("issues one broad canonical-title query per indexer", async () => {
     const observed: Array<{ indexerId: string; term: string }> = [];
     const service = new ReleaseSearchService({
       catalog,
-      settings,
+      listIndexers: () => indexers,
       candidates: new MemoryCandidates(),
       clientFactory: (indexer) => ({
         search: async (query) => {
           observed.push({ indexerId: indexer.id, term: query.term });
           return { releases: [], warnings: [] };
         }
-      })
+      }),
+      torrentClientConfigured: () => false
     });
 
     await service.search({ gameId: 1, platformId: 130 });
@@ -317,10 +407,7 @@ describe("ReleaseSearchService", () => {
     let completed = 0;
     const service = new ReleaseSearchService({
       catalog,
-      settings: {
-        ...settings,
-        listIndexers: () => queuedIndexers
-      },
+      listIndexers: () => queuedIndexers,
       candidates: new MemoryCandidates(),
       clientFactory: () => ({
         search: async (_query, signal) => {
@@ -344,7 +431,8 @@ describe("ReleaseSearchService", () => {
             }, { once: true });
           });
         }
-      })
+      }),
+      torrentClientConfigured: () => false
     });
 
     const pending = service.search({ gameId: 1, platformId: 130 });
@@ -355,12 +443,173 @@ describe("ReleaseSearchService", () => {
     expect(response.warnings).toEqual([]);
   });
 
+  describe("listCandidateFiles", () => {
+    const iaCandidate: ReleaseCandidateRecord = {
+      id: "candidate-ia",
+      expiresAt: 99_999_999_999,
+      source: "internet-archive",
+      indexerId: null,
+      indexerConfigRevision: 0,
+      guid: "game-item",
+      title: "Game Name (USA)",
+      size: 4096,
+      downloadPath: "/details/game-item",
+      category: null,
+      sourceSnapshot: "{}",
+      createdAt: 1
+    };
+
+    /**
+     * A Newznab candidate carrying every value that must never be echoed back:
+     * the indexer's private host, its row ID, its guid, and a download path
+     * whose `r=` credential survives url-policy's apikey/api_key/key stripping.
+     */
+    const newznabCandidate: ReleaseCandidateRecord = {
+      ...iaCandidate,
+      id: "candidate-nzb",
+      source: "newznab",
+      indexerId: "indexer-secret-id",
+      guid: "nzb-guid",
+      downloadPath: "/getnzb?id=abc&r=leaked-token",
+      sourceSnapshot: JSON.stringify({
+        indexerName: "Private Indexer",
+        origin: "https://indexer.internal"
+      })
+    };
+
+    const serviceFor = (
+      candidate: ReleaseCandidateRecord | null,
+      internetArchive?: Pick<InternetArchiveSearchPort, "listFiles">,
+      torrentClientConfigured = false
+    ) => new ReleaseSearchService({
+      catalog,
+      listIndexers: () => indexers,
+      candidates: { save: () => undefined, get: () => candidate },
+      clientFactory: () => ({
+        search: async () => ({ releases: [], warnings: [] })
+      }),
+      internetArchive: internetArchive && {
+        search: async () => ({ items: [], warnings: [] }),
+        listFiles: internetArchive.listFiles
+      },
+      torrentClientConfigured: () => torrentClientConfigured
+    });
+
+    it("selects the files of the item the candidate points at", async () => {
+      const listFiles = vi.fn(async () => [
+        { name: "big.zip", size: 20, format: "ZIP", source: "original" },
+        { name: "thumb.jpg", size: 99, format: "JPEG", source: "derivative" }
+      ]);
+
+      const response = await serviceFor(iaCandidate, { listFiles })
+        .listCandidateFiles("candidate-ia");
+
+      // The item is addressed by the candidate's guid, not its ID — passing
+      // the ID would silently query a non-existent Internet Archive item.
+      expect(listFiles).toHaveBeenCalledWith("game-item");
+      expect(response).toEqual({
+        files: [{ name: "big.zip", size: 20, format: "ZIP" }],
+        torrent: null,
+        torrentClientConfigured: false
+      });
+    });
+
+    it("returns the item torrent alongside the selectable files", async () => {
+      const listFiles = vi.fn(async () => [
+        { name: "doom2.zip", size: 12_000, format: "ZIP", source: "original" },
+        {
+          name: "doom2_archive.torrent",
+          size: 41_234,
+          format: "Archive BitTorrent",
+          source: "metadata"
+        }
+      ]);
+
+      const response = await serviceFor(iaCandidate, { listFiles }, true)
+        .listCandidateFiles("candidate-ia");
+
+      expect(response.files.map((file) => file.name)).toEqual(["doom2.zip"]);
+      expect(response.torrent).toEqual({
+        name: "doom2_archive.torrent",
+        size: 41_234
+      });
+      expect(response.torrentClientConfigured).toBe(true);
+    });
+
+    it("reports an available torrent when the client is unconfigured", async () => {
+      const listFiles = vi.fn(async () => [{
+        name: "doom2_archive.torrent",
+        size: 1,
+        format: null,
+        source: "metadata"
+      }]);
+
+      const response = await serviceFor(iaCandidate, { listFiles }, false)
+        .listCandidateFiles("candidate-ia");
+
+      expect(response.torrent).toEqual({
+        name: "doom2_archive.torrent",
+        size: 1
+      });
+      expect(response.torrentClientConfigured).toBe(false);
+    });
+
+    // Expiry and absence deliberately collapse into this single 404:
+    // `SqliteCandidateRepository.get` filters on
+    // `and(eq(id), gt(expiresAt, now()))` and returns null for both, so the
+    // endpoint cannot be used as an existence oracle for candidate IDs. The
+    // expiry half of that filter is covered by repository.test.ts.
+    it("rejects a candidate the repository will not hand back", async () => {
+      const service = serviceFor(null, { listFiles: async () => [] });
+
+      await expect(service.listCandidateFiles("candidate-ia")).rejects
+        .toMatchObject({
+          code: "NOT_FOUND",
+          status: 404,
+          message: "Release candidate has expired"
+        });
+    });
+
+    it("rejects a non-Internet-Archive candidate without echoing its secrets", async () => {
+      const listFiles = vi.fn(async () => []);
+      const service = serviceFor(newznabCandidate, { listFiles });
+
+      const error = await service.listCandidateFiles("candidate-nzb")
+        .catch((cause: unknown) => cause);
+
+      expect(error).toMatchObject({
+        code: "VALIDATION",
+        status: 400,
+        message: "Candidate is not an Internet Archive item"
+      });
+      // Rejected before any upstream call, so nothing derived from the
+      // candidate can reach the Internet Archive either.
+      expect(listFiles).not.toHaveBeenCalled();
+      const message = (error as Error).message;
+      expect(message).not.toContain("indexer.internal");
+      expect(message).not.toContain("leaked-token");
+      expect(message).not.toContain("indexer-secret-id");
+      expect(message).not.toContain("nzb-guid");
+    });
+
+    it("fails loudly when no Internet Archive source is configured", async () => {
+      const service = serviceFor(iaCandidate);
+
+      await expect(service.listCandidateFiles("candidate-ia")).rejects
+        .toMatchObject({
+          code: "UNAVAILABLE",
+          status: 503,
+          message: "Internet Archive source is not configured"
+        });
+    });
+  });
+
   it("aborts outstanding indexer work at the overall deadline", async () => {
     vi.useFakeTimers();
     let observedAbort = 0;
     const service = new ReleaseSearchService({
       catalog,
-      settings,
+      listIndexers: () => indexers,
       candidates: new MemoryCandidates(),
       clientFactory: () => ({
         search: async (_query, signal) => new Promise((_resolve, reject) => {
@@ -370,6 +619,7 @@ describe("ReleaseSearchService", () => {
           }, { once: true });
         })
       }),
+      torrentClientConfigured: () => false,
       overallTimeoutMs: 20_000
     });
 

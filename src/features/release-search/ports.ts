@@ -1,7 +1,10 @@
 import type { IndexerRecord } from "@/features/settings/models";
 import type {
+  InternetArchiveFile,
+  InternetArchiveSearchResult,
   NewznabSearchResult,
-  PlannedQuery
+  PlannedQuery,
+  ReleaseSourceType
 } from "@/features/release-search/models";
 
 export interface NewznabPort {
@@ -11,10 +14,19 @@ export interface NewznabPort {
   ): Promise<NewznabSearchResult>;
 }
 
+export interface InternetArchiveSearchPort {
+  search(
+    input: { title: string },
+    signal: AbortSignal
+  ): Promise<InternetArchiveSearchResult>;
+  listFiles(identifier: string): Promise<InternetArchiveFile[]>;
+}
+
 export interface ReleaseCandidateRecord {
   id: string;
   expiresAt: number;
-  indexerId: string;
+  source: ReleaseSourceType;
+  indexerId: string | null;
   indexerConfigRevision: number;
   guid: string;
   title: string;
@@ -31,3 +43,9 @@ export interface CandidateRepository {
 }
 
 export type NewznabClientFactory = (indexer: IndexerRecord) => NewznabPort;
+
+/** Lists the configured indexers without exposing a settings repository. */
+export type ListReleaseIndexersPort = () => IndexerRecord[];
+
+/** Narrow read-only port used to report whether torrent delivery is usable. */
+export type TorrentClientConfiguredPort = () => boolean;

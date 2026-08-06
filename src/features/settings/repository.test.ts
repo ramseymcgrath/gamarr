@@ -24,6 +24,59 @@ function repository() {
 }
 
 describe("SqliteSettingsRepository", () => {
+  it("round-trips a qBittorrent settings record", () => {
+    const { database, repository: settings } = repository();
+
+    settings.saveQbittorrent({
+      baseUrl: "http://qbit.local:8080",
+      username: "admin",
+      password: "secret",
+      defaultCategory: "games",
+      lastTestStatus: null,
+      lastTestedAt: null,
+      configRevision: 1,
+      updatedAt: 100
+    });
+
+    expect(settings.getQbittorrent()).toEqual({
+      baseUrl: "http://qbit.local:8080",
+      username: "admin",
+      password: "secret",
+      defaultCategory: "games",
+      lastTestStatus: null,
+      lastTestedAt: null,
+      configRevision: 1,
+      updatedAt: 100
+    });
+
+    database.$client.close();
+  });
+
+  it("records a qBittorrent connection test result", () => {
+    const { database, repository: settings } = repository();
+    settings.saveQbittorrent({
+      baseUrl: "http://qbit.local:8080",
+      username: "admin",
+      password: "secret",
+      defaultCategory: null,
+      lastTestStatus: null,
+      lastTestedAt: null,
+      configRevision: 1,
+      updatedAt: 100
+    });
+
+    settings.recordQbittorrentTest("ok", 200);
+
+    expect(settings.getQbittorrent()).toMatchObject({
+      baseUrl: "http://qbit.local:8080",
+      password: "secret",
+      lastTestStatus: "ok",
+      lastTestedAt: 200
+    });
+
+    database.$client.close();
+  });
+
   it("round-trips typed settings records", () => {
     const { database, repository: settings } = repository();
 

@@ -1,0 +1,22 @@
+import type { __Feature__Record } from "@/features/__feature__/models";
+import type { __Feature__Repository } from "@/features/__feature__/ports";
+
+interface __Feature__ServiceDependencies {
+  repository: __Feature__Repository;
+}
+
+/**
+ * Orchestration for the __feature__ slice.
+ *
+ * Depends on ports only — never on a concrete integration client, never on
+ * Drizzle. Failures are signalled by throwing `AppError` subtypes from
+ * `@/lib/errors`; the API handler converts them into responses. Never let a raw
+ * upstream error escape, since indexer and IGDB errors can carry credentials.
+ */
+export class __Feature__Service {
+  constructor(private readonly dependencies: __Feature__ServiceDependencies) {}
+
+  list(): __Feature__Record[] {
+    return this.dependencies.repository.list();
+  }
+}

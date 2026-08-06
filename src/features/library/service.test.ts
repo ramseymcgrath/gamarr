@@ -40,6 +40,9 @@ class MemoryLibrary implements LibraryRepository {
   delete = (id: string) => {
     this.entries = this.entries.filter((entry) => entry.id !== id);
   };
+  gameIdsOnPlatform = (platformId: number) => this.entries
+    .filter((entry) => entry.platformId === platformId)
+    .map((entry) => entry.gameId);
 }
 
 describe("LibraryService", () => {

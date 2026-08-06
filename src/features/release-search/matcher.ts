@@ -114,9 +114,13 @@ export function deduplicateReleases(
       existing.conflictingReasons = release.conflictingReasons;
     }
   }
+  // MIN_SAFE_INTEGER, not -Infinity: `-Infinity - -Infinity` is NaN, which makes
+  // the comparator non-transitive whenever two undated releases meet — and
+  // undated Internet Archive items arrive in batches. Unknowns still sink.
   return [...grouped.values()].sort((left, right) =>
     right.score - left.score ||
-    right.publishedAt - left.publishedAt ||
+    (right.publishedAt ?? Number.MIN_SAFE_INTEGER) -
+      (left.publishedAt ?? Number.MIN_SAFE_INTEGER) ||
     (left.size ?? Number.MAX_SAFE_INTEGER) - (right.size ?? Number.MAX_SAFE_INTEGER) ||
     normalizeReleaseTitle(left.title).localeCompare(normalizeReleaseTitle(right.title)) ||
     left.indexerId.localeCompare(right.indexerId)

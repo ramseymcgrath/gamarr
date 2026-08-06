@@ -1,0 +1,33 @@
+import { describe, expect, it } from "vitest";
+
+import type { __Feature__Repository } from "@/features/__feature__/ports";
+import { __Feature__Service } from "@/features/__feature__/service";
+
+// Hand-rolled port fakes rather than module mocking. The service depends only on
+// interfaces it owns, so a plain object literal is a complete substitute — no
+// vi.mock, no partial module surgery, and the compiler catches drift when the
+// port changes.
+//
+// `clearMocks` and `restoreMocks` are enabled globally in vitest.config.ts, so
+// spies need no manual teardown.
+function fake__Feature__Repository(
+  overrides: Partial<__Feature__Repository> = {}
+): __Feature__Repository {
+  return {
+    list: () => [],
+    get: () => null,
+    ...overrides
+  };
+}
+
+describe("__Feature__Service", () => {
+  it("returns what the repository holds", () => {
+    const service = new __Feature__Service({
+      repository: fake__Feature__Repository({
+        list: () => [{ id: "a", createdAt: 0, updatedAt: 0 }]
+      })
+    });
+
+    expect(service.list()).toHaveLength(1);
+  });
+});

@@ -12,6 +12,7 @@ import {
 
 export interface CatalogHandlerService {
   search(input: CatalogSearchInput): Promise<unknown>;
+  popular(platformId: number): Promise<unknown>;
   getGame(id: number): unknown;
   syncPlatforms(): Promise<unknown>;
 }
@@ -29,6 +30,25 @@ export async function handleCatalogSearch(
     const query = url.searchParams.get("query") ?? "";
     return Response.json(
       await dependencies.service.search({ query, platformId }),
+      { headers: { "cache-control": "no-store" } }
+    );
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+
+export async function handleCatalogPopular(
+  request: Request,
+  dependencies: { service: CatalogHandlerService }
+): Promise<Response> {
+  try {
+    const url = new URL(request.url);
+    const platformId = Number(url.searchParams.get("platformId"));
+    if (!Number.isInteger(platformId) || platformId <= 0) {
+      throw validationError("platformId must be a positive integer");
+    }
+    return Response.json(
+      await dependencies.service.popular(platformId),
       { headers: { "cache-control": "no-store" } }
     );
   } catch (error) {

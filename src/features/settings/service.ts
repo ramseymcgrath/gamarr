@@ -8,6 +8,8 @@ import type {
   IndexerRecord,
   PublicIndexer,
   PublicSettings,
+  QbittorrentSettingsInput,
+  QbittorrentSettingsRecord,
   SabnzbdSettingsInput,
   SabnzbdSettingsRecord,
   SecretUpdate
@@ -15,6 +17,7 @@ import type {
 import {
   igdbSettingsInputSchema,
   indexerInputSchema,
+  qbittorrentSettingsInputSchema,
   sabnzbdSettingsInputSchema
 } from "@/features/settings/models";
 import { AppError, validationError } from "@/lib/errors";
@@ -24,6 +27,9 @@ export interface SettingsRepository {
   saveIgdb(value: IgdbSettingsRecord): void;
   getSabnzbd(): SabnzbdSettingsRecord | null;
   saveSabnzbd(value: SabnzbdSettingsRecord): void;
+  getQbittorrent(): QbittorrentSettingsRecord | null;
+  saveQbittorrent(value: QbittorrentSettingsRecord): void;
+  recordQbittorrentTest(status: string, testedAt: number): void;
   listIndexers(): IndexerRecord[];
   saveIndexer(value: IndexerRecord): void;
   deleteIndexer(id: string, deletedAt: number): void;
@@ -77,6 +83,7 @@ export class SettingsService {
   getRedacted(): PublicSettings {
     const igdb = this.repository.getIgdb();
     const sabnzbd = this.repository.getSabnzbd();
+    const qbittorrent = this.repository.getQbittorrent();
     return {
       igdb: igdb ? {
         clientId: igdb.clientId,
@@ -93,6 +100,15 @@ export class SettingsService {
         lastTestStatus: sabnzbd.lastTestStatus,
         lastTestedAt: sabnzbd.lastTestedAt,
         configRevision: sabnzbd.configRevision
+      } : null,
+      qbittorrent: qbittorrent ? {
+        baseUrl: qbittorrent.baseUrl,
+        username: qbittorrent.username,
+        hasPassword: qbittorrent.password.length > 0,
+        defaultCategory: qbittorrent.defaultCategory,
+        lastTestStatus: qbittorrent.lastTestStatus,
+        lastTestedAt: qbittorrent.lastTestedAt,
+        configRevision: qbittorrent.configRevision
       } : null,
       indexers: this.repository.listIndexers()
         .filter((item) => item.deletedAt === null)
@@ -139,6 +155,30 @@ export class SettingsService {
       apiKey,
       defaultCategory: parsed.defaultCategory,
       maxNzbBytes: parsed.maxNzbBytes,
+      lastTestStatus: changed ? null : existing.lastTestStatus,
+      lastTestedAt: changed ? null : existing.lastTestedAt,
+      configRevision: changed ? (existing?.configRevision ?? 0) + 1 : existing.configRevision,
+      updatedAt: this.now()
+    });
+  }
+
+  saveQbittorrent(input: QbittorrentSettingsInput): void {
+    const parsed = parseInput(() => qbittorrentSettingsInputSchema.parse(input));
+    const existing = this.repository.getQbittorrent();
+    const password = resolveSecret(parsed.password, existing?.password);
+    const baseUrl = normalizeServiceUrl(parsed.baseUrl);
+    const changed =
+      !existing ||
+      existing.baseUrl !== baseUrl ||
+      existing.username !== parsed.username ||
+      existing.password !== password ||
+      existing.defaultCategory !== parsed.defaultCategory;
+
+    this.repository.saveQbittorrent({
+      baseUrl,
+      username: parsed.username,
+      password,
+      defaultCategory: parsed.defaultCategory,
       lastTestStatus: changed ? null : existing.lastTestStatus,
       lastTestedAt: changed ? null : existing.lastTestedAt,
       configRevision: changed ? (existing?.configRevision ?? 0) + 1 : existing.configRevision,

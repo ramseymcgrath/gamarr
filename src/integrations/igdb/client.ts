@@ -3,7 +3,8 @@ import { z } from "zod";
 
 import type {
   GameSearchResult,
-  Platform
+  Platform,
+  PopularCandidate
 } from "@/features/catalog/models";
 import type { IgdbPort } from "@/features/catalog/ports";
 import { AppError } from "@/lib/errors";
@@ -14,6 +15,7 @@ export interface IgdbRequest {
   fields: string[];
   search?: string;
   where?: string;
+  sort?: { field: string; direction: "asc" | "desc" };
   limit: number;
   offset: number;
 }
@@ -65,6 +67,9 @@ export class SdkIgdbExecutor implements IgdbExecutor {
       .offset(request.offset);
     if (request.search) query = query.search(request.search);
     if (request.where) query = query.where(request.where);
+    if (request.sort) {
+      query = query.sort(request.sort.field, request.sort.direction);
+    }
     try {
       const response = await query.request(request.endpoint);
       return response.data;
@@ -93,12 +98,85 @@ const gameSchema = z.object({
   platforms: z.array(z.number().int().positive()).default([]),
   genres: z.array(z.object({ name: z.string() })).default([]),
   alternative_names: z.array(z.object({ name: z.string() })).default([]),
+  first_release_date: z.number().int().optional(),
   release_dates: z.array(z.object({
     platform: z.number().int().positive(),
-    y: z.number().int().optional()
+    y: z.number().int().optional(),
+    date: z.number().int().optional()
   })).default([]),
   cover: z.object({ image_id: z.string() }).optional()
 });
+
+const GAME_FIELDS = [
+  "id",
+  "name",
+  "slug",
+  "summary",
+  "platforms",
+  "genres.name",
+  "alternative_names.name",
+  "first_release_date",
+  "release_dates.platform",
+  "release_dates.y",
+  "release_dates.date",
+  "cover.image_id"
+];
+
+/**
+ * The earliest year the game reached this platform.
+ *
+ * IGDB returns one `release_dates` entry per region in no guaranteed order, so
+ * taking the first match is arbitrary: the live shelf showed Grand Theft Auto
+ * III as 2002 and Breath of the Wild as 2022 by picking a later regional row.
+ * The console's debut is the minimum of them.
+ */
+function earliestPlatformYear(
+  releaseDates: z.infer<typeof gameSchema>["release_dates"],
+  platformId: number
+): number | null {
+  const years = releaseDates
+    .filter((date) => date.platform === platformId && date.y !== undefined)
+    .map((date) => date.y as number);
+  return years.length > 0 ? Math.min(...years) : null;
+}
+
+function toGameSearchResult(
+  game: z.infer<typeof gameSchema>,
+  platformId: number
+): GameSearchResult {
+  return {
+    id: game.id,
+    name: game.name,
+    slug: game.slug,
+    summary: game.summary ?? null,
+    coverUrl: game.cover
+      ? `https://images.igdb.com/igdb/image/upload/t_cover_big/${game.cover.image_id}.jpg`
+      : null,
+    releaseYear: earliestPlatformYear(game.release_dates, platformId),
+    genres: game.genres.map((genre) => genre.name),
+    alternativeNames: game.alternative_names.map((name) => name.name),
+    platformIds: game.platforms
+  };
+}
+
+function toPopularCandidate(
+  game: z.infer<typeof gameSchema>,
+  platformId: number
+): PopularCandidate {
+  // A platform can carry several dated entries, one per region. The earliest
+  // is the console's debut; taking a later regional date would make a game
+  // look like a port of itself.
+  const platformDates = game.release_dates
+    .filter((date) => date.platform === platformId && date.date !== undefined)
+    .map((date) => date.date as number);
+  return {
+    ...toGameSearchResult(game, platformId),
+    firstReleaseDate: game.first_release_date ?? null,
+    platformReleaseDate: platformDates.length > 0
+      ? Math.min(...platformDates)
+      : null
+  };
+}
 
 export class IgdbClient implements IgdbPort {
   private readonly sleep: (milliseconds: number) => Promise<void>;
@@ -144,38 +222,41 @@ export class IgdbClient implements IgdbPort {
   ): Promise<GameSearchResult[]> {
     const games = z.array(gameSchema).parse(await this.execute({
       endpoint: "/games",
-      fields: [
-        "id",
-        "name",
-        "slug",
-        "summary",
-        "platforms",
-        "genres.name",
-        "alternative_names.name",
-        "release_dates.platform",
-        "release_dates.y",
-        "cover.image_id"
-      ],
+      fields: GAME_FIELDS,
       search: query,
-      where: `platforms = {${platformId}}`,
+      // `(...)` is array inclusion ("contains any of"), which is what
+      // "available on this platform" means. NOT `{...}`, which is Apicalypse's
+      // *exact array match*: `platforms = {8}` is IGDB's own documented idiom
+      // for "PlayStation 2 exclusives", so it silently hid every multiplatform
+      // game — Grand Theft Auto III, Burnout 3 and Jak II all returned zero
+      // hits for PS2 while PS2-only fan mods ranked fine.
+      where: `platforms = (${platformId})`,
       limit: 24,
       offset: 0
     }));
 
-    return games.map((game) => ({
-      id: game.id,
-      name: game.name,
-      slug: game.slug,
-      summary: game.summary ?? null,
-      coverUrl: game.cover
-        ? `https://images.igdb.com/igdb/image/upload/t_cover_big/${game.cover.image_id}.jpg`
-        : null,
-      releaseYear: game.release_dates
-        .find((date) => date.platform === platformId && date.y)?.y ?? null,
-      genres: game.genres.map((genre) => genre.name),
-      alternativeNames: game.alternative_names.map((name) => name.name),
-      platformIds: game.platforms
+    return games.map((game) => toGameSearchResult(game, platformId));
+  }
+
+  async popularGames(
+    platformId: number,
+    limit: number
+  ): Promise<PopularCandidate[]> {
+    const games = z.array(gameSchema).parse(await this.execute({
+      endpoint: "/games",
+      fields: GAME_FIELDS,
+      // Same membership idiom as searchGames — never `{...}`. Rows with no
+      // rating count at all would otherwise sort ahead of nothing and pad the
+      // shelf with unranked entries.
+      where: `platforms = (${platformId}) & total_rating_count != null`,
+      // `follows` is deprecated on /games and `hypes` only counts pre-release
+      // interest, so rating count is the durable popularity signal here.
+      sort: { field: "total_rating_count", direction: "desc" },
+      limit,
+      offset: 0
     }));
+
+    return games.map((game) => toPopularCandidate(game, platformId));
   }
 
   private async execute(request: IgdbRequest): Promise<unknown> {

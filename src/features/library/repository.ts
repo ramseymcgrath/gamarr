@@ -16,6 +16,7 @@ export interface LibraryRepository {
   list(): LibraryDetail[];
   get(id: string): LibraryDetail | null;
   delete(id: string): void;
+  gameIdsOnPlatform(platformId: number): number[];
 }
 
 export class SqliteLibraryRepository implements LibraryRepository {
@@ -37,6 +38,17 @@ export class SqliteLibraryRepository implements LibraryRepository {
     this.database.delete(libraryEntries)
       .where(eq(libraryEntries.id, id))
       .run();
+  }
+
+  gameIdsOnPlatform(platformId: number): number[] {
+    // Covered by the library_game_platform_unique index on
+    // (game_id, platform_id).
+    return this.database
+      .select({ gameId: libraryEntries.gameId })
+      .from(libraryEntries)
+      .where(eq(libraryEntries.platformId, platformId))
+      .all()
+      .map((row) => row.gameId);
   }
 
   private hydrate(id: string): LibraryDetail | null {

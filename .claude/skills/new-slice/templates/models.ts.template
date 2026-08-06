@@ -1,0 +1,17 @@
+// Domain types for the __feature__ slice.
+//
+// Pure data only: no Drizzle row types, no React types, no I/O. Everything that
+// crosses a boundary — into a service, out of a handler — is shaped here, so the
+// database schema and the wire format can change independently of each other.
+
+export interface __Feature__Record {
+  id: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** The client-facing projection. If this slice holds credentials, this is where
+ *  they get replaced by `hasX: boolean` flags — see features/settings/models.ts. */
+export interface Public__Feature__ {
+  id: string;
+}
