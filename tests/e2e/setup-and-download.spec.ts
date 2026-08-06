@@ -35,6 +35,20 @@ test("configures providers and sends a selected release to SABnzbd", async ({
 
   await page.goto("/discover");
   await page.getByRole("button", { name: /Nintendo Switch/ }).click();
+  await expect(page.getByRole("heading", { name: "Popular on Nintendo Switch" }))
+    .toBeVisible();
+  await expect(page.getByRole("link", { name: /Fixture Popular Classic/ }))
+    .toBeVisible();
+
+  // The axe scan at the end of this test runs on Library, and the 320px test
+  // visits Discover with no platform selected, so neither one ever sees the
+  // shelf. Scan it here, where it is on screen. Animations must settle first
+  // for the same compositing reason documented at the later scan.
+  await page.waitForFunction(() =>
+    document.getAnimations().every((animation) =>
+      animation.playState === "finished"));
+  expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
+
   await page.getByRole("searchbox").fill("Metroid");
   await page.getByRole("button", { name: "Search games" }).click();
   await page.getByRole("link", { name: /Metroid Prime 4: Beyond/ }).click();

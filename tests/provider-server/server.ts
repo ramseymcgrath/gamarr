@@ -62,6 +62,22 @@ const server = createServer(async (request, response) => {
     ]);
   }
   if (url.pathname.endsWith("/games")) {
+    // igdb-api-node sends the Apicalypse query as the request body. Answering
+    // every /games call with the same fixture would let the popular path pass
+    // without ever proving it sent a sorted query.
+    const query = (await body(request)).toString("utf8");
+    if (query.includes("sort total_rating_count")) {
+      return json(response, [{
+        id: 220123,
+        name: "Fixture Popular Classic",
+        slug: "fixture-popular-classic",
+        summary: "The platform's most-rated fixture title.",
+        platforms: [130],
+        genres: [{ name: "Platform" }],
+        alternative_names: [],
+        release_dates: [{ platform: 130, y: 2024 }]
+      }]);
+    }
     return json(response, [{
       id: 119388,
       name: "Metroid Prime 4: Beyond",

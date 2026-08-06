@@ -1630,12 +1630,21 @@ In `tests/e2e/setup-and-download.spec.ts`, after the line that clicks the platfo
     .toBeVisible();
   await expect(page.getByRole("link", { name: /Fixture Popular Classic/ }))
     .toBeVisible();
+
+  // The axe scan at the end of this test runs on Library, and the 320px test
+  // visits Discover with no platform selected, so neither one ever sees the
+  // shelf. Scan it here, where it is on screen. Animations must settle first
+  // for the same compositing reason documented at the later scan.
+  await page.waitForFunction(() =>
+    document.getAnimations().every((animation) =>
+      animation.playState === "finished"));
+  expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
 ```
 
 - [ ] **Step 3: Run the e2e suite**
 
 Run: `pnpm exec playwright test tests/e2e/setup-and-download.spec.ts`
-Expected: PASS, including the existing axe accessibility assertion, which now covers the shelf section.
+Expected: PASS, including the new axe scan taken while the shelf is on screen.
 
 - [ ] **Step 4: Run everything**
 
