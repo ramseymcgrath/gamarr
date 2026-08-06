@@ -4,6 +4,7 @@ import type {
   CatalogRepository,
   IgdbPort
 } from "@/features/catalog/ports";
+import { InFlightRefreshCoordinator } from "@/features/catalog/refresh-coordinator";
 import { CatalogService } from "@/features/catalog/service";
 import type {
   GameSearchResult,
@@ -97,6 +98,34 @@ const provider: IgdbPort = {
   ]
 };
 
+const WEEK = 7 * 24 * 60 * 60 * 1000;
+
+function visiblePlatform(repository: MemoryCatalogRepository) {
+  repository.platforms.set(130, {
+    id: 130,
+    name: "Nintendo Switch",
+    abbreviation: "Switch",
+    visible: true,
+    aliases: []
+  });
+}
+
+function countingProvider(games = provider.popularGames) {
+  let calls = 0;
+  return {
+    get calls() {
+      return calls;
+    },
+    port: {
+      ...provider,
+      popularGames: async (platformId: number, limit: number) => {
+        calls += 1;
+        return games(platformId, limit);
+      }
+    } satisfies IgdbPort
+  };
+}
+
 describe("CatalogService", () => {
   it("preserves local platform visibility and aliases during provider sync", async () => {
     const repository = new MemoryCatalogRepository();
@@ -152,5 +181,179 @@ describe("CatalogService", () => {
       status: 400
     });
     expect(providerInitializations).toBe(1);
+  });
+
+  it("requires a visible platform before listing popular games", async () => {
+    const repository = new MemoryCatalogRepository();
+    repository.platforms.set(130, {
+      id: 130,
+      name: "Nintendo Switch",
+      abbreviation: "Switch",
+      visible: false,
+      aliases: []
+    });
+    const service = new CatalogService(repository, provider);
+
+    await expect(service.popular(130)).rejects.toBeInstanceOf(AppError);
+    await expect(service.popular(999)).rejects.toBeInstanceOf(AppError);
+  });
+
+  it("fetches, caches and upserts popular games on a cold platform", async () => {
+    const repository = new MemoryCatalogRepository();
+    visiblePlatform(repository);
+    const counting = countingProvider();
+    const service = new CatalogService(repository, counting.port, () => 1_000);
+
+    await expect(service.popular(130)).resolves.toEqual([
+      expect.objectContaining({ id: 7346 })
+    ]);
+
+    expect(counting.calls).toBe(1);
+    // The detail page reads games from the local table, so a popular card
+    // whose game was never upserted would be a dead link.
+    expect(repository.getGame(7346)).toMatchObject({ id: 7346 });
+    expect(repository.popular.get(130)).toEqual({
+      gameIds: [7346],
+      fetchedAt: 1_000
+    });
+  });
+
+  it("serves a fresh cache without calling the provider", async () => {
+    const repository = new MemoryCatalogRepository();
+    visiblePlatform(repository);
+    const counting = countingProvider();
+    const service = new CatalogService(repository, counting.port, () => 1_000);
+
+    await service.popular(130);
+    await service.popular(130);
+
+    expect(counting.calls).toBe(1);
+  });
+
+  it("drops popular games that are not on the requested platform", async () => {
+    const repository = new MemoryCatalogRepository();
+    visiblePlatform(repository);
+    const service = new CatalogService(repository, {
+      ...provider,
+      popularGames: async () => [{
+        id: 42,
+        name: "Wrong platform",
+        slug: "wrong-platform",
+        summary: null,
+        coverUrl: null,
+        releaseYear: null,
+        genres: [],
+        alternativeNames: [],
+        platformIds: [8]
+      }]
+    }, () => 1_000);
+
+    await expect(service.popular(130)).resolves.toEqual([]);
+  });
+
+  it("serves a stale cache immediately and refreshes once behind it", async () => {
+    const repository = new MemoryCatalogRepository();
+    visiblePlatform(repository);
+    repository.games.set(1, {
+      id: 1, name: "Stale", slug: "stale", summary: null, coverUrl: null,
+      releaseYear: null, genres: [], alternativeNames: [], platformIds: [130]
+    });
+    repository.popular.set(130, { gameIds: [1], fetchedAt: 0 });
+
+    const counting = countingProvider();
+    const refreshes: Promise<void>[] = [];
+    const inner = new InFlightRefreshCoordinator();
+    const service = new CatalogService(
+      repository,
+      counting.port,
+      () => WEEK + 1,
+      {
+        run: (key, task) => {
+          const promise = inner.run(key, task);
+          refreshes.push(promise);
+          return promise;
+        }
+      }
+    );
+
+    const [first, second] = await Promise.all([
+      service.popular(130),
+      service.popular(130)
+    ]);
+
+    expect(first).toEqual([expect.objectContaining({ id: 1, name: "Stale" })]);
+    expect(second).toEqual(first);
+
+    await Promise.allSettled(refreshes);
+
+    expect(counting.calls).toBe(1);
+    expect(repository.popular.get(130)).toEqual({
+      gameIds: [7346],
+      fetchedAt: WEEK + 1
+    });
+  });
+
+  it("keeps serving a stale cache when the refresh fails", async () => {
+    const repository = new MemoryCatalogRepository();
+    visiblePlatform(repository);
+    repository.games.set(1, {
+      id: 1, name: "Stale", slug: "stale", summary: null, coverUrl: null,
+      releaseYear: null, genres: [], alternativeNames: [], platformIds: [130]
+    });
+    repository.popular.set(130, { gameIds: [1], fetchedAt: 0 });
+
+    const refreshes: Promise<void>[] = [];
+    const inner = new InFlightRefreshCoordinator();
+    const service = new CatalogService(
+      repository,
+      {
+        ...provider,
+        popularGames: async () => {
+          throw new AppError("UNAVAILABLE", 502, "IGDB request failed");
+        }
+      },
+      () => WEEK + 1,
+      {
+        run: (key, task) => {
+          const promise = inner.run(key, task);
+          refreshes.push(promise);
+          return promise;
+        }
+      }
+    );
+
+    await expect(service.popular(130)).resolves.toEqual([
+      expect.objectContaining({ id: 1 })
+    ]);
+
+    // Settled, not awaited bare: the service swallows this rejection so a
+    // background failure never becomes an unhandled rejection.
+    const [outcome] = await Promise.allSettled(refreshes);
+    expect(outcome!.status).toBe("rejected");
+    expect(repository.popular.get(130)).toEqual({ gameIds: [1], fetchedAt: 0 });
+  });
+
+  it("propagates a provider failure when there is no cache to fall back on", async () => {
+    const repository = new MemoryCatalogRepository();
+    visiblePlatform(repository);
+    const service = new CatalogService(repository, {
+      ...provider,
+      popularGames: async () => {
+        throw new AppError("UNAVAILABLE", 502, "IGDB request failed");
+      }
+    }, () => 1_000);
+
+    await expect(service.popular(130)).rejects.toMatchObject({ status: 502 });
+  });
+
+  it("serves an empty cached list without re-asking the provider", async () => {
+    const repository = new MemoryCatalogRepository();
+    visiblePlatform(repository);
+    repository.popular.set(130, { gameIds: [], fetchedAt: 1_000 });
+    const counting = countingProvider();
+    const service = new CatalogService(repository, counting.port, () => 1_000);
+
+    await expect(service.popular(130)).resolves.toEqual([]);
+    expect(counting.calls).toBe(0);
   });
 });
