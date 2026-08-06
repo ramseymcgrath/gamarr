@@ -1,6 +1,7 @@
 import "server-only";
 
 import { getDatabase } from "@/db/client";
+import { InFlightRefreshCoordinator } from "@/features/catalog/refresh-coordinator";
 import { SqliteCatalogRepository } from "@/features/catalog/repository";
 import { CatalogService } from "@/features/catalog/service";
 import { SqliteSettingsRepository } from "@/features/settings/repository";
@@ -17,6 +18,9 @@ let cached:
     }
   | undefined;
 const gate = new IgdbRequestGate();
+// Module-scoped for the same reason `gate` is: `catalogService()` builds a new
+// service per request, so a per-instance coordinator would never dedupe.
+const popularRefreshes = new InFlightRefreshCoordinator();
 
 function igdbClient(): IgdbClient {
   const settings = new SqliteSettingsRepository(getDatabase()).getIgdb();
@@ -58,6 +62,8 @@ function igdbClient(): IgdbClient {
 export function catalogService(): CatalogService {
   return new CatalogService(
     new SqliteCatalogRepository(getDatabase()),
-    igdbClient
+    igdbClient,
+    Date.now,
+    popularRefreshes
   );
 }
