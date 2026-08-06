@@ -69,20 +69,32 @@ twelve-month window still drops Mafia (PC 2002 → PS2 2004) and Age of Empires 
 The window is a single named constant. Its value must be validated against live
 IGDB output for several platforms before it is considered settled.
 
-## Over-fetching
+## Fetch size and shelf length
 
-Filtering after ranking means a request for 24 no longer yields 24, so
-`popularGames` fetches **100** sorted by `total_rating_count desc`, applies the
-rule, and takes the first 24 survivors.
+`popularGames` fetches **100** games sorted by `total_rating_count desc`,
+applies the debut rule, and keeps **every survivor**. There is no truncation.
+The previous design's 24-item cap is removed.
 
-100 is sufficient rather than arbitrary. Observed attrition in the live PS2 top
-24 is roughly 10%, leaving about 90 survivors for a 24-slot shelf. Raising the
-number does not help sparse platforms either: where IGDB holds only a few dozen
-games for a console, a larger limit returns the same handful. A short shelf on
-such a platform reflects a short catalog, not an under-fetch.
+A dense platform will therefore show roughly 85–95 cards rather than 24, and the
+shelf becomes a full browse grid rather than a single row. That is the intent:
+the shelf is the browse surface for a console, and an arbitrary cut at 24 hides
+titles that passed the same relevance test as the ones above them.
 
-If validation shows a dense platform returning materially fewer than 24
-survivors, that — not payload size — is the signal to raise the limit.
+100 is the fetch ceiling, not a target. Where IGDB holds only a few dozen games
+for a console, a larger limit returns the same handful, so a short shelf there
+reflects a short catalog rather than an under-fetch. Raising the ceiling is a
+future change if a platform's shelf ever looks truncated at exactly 100
+survivors, which would indicate real titles are being cut off.
+
+### Consequences to accept
+
+- The response for a dense platform grows to roughly 90 game objects. Each
+  carries a summary string, so this is the largest response the app serves.
+- `/discover` becomes a long scrolling page once a platform is selected. The
+  search form sits above the shelf and is unaffected, but it is no longer the
+  only thing on screen.
+- The cached `game_ids` array holds up to 100 ids instead of 24. The column is
+  already JSON text with no length constraint, so no schema change follows.
 
 ## Where the rule lives
 
@@ -98,9 +110,9 @@ export interface PopularCandidate extends GameSearchResult {
 }
 ```
 
-`CatalogService.refreshPopular` applies the window, truncates to 24, and then
-passes plain `GameSearchResult` values to `upsertGames` and `replacePopular`
-exactly as it does today.
+`CatalogService.refreshPopular` applies the window and then passes the surviving
+plain `GameSearchResult` values to `upsertGames` and `replacePopular` exactly as
+it does today. No count limit is applied.
 
 Consequences:
 
@@ -167,8 +179,9 @@ empty IGDB response is today, so the platform is not re-fetched on every visit.
 
 ### Unit — service
 
-- truncates to 24 after filtering
-- writes only survivors to `upsertGames` and `replacePopular`
+- writes every survivor to `upsertGames` and `replacePopular`, applying no count
+  limit — a 100-candidate response with 90 survivors caches 90 ids
+- preserves the provider's rating-count order among survivors
 - an all-dropped result writes an empty list rather than re-fetching
 
 ### Unit — IGDB client
@@ -186,17 +199,22 @@ a second fixture game outside the window that must not appear on the shelf.
 
 Before the window constant is considered settled, query the deployed instance
 for several platforms and confirm: PS2 no longer surfaces Mafia or Age of
-Empires II, Resident Evil 4 still appears, and each dense platform still returns
-a full 24.
+Empires II, Resident Evil 4 still appears, and the PS2 shelf now reaches deep
+enough to include the console-defining titles the old ranking buried — Jak &
+Daxter, Ratchet & Clank, Gran Turismo, Devil May Cry, Okami and Burnout 3. Also
+record the survivor count per platform, which is the evidence for whether the
+100 ceiling is binding.
 
 ## Acceptance criteria
 
 1. The PS2 shelf excludes Mafia and Age of Empires II.
 2. The PS2 shelf still includes Resident Evil 4, despite its missing platform
    release date.
-3. Dense platforms (PS2, PS1, PC, Switch) each return 24 titles.
+3. Dense platforms return every survivor rather than a capped 24, and the PS2
+   shelf reaches far enough to include Jak & Daxter and Ratchet & Clank.
 4. No migration is added and `GameSearchResult` is unchanged.
-5. `pnpm lint`, `pnpm typecheck`, `pnpm test` and `pnpm test:e2e` all pass.
+5. `pnpm lint`, `pnpm typecheck`, `pnpm test` and `pnpm test:e2e` all pass,
+   including the axe scan taken while the shelf is on screen.
 
 ## References
 
