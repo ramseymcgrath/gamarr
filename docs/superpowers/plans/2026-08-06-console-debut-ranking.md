@@ -427,7 +427,11 @@ Expected: PASS, all ten tests.
 - [ ] **Step 9: Typecheck and fix the service test fake**
 
 Run: `pnpm typecheck`
-Expected: FAIL — the `provider` fake in `src/features/catalog/service.test.ts` returns `GameSearchResult[]` from `popularGames` and no longer satisfies `IgdbPort`. Add the two fields to the object it returns:
+Expected: FAIL. **Two** sites in `src/features/catalog/service.test.ts` return
+`popularGames` results and neither satisfies `PopularCandidate` yet. Fix both.
+
+**(a)** The shared `provider` fake near the top of the file — add the two
+fields to the object it returns:
 
 ```ts
   popularGames: async () => [
@@ -445,6 +449,26 @@ Expected: FAIL — the `provider` fake in `src/features/catalog/service.test.ts`
       platformReleaseDate: null
     }
   ]
+```
+
+**(b)** The inline override inside the test named `drops popular games that are
+not on the requested platform` — this one exists to prove the platform filter
+works, so its dates are irrelevant and nulls keep it focused:
+
+```ts
+      popularGames: async () => [{
+        id: 42,
+        name: "Wrong platform",
+        slug: "wrong-platform",
+        summary: null,
+        coverUrl: null,
+        releaseYear: null,
+        genres: [],
+        alternativeNames: [],
+        platformIds: [8],
+        firstReleaseDate: null,
+        platformReleaseDate: null
+      }]
 ```
 
 Re-run: `pnpm typecheck`
