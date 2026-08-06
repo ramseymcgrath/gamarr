@@ -8,6 +8,7 @@ export interface IgdbPort {
   testConnection(): Promise<void>;
   listPlatforms(): Promise<Platform[]>;
   searchGames(query: string, platformId: number): Promise<GameSearchResult[]>;
+  popularGames(platformId: number, limit: number): Promise<GameSearchResult[]>;
 }
 
 export interface PopularGamesCache {

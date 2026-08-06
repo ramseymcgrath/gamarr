@@ -14,6 +14,7 @@ export interface IgdbRequest {
   fields: string[];
   search?: string;
   where?: string;
+  sort?: { field: string; direction: "asc" | "desc" };
   limit: number;
   offset: number;
 }
@@ -65,6 +66,9 @@ export class SdkIgdbExecutor implements IgdbExecutor {
       .offset(request.offset);
     if (request.search) query = query.search(request.search);
     if (request.where) query = query.where(request.where);
+    if (request.sort) {
+      query = query.sort(request.sort.field, request.sort.direction);
+    }
     try {
       const response = await query.request(request.endpoint);
       return response.data;
@@ -99,6 +103,39 @@ const gameSchema = z.object({
   })).default([]),
   cover: z.object({ image_id: z.string() }).optional()
 });
+
+const GAME_FIELDS = [
+  "id",
+  "name",
+  "slug",
+  "summary",
+  "platforms",
+  "genres.name",
+  "alternative_names.name",
+  "release_dates.platform",
+  "release_dates.y",
+  "cover.image_id"
+];
+
+function toGameSearchResult(
+  game: z.infer<typeof gameSchema>,
+  platformId: number
+): GameSearchResult {
+  return {
+    id: game.id,
+    name: game.name,
+    slug: game.slug,
+    summary: game.summary ?? null,
+    coverUrl: game.cover
+      ? `https://images.igdb.com/igdb/image/upload/t_cover_big/${game.cover.image_id}.jpg`
+      : null,
+    releaseYear: game.release_dates
+      .find((date) => date.platform === platformId && date.y)?.y ?? null,
+    genres: game.genres.map((genre) => genre.name),
+    alternativeNames: game.alternative_names.map((name) => name.name),
+    platformIds: game.platforms
+  };
+}
 
 export class IgdbClient implements IgdbPort {
   private readonly sleep: (milliseconds: number) => Promise<void>;
@@ -144,18 +181,7 @@ export class IgdbClient implements IgdbPort {
   ): Promise<GameSearchResult[]> {
     const games = z.array(gameSchema).parse(await this.execute({
       endpoint: "/games",
-      fields: [
-        "id",
-        "name",
-        "slug",
-        "summary",
-        "platforms",
-        "genres.name",
-        "alternative_names.name",
-        "release_dates.platform",
-        "release_dates.y",
-        "cover.image_id"
-      ],
+      fields: GAME_FIELDS,
       search: query,
       // `(...)` is array inclusion ("contains any of"), which is what
       // "available on this platform" means. NOT `{...}`, which is Apicalypse's
@@ -168,20 +194,28 @@ export class IgdbClient implements IgdbPort {
       offset: 0
     }));
 
-    return games.map((game) => ({
-      id: game.id,
-      name: game.name,
-      slug: game.slug,
-      summary: game.summary ?? null,
-      coverUrl: game.cover
-        ? `https://images.igdb.com/igdb/image/upload/t_cover_big/${game.cover.image_id}.jpg`
-        : null,
-      releaseYear: game.release_dates
-        .find((date) => date.platform === platformId && date.y)?.y ?? null,
-      genres: game.genres.map((genre) => genre.name),
-      alternativeNames: game.alternative_names.map((name) => name.name),
-      platformIds: game.platforms
+    return games.map((game) => toGameSearchResult(game, platformId));
+  }
+
+  async popularGames(
+    platformId: number,
+    limit: number
+  ): Promise<GameSearchResult[]> {
+    const games = z.array(gameSchema).parse(await this.execute({
+      endpoint: "/games",
+      fields: GAME_FIELDS,
+      // Same membership idiom as searchGames — never `{...}`. Rows with no
+      // rating count at all would otherwise sort ahead of nothing and pad the
+      // shelf with unranked entries.
+      where: `platforms = (${platformId}) & total_rating_count != null`,
+      // `follows` is deprecated on /games and `hypes` only counts pre-release
+      // interest, so rating count is the durable popularity signal here.
+      sort: { field: "total_rating_count", direction: "desc" },
+      limit,
+      offset: 0
     }));
+
+    return games.map((game) => toGameSearchResult(game, platformId));
   }
 
   private async execute(request: IgdbRequest): Promise<unknown> {

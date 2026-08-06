@@ -138,4 +138,60 @@ describe("IgdbClient", () => {
     });
     expect(attempts).toBe(3);
   });
+
+  it("ranks popular games by rating count without a relevance search", async () => {
+    const requests: IgdbRequest[] = [];
+    const executor: IgdbExecutor = {
+      execute: async (_token, request) => {
+        requests.push(request);
+        return [];
+      }
+    };
+
+    await new IgdbClient(new FixedToken(), executor).popularGames(8, 24);
+
+    expect(requests[0]!.sort).toEqual({
+      field: "total_rating_count",
+      direction: "desc"
+    });
+    // IGDB `search` imposes its own relevance ordering and cannot be
+    // combined with an explicit sort.
+    expect(requests[0]!.search).toBeUndefined();
+    expect(requests[0]!.where).toBe(
+      "platforms = (8) & total_rating_count != null"
+    );
+    expect(requests[0]!.where).not.toContain("{");
+    expect(requests[0]!.limit).toBe(24);
+  });
+
+  it("maps popular games with the same shape as search results", async () => {
+    const executor: IgdbExecutor = {
+      execute: async () => [{
+        id: 7346,
+        name: "Metroid Prime 4: Beyond",
+        slug: "metroid-prime-4-beyond",
+        platforms: [130],
+        genres: [{ name: "Adventure" }],
+        alternative_names: [{ name: "Metroid Prime 4" }],
+        release_dates: [{ platform: 130, y: 2025 }],
+        cover: { image_id: "co123" }
+      }]
+    };
+
+    const games = await new IgdbClient(new FixedToken(), executor)
+      .popularGames(130, 24);
+
+    expect(games).toEqual([
+      expect.objectContaining({
+        id: 7346,
+        name: "Metroid Prime 4: Beyond",
+        platformIds: [130],
+        genres: ["Adventure"],
+        alternativeNames: ["Metroid Prime 4"],
+        releaseYear: 2025,
+        coverUrl:
+          "https://images.igdb.com/igdb/image/upload/t_cover_big/co123.jpg"
+      })
+    ]);
+  });
 });

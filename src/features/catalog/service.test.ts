@@ -81,6 +81,19 @@ const provider: IgdbPort = {
       alternativeNames: ["Metroid Prime 4"],
       platformIds: [130]
     }
+  ],
+  popularGames: async () => [
+    {
+      id: 7346,
+      name: "Metroid Prime 4: Beyond",
+      slug: "metroid-prime-4-beyond",
+      summary: null,
+      coverUrl: null,
+      releaseYear: 2025,
+      genres: ["Adventure"],
+      alternativeNames: ["Metroid Prime 4"],
+      platformIds: [130]
+    }
   ]
 };
 
