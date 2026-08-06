@@ -74,6 +74,8 @@ The boundary to preserve: features reach the outside world only through their po
 
 The Internet Archive source is a second release source *and* a second download path: items are searched via the public `advancedsearch` API, the user picks one file from the item (`GET /api/releases/files`), and the server streams it to `GAMARR_DOWNLOAD_DIRECTORY` in the background — no SABnzbd involved. Its attempts reuse the normal lifecycle (`Pending` → `Downloading` → `Completed`/`Failed`) and appear in Library and Activity like any other attempt; a restart fails in-flight rows instead of resuming them. An item may instead be handed to qBittorrent as a whole-item torrent; those attempts survive a restart, while direct downloads do not.
 
+The DBI network install server (`/api/dbi`) serves operator-nominated roots as an Apache-style HTML index that a Switch running DBI can install from over the LAN, working around the FAT32 4 GiB per-file limit. It is read-only and off unless `GAMARR_SWITCH_LIBRARY_DIR` is set. Both routes rescan on every request; the URL segment is a lookup key against that scan and is never joined onto a path, so there is no traversal surface. The index emits Apache-style *relative* hrefs, which only resolve correctly if the trailing-slash URL is served directly — that is why `next.config.ts` sets `skipTrailingSlashRedirect` and re-adds a redirect for everything outside `/api/`.
+
 ### Database
 
 `getDatabase()` in `src/db/client.ts` is a lazy singleton reading `GAMARR_DATABASE_PATH`. It enforces `foreign_keys=ON`, WAL, a 250ms busy timeout, and chmods the directory to `0700` / file to `0600`. `scripts/migrate.mjs` intentionally duplicates that pragma/permission setup because it runs standalone from the container entrypoint, before the app boots, against a trimmed `node_modules`.
@@ -125,3 +127,4 @@ Multi-stage build; the runner stage copies the Next.js standalone output plus a 
 | `GAMARR_IA_MAX_BYTES` | `8589934592` (8 GiB) | Per-file streaming ceiling for Internet Archive downloads |
 | `GAMARR_IA_METADATA_MAX_BYTES` | `16777216` (16 MiB) | Ceiling for an Internet Archive item's `/metadata/` file manifest; raise it for items with very large file lists |
 | `GAMARR_IA_TORRENT_MAX_BYTES` | `8388608` (8 MiB) | Ceiling for an Internet Archive item's `.torrent` metainfo |
+| `GAMARR_SWITCH_LIBRARY_DIR` | none — feature off | Comma-separated absolute roots served at `/api/dbi` as a DBI-browsable index. Unset means both routes 404. Unauthenticated on the LAN — anything that can reach the port can enumerate and download every file under these roots. |
