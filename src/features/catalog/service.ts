@@ -18,8 +18,13 @@ const POPULAR_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 /**
  * Candidates requested per refresh. Filtering happens after ranking, so this
  * is a ceiling rather than the shelf length — every survivor is kept.
+ *
+ * Raised from 100 after live validation: PlayStation 2 returned 96 survivors
+ * from 100, so the ceiling was binding and titles below the global top 100 —
+ * Okami and Katamari Damacy among them — were never fetched rather than being
+ * filtered out. IGDB's own per-request maximum is 500.
  */
-const POPULAR_FETCH_LIMIT = 100;
+const POPULAR_FETCH_LIMIT = 250;
 
 export class CatalogService {
   constructor(

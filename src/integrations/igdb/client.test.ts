@@ -195,6 +195,52 @@ describe("IgdbClient", () => {
     ]);
   });
 
+  it("shows the earliest regional year for the platform, not the first listed", async () => {
+    const executor: IgdbExecutor = {
+      execute: async () => [{
+        id: 1,
+        name: "Grand Theft Auto III",
+        slug: "grand-theft-auto-iii",
+        platforms: [8],
+        // IGDB returns one entry per region in no guaranteed order. Taking the
+        // first match reported GTA III as 2002 and Breath of the Wild as 2022
+        // on the live shelf; the console's debut is the earliest of them.
+        release_dates: [
+          { platform: 8, y: 2003 },
+          { platform: 6, y: 2000 },
+          { platform: 8, y: 2001 },
+          { platform: 8, y: 2002 }
+        ]
+      }]
+    };
+
+    const searched = await new IgdbClient(new FixedToken(), executor)
+      .searchGames("Grand Theft Auto III", 8);
+    const popular = await new IgdbClient(new FixedToken(), executor)
+      .popularGames(8, 250);
+
+    expect(searched[0]!.releaseYear).toBe(2001);
+    // Both mappers share toGameSearchResult, so the shelf and search agree.
+    expect(popular[0]!.releaseYear).toBe(2001);
+  });
+
+  it("reports no year when the platform has no dated entry", async () => {
+    const executor: IgdbExecutor = {
+      execute: async () => [{
+        id: 2,
+        name: "Resident Evil 4",
+        slug: "resident-evil-4",
+        platforms: [8],
+        release_dates: [{ platform: 6, y: 2007 }]
+      }]
+    };
+
+    const games = await new IgdbClient(new FixedToken(), executor)
+      .searchGames("Resident Evil 4", 8);
+
+    expect(games[0]!.releaseYear).toBeNull();
+  });
+
   it("requests the dates the debut rule needs", async () => {
     const requests: IgdbRequest[] = [];
     const executor: IgdbExecutor = {

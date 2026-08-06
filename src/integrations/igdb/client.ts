@@ -122,6 +122,24 @@ const GAME_FIELDS = [
   "cover.image_id"
 ];
 
+/**
+ * The earliest year the game reached this platform.
+ *
+ * IGDB returns one `release_dates` entry per region in no guaranteed order, so
+ * taking the first match is arbitrary: the live shelf showed Grand Theft Auto
+ * III as 2002 and Breath of the Wild as 2022 by picking a later regional row.
+ * The console's debut is the minimum of them.
+ */
+function earliestPlatformYear(
+  releaseDates: z.infer<typeof gameSchema>["release_dates"],
+  platformId: number
+): number | null {
+  const years = releaseDates
+    .filter((date) => date.platform === platformId && date.y !== undefined)
+    .map((date) => date.y as number);
+  return years.length > 0 ? Math.min(...years) : null;
+}
+
 function toGameSearchResult(
   game: z.infer<typeof gameSchema>,
   platformId: number
@@ -134,8 +152,7 @@ function toGameSearchResult(
     coverUrl: game.cover
       ? `https://images.igdb.com/igdb/image/upload/t_cover_big/${game.cover.image_id}.jpg`
       : null,
-    releaseYear: game.release_dates
-      .find((date) => date.platform === platformId && date.y)?.y ?? null,
+    releaseYear: earliestPlatformYear(game.release_dates, platformId),
     genres: game.genres.map((genre) => genre.name),
     alternativeNames: game.alternative_names.map((name) => name.name),
     platformIds: game.platforms

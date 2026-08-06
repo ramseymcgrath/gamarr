@@ -439,7 +439,7 @@ describe("CatalogService", () => {
     expect(repository.popular.get(130)?.gameIds.slice(0, 3)).toEqual([1, 2, 3]);
   });
 
-  it("asks the provider for 100 candidates", async () => {
+  it("asks the provider for 250 candidates", async () => {
     const repository = new MemoryCatalogRepository();
     visiblePlatform(repository);
     const limits: number[] = [];
@@ -453,7 +453,7 @@ describe("CatalogService", () => {
 
     await service.popular(130);
 
-    expect(limits).toEqual([100]);
+    expect(limits).toEqual([250]);
   });
 
   it("caches an empty list when every candidate is a late port", async () => {
