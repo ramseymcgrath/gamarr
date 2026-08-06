@@ -265,7 +265,9 @@ Expected: PASS, including the pre-existing `round-trips cached games` test, whic
 - [ ] **Step 8: Typecheck**
 
 Run: `pnpm typecheck`
-Expected: FAIL — `MemoryCatalogRepository` in `src/features/catalog/service.test.ts` no longer satisfies `CatalogRepository`. Fix it by adding a working in-memory implementation to that class:
+Expected: FAIL. **Two** test fakes implement `CatalogRepository` and both must grow the new methods:
+
+**(a)** `MemoryCatalogRepository` in `src/features/catalog/service.test.ts` — needs a working in-memory implementation, because Task 4's tests exercise it:
 
 ```ts
   popular = new Map<number, { gameIds: number[]; fetchedAt: number }>();
@@ -286,13 +288,20 @@ Expected: FAIL — `MemoryCatalogRepository` in `src/features/catalog/service.te
   }
 ```
 
+**(b)** The `catalog` object literal at `src/features/release-search/service.test.ts:37` — release search never reads the popular cache, so inert stubs are correct here. Add to that literal:
+
+```ts
+  getPopular: () => null,
+  replacePopular: () => undefined,
+```
+
 Re-run: `pnpm typecheck`
 Expected: PASS.
 
 - [ ] **Step 9: Commit**
 
 ```bash
-git add src/db/schema.ts src/features/catalog/ports.ts src/features/catalog/repository.ts src/features/catalog/repository.test.ts src/features/catalog/service.test.ts drizzle/
+git add src/db/schema.ts src/features/catalog/ports.ts src/features/catalog/repository.ts src/features/catalog/repository.test.ts src/features/catalog/service.test.ts src/features/release-search/service.test.ts drizzle/
 git commit -m "feat(catalog): cache a ranked popular-games list per platform"
 ```
 
