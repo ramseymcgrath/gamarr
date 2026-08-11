@@ -1825,7 +1825,20 @@ In `src/features/catalog/repository.ts`, replace the `settings?.categoryIds ?? [
 - [ ] **Step 6: Run tests**
 
 Run: `pnpm test src/features/settings/ src/features/catalog/ && pnpm typecheck`
-Expected: settings and catalog PASS. `typecheck` still fails in `release-search`, `downloads` and `src/app/api/**` — those are Tasks 9–12.
+
+Expected: the settings **repository and service** tests PASS, and catalog PASSES.
+
+`typecheck` is still expected to fail, and so are some test files. Do not treat any of the following as a contradiction — each is fixed by a later task, and this task must not touch them:
+
+| Still broken after this task | Fixed by |
+| --- | --- |
+| `src/features/settings/settings-screen.tsx` + its test | Task 13 |
+| `src/features/settings/setup-screen.tsx` + its test | Task 13 |
+| `src/features/release-search/**` | Task 9 |
+| `src/features/downloads/**` | Tasks 10–11 |
+| `src/app/api/**` | Task 12 |
+
+The two settings screens both consume `PublicIndexer`, which this task deletes. Leave them broken; renaming them here would collide with Task 13.
 
 - [ ] **Step 7: Commit**
 
