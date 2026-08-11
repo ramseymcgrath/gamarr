@@ -2139,7 +2139,20 @@ Apply the model, port and service changes. Rename `sabMarker` → `marker` acros
 - [ ] **Step 4: Run tests**
 
 Run: `pnpm test src/features/downloads/ && pnpm typecheck`
-Expected: downloads PASS; `typecheck` still fails in `src/app/api/**`.
+
+Expected: the downloads **models, port, repository and service** tests PASS.
+
+`typecheck` is still expected to fail. Do not treat any of the following as a contradiction — each is fixed by a later task, and this task must not touch them:
+
+| Still broken after this task | Fixed by |
+| --- | --- |
+| `src/app/api/**` (including `dependencies.test.ts` and `settings/handlers.test.ts`) | Task 12 |
+| `src/app/setup/page.tsx` | Task 12 |
+| `src/features/release-search/download-dialog.tsx` + `release-results.tsx` + their tests | Task 13 |
+| `src/features/settings/settings-screen.tsx` + `setup-screen.tsx` + their tests | Task 13 |
+| `src/integrations/newznab/**` and `src/integrations/internet-archive/**` | Task 14 (deleted) |
+
+Replacing `NzbFetcherPort` with `ReleaseFetcherPort` breaks `newznab/download.ts`, which implements the old port. That is expected — Task 14 deletes the whole directory. Do not edit it, and do not keep the old port alive to spare it.
 
 - [ ] **Step 5: Commit**
 
