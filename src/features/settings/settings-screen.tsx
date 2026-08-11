@@ -56,6 +56,14 @@ export function SettingsScreen({
   const [qbPassword, setQbPassword] = useState("");
   const [prowlarrKey, setProwlarrKey] = useState("");
   const [clearProwlarrKey, setClearProwlarrKey] = useState(false);
+  // Visibility and categories are tracked together because both are written
+  // through the same PUT, and a category save has to send the platform's
+  // current visibility rather than the value the server rendered.
+  const [platformDrafts, setPlatformDrafts] = useState(() =>
+    new Map(platforms.map((platform) => [platform.id, {
+      visible: platform.visible,
+      categories: (platform.categoryIds ?? []).join(", ")
+    }])));
   const [discoveredIndexers, setDiscoveredIndexers] = useState<Array<{
     id: string;
     name: string;
@@ -428,30 +436,77 @@ export function SettingsScreen({
             </p>
           ) : (
             <div className="platform-check-grid">
-              {platforms.map((platform) => (
-                <label className="platform-check" key={platform.id}>
-                  <input
-                    type="checkbox"
-                    defaultChecked={platform.visible}
-                    onChange={(event) => void run(
-                      `${platform.name} update`,
-                      () => mutate("/api/platforms", "PUT", {
-                        id: platform.id,
-                        visible: event.target.checked,
-                        aliases: platform.aliases
-                      })
+              {platforms.map((platform) => {
+                const draft = platformDrafts.get(platform.id) ?? {
+                  visible: platform.visible,
+                  categories: (platform.categoryIds ?? []).join(", ")
+                };
+                const setDraft = (patch: Partial<typeof draft>) =>
+                  setPlatformDrafts((current) =>
+                    new Map(current).set(platform.id, { ...draft, ...patch }));
+                return (
+                  <div className="platform-check-row" key={platform.id}>
+                    <label className="platform-check">
+                      <input
+                        type="checkbox"
+                        checked={draft.visible}
+                        onChange={(event) => {
+                          const visible = event.target.checked;
+                          setDraft({ visible });
+                          // No categoryIds: a visibility toggle must not
+                          // rewrite the platform's categories.
+                          void run(
+                            `${platform.name} update`,
+                            () => mutate("/api/platforms", "PUT", {
+                              id: platform.id,
+                              visible,
+                              aliases: platform.aliases
+                            })
+                          );
+                        }}
+                      />
+                      <span>{platform.name}</span>
+                      {platform.abbreviation && (
+                        <small>{platform.abbreviation}</small>
+                      )}
+                    </label>
+                    {draft.visible && (
+                      <Input
+                        className="platform-categories"
+                        aria-label={`${platform.name} search categories`}
+                        placeholder="Categories, e.g. 1000, 1080"
+                        value={draft.categories}
+                        onChange={(event) =>
+                          setDraft({ categories: event.target.value })}
+                        onBlur={() => void run(
+                          `${platform.name} categories`,
+                          () => mutate("/api/platforms", "PUT", {
+                            id: platform.id,
+                            visible: draft.visible,
+                            aliases: platform.aliases,
+                            categoryIds: parseCategoryIds(draft.categories)
+                          })
+                        )}
+                      />
                     )}
-                  />
-                  <span>{platform.name}</span>
-                  {platform.abbreviation && <small>{platform.abbreviation}</small>}
-                </label>
-              ))}
+                  </div>
+                );
+              })}
             </div>
           )}
         </Card>
       </div>
     </div>
   );
+}
+
+/**
+ * Newznab category ids, entered as a free-form list. Split on commas and
+ * whitespace so "1000, 1080" and "1000 1080" both work, and de-duplicated
+ * because the categories table is keyed on (platform, category).
+ */
+function parseCategoryIds(value: string): string[] {
+  return [...new Set(value.split(/[\s,]+/).filter(Boolean))];
 }
 
 function SettingsCardHeader({

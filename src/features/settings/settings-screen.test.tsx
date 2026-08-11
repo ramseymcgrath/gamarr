@@ -58,4 +58,69 @@ describe("SettingsScreen", () => {
     expect(screen.queryByDisplayValue("prowlarr-api-key")).not.toBeInTheDocument();
     expect(screen.queryByText("prowlarr-api-key")).not.toBeInTheDocument();
   });
+
+  const switchPlatform = {
+    id: 130,
+    name: "Nintendo Switch",
+    visible: true,
+    aliases: ["Switch"],
+    categoryIds: ["1000", "1080"],
+    lastSyncedAt: 1
+  };
+
+  it("shows a visible platform's saved search categories", () => {
+    render(<SettingsScreen initial={initial} platforms={[switchPlatform]} />);
+
+    expect(screen.getByLabelText("Nintendo Switch search categories"))
+      .toHaveValue("1000, 1080");
+  });
+
+  it("hides the category field for a platform that is not shown", () => {
+    render(
+      <SettingsScreen
+        initial={initial}
+        platforms={[{ ...switchPlatform, visible: false }]}
+      />
+    );
+
+    expect(screen.queryByLabelText("Nintendo Switch search categories"))
+      .not.toBeInTheDocument();
+  });
+
+  it("saves edited categories, split on commas and whitespace", async () => {
+    const fetchMock = vi.fn(async () => Response.json({ status: "ok" }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<SettingsScreen initial={initial} platforms={[switchPlatform]} />);
+    const field = screen.getByLabelText("Nintendo Switch search categories");
+    fireEvent.change(field, { target: { value: "1000, 1080 4050" } });
+    fireEvent.blur(field);
+
+    expect(fetchMock).toHaveBeenCalledWith("/api/platforms", expect.objectContaining({
+      method: "PUT",
+      body: JSON.stringify({
+        id: 130,
+        visible: true,
+        aliases: ["Switch"],
+        categoryIds: ["1000", "1080", "4050"]
+      })
+    }));
+  });
+
+  it("omits categoryIds when only visibility changes", () => {
+    let sent: RequestInit | undefined;
+    vi.stubGlobal("fetch", vi.fn(async (...args: unknown[]) => {
+      sent = args[1] as RequestInit;
+      return Response.json({ status: "ok" });
+    }));
+
+    render(<SettingsScreen initial={initial} platforms={[switchPlatform]} />);
+    fireEvent.click(screen.getByRole("checkbox", { name: /Nintendo Switch/ }));
+
+    // A toggle must not rewrite categories: the handler leaves them alone
+    // only when the field is absent entirely.
+    const body = JSON.parse(sent?.body as string) as Record<string, unknown>;
+    expect(body).not.toHaveProperty("categoryIds");
+    expect(body.visible).toBe(false);
+  });
 });

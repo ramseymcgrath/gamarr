@@ -28,7 +28,11 @@ test("searches Prowlarr and sends a torrent release to qBittorrent", async ({
   await page.getByRole("button", { name: "Refresh platforms" }).click();
   await expect(page.getByText("Platform refresh complete")).toBeVisible();
   await page.reload();
-  await page.locator("#platforms").getByLabel("Nintendo Switch").check();
+  // By role: the platform also has a "<name> search categories" field,
+  // so a plain label match resolves to both controls.
+  await page.locator("#platforms")
+    .getByRole("checkbox", { name: /Nintendo Switch/ })
+    .check();
 
   const prowlarr = page.locator("#prowlarr");
   await prowlarr.getByLabel("Base URL").fill("http://prowlarr.test:9696");
