@@ -13,7 +13,8 @@ import {
   SabnzbdUploadError,
   TorrentAddError,
   type SabnzbdPort,
-  type TorrentClientPort
+  type TorrentClientPort,
+  type TorrentJob
 } from "@/features/downloads/port";
 import type { DownloadRepository } from "@/features/downloads/repository";
 import { DownloadService } from "@/features/downloads/service";
@@ -73,16 +74,15 @@ class MemoryDownloads implements DownloadRepository {
     }
   }
 
-  recoverStaleInternetArchiveDownloads(before: number, updatedAt: number): void {
+  recoverStaleInternetArchiveDownloads(updatedAt: number): void {
     for (const attempt of this.attempts.values()) {
       if (
         attempt.source === "internet-archive"
-        && (attempt.status === "Pending" || attempt.status === "Downloading")
-        && attempt.updatedAt < before
+        && !isTerminalDownloadStatus(attempt.status)
       ) {
         this.update(attempt.id, {
           status: "Failed",
-          failureDetail: "Download was interrupted before completion",
+          failureDetail: "The direct download path was removed",
           updatedAt
         });
       }
@@ -211,6 +211,7 @@ interface BuildOptions {
   sabConfigured?: boolean;
   uploadError?: unknown;
   events?: string[];
+  torrents?: TorrentJob[];
 }
 
 function build(options: BuildOptions = {}) {
@@ -277,7 +278,7 @@ function build(options: BuildOptions = {}) {
     add,
     listFiles: async () => [],
     setFilePriorities: async () => undefined,
-    list: async () => [],
+    list: async () => options.torrents ?? [],
     testConnection: async () => undefined
   };
   const upload = vi.fn(async (uploadInput: NzbUpload) => {
@@ -602,5 +603,153 @@ describe("DownloadService submission safety", () => {
     expect(fingerprint(["candidate-a", 1, 130, "Game.zip"])).toBe(
       "79751ab50f861ae192664dcecd5cf6fd444d5b28a9cad79210e7eb7a8ff97319"
     );
+  });
+});
+
+describe("DownloadService torrent reconciliation and recovery", () => {
+  it("reconciles a prowlarr torrent by hash", async () => {
+    const repository = new MemoryDownloads();
+    const attempt = storedAttempt({
+      id: "prowlarr-by-hash",
+      submissionKey: "prowlarr-by-hash-key",
+      status: "Queued",
+      source: "prowlarr-torrent",
+      torrentHash: "hash-from-add",
+      selectedFiles: [],
+      marker: "gamarr-prowlarr-by-hash",
+      sabJobId: null
+    });
+    repository.attempts.set(attempt.id, attempt);
+    const { service } = build({
+      repository,
+      torrents: [{
+        hash: "hash-from-add",
+        tags: [],
+        state: "downloading",
+        progress: 41.6
+      }]
+    });
+
+    const [reconciled] = await service.reconcile([attempt.id]);
+
+    expect(reconciled).toMatchObject({
+      status: "Downloading",
+      progress: 42,
+      torrentHash: "hash-from-add",
+      failureDetail: null
+    });
+  });
+
+  it("reconciles a prowlarr torrent by tag when no hash was returned", async () => {
+    const repository = new MemoryDownloads();
+    const attempt = storedAttempt({
+      id: "prowlarr-by-tag",
+      submissionKey: "prowlarr-by-tag-key",
+      status: "Unknown",
+      source: "prowlarr-torrent",
+      torrentHash: null,
+      selectedFiles: [],
+      marker: "gamarr-prowlarr-by-tag",
+      sabJobId: null
+    });
+    repository.attempts.set(attempt.id, attempt);
+    const { service } = build({
+      repository,
+      torrents: [{
+        hash: "hash-found-by-tag",
+        tags: ["unrelated", "gamarr-prowlarr-by-tag"],
+        state: "downloading",
+        progress: 12
+      }]
+    });
+
+    const [reconciled] = await service.reconcile([attempt.id]);
+
+    expect(reconciled).toMatchObject({
+      status: "Downloading",
+      progress: 12,
+      torrentHash: "hash-found-by-tag",
+      failureDetail: null
+    });
+  });
+
+  it("still reconciles a legacy internet-archive-torrent attempt", async () => {
+    const repository = new MemoryDownloads();
+    const attempt = storedAttempt({
+      id: "legacy-torrent",
+      submissionKey: "legacy-torrent-key",
+      status: "Queued",
+      source: "internet-archive-torrent",
+      torrentHash: "legacy-hash",
+      selectedFiles: null,
+      marker: "gamarr-legacy-torrent",
+      sabJobId: null
+    });
+    repository.attempts.set(attempt.id, attempt);
+    const { service } = build({
+      repository,
+      torrents: [{
+        hash: "legacy-hash",
+        tags: ["gamarr-legacy-torrent"],
+        state: "stalledUP",
+        progress: 100
+      }]
+    });
+
+    const [reconciled] = await service.reconcile([attempt.id]);
+
+    expect(reconciled).toMatchObject({
+      status: "Completed",
+      progress: 100,
+      completedAt: 1_000,
+      torrentHash: "legacy-hash"
+    });
+  });
+
+  it("fails leftover internet-archive attempts on startup", () => {
+    const repository = new MemoryDownloads();
+    const statuses = [
+      "Pending",
+      "Submitting",
+      "Unknown",
+      "Queued",
+      "Downloading"
+    ] as const;
+    for (const status of statuses) {
+      const id = `legacy-direct-${status}`;
+      repository.attempts.set(id, storedAttempt({
+        id,
+        submissionKey: `${id}-key`,
+        status,
+        source: "internet-archive",
+        iaFileName: "Game.zip",
+        updatedAt: 1_000
+      }));
+    }
+    repository.attempts.set("legacy-direct-completed", storedAttempt({
+      id: "legacy-direct-completed",
+      submissionKey: "legacy-direct-completed-key",
+      status: "Completed",
+      source: "internet-archive",
+      iaFileName: "Game.zip",
+      completedAt: 900,
+      updatedAt: 900
+    }));
+    const { service } = build({ repository });
+
+    service.recoverStaleSubmissions();
+
+    for (const status of statuses) {
+      expect(repository.get(`legacy-direct-${status}`)).toMatchObject({
+        status: "Failed",
+        failureDetail: "The direct download path was removed",
+        updatedAt: 1_000
+      });
+    }
+    expect(repository.get("legacy-direct-completed")).toMatchObject({
+      status: "Completed",
+      failureDetail: null,
+      updatedAt: 900
+    });
   });
 });

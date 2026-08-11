@@ -4,7 +4,7 @@ import {
   type SelectedFile,
   type SubmissionClaimInput
 } from "@/features/downloads/models";
-import { and, desc, eq, inArray, lt, notInArray } from "drizzle-orm";
+import { and, desc, eq, lt, notInArray } from "drizzle-orm";
 
 import type { Database } from "@/db/client";
 import {
@@ -27,7 +27,7 @@ export interface DownloadRepository {
   get(id: string): DownloadAttempt | null;
   list(): DownloadAttempt[];
   recoverStaleSubmitting(before: number, updatedAt: number): void;
-  recoverStaleInternetArchiveDownloads(before: number, updatedAt: number): void;
+  recoverStaleInternetArchiveDownloads(updatedAt: number): void;
 }
 
 function mapAttempt(
@@ -211,22 +211,16 @@ export class SqliteDownloadRepository implements DownloadRepository {
       .run();
   }
 
-  /**
-   * `before` is a cutoff on `updatedAt`, which an in-flight download stamps on
-   * a timer: a row quiet for longer than that has no process behind it. Without
-   * the cutoff this would fail whatever is streaming right now.
-   */
-  recoverStaleInternetArchiveDownloads(before: number, updatedAt: number): void {
+  recoverStaleInternetArchiveDownloads(updatedAt: number): void {
     this.database.update(downloadAttempts)
       .set({
         status: "Failed",
-        failureDetail: "Download was interrupted before completion",
+        failureDetail: "The direct download path was removed",
         updatedAt
       })
       .where(and(
         eq(downloadAttempts.source, "internet-archive"),
-        inArray(downloadAttempts.status, ["Pending", "Downloading"]),
-        lt(downloadAttempts.updatedAt, before)
+        notInArray(downloadAttempts.status, [...TERMINAL_DOWNLOAD_STATUSES])
       ))
       .run();
   }

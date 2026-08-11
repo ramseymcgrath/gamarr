@@ -501,8 +501,10 @@ export class DownloadService {
     const torrents = await client.list();
     for (const attempt of attempts) {
       if (isTerminalDownloadStatus(attempt.status)) continue;
-      // Task 11 widens this to Prowlarr torrents and applies file priorities.
-      if (attempt.source !== "internet-archive-torrent") continue;
+      if (
+        attempt.source !== "prowlarr-torrent"
+        && attempt.source !== "internet-archive-torrent"
+      ) continue;
       const torrent = attempt.torrentHash === null
         ? torrents.find((job) => job.tags.includes(attempt.marker))
         : torrents.find((job) => job.hash === attempt.torrentHash);
@@ -530,10 +532,7 @@ export class DownloadService {
       timestamp - maxAgeMs,
       timestamp
     );
-    this.dependencies.repository.recoverStaleInternetArchiveDownloads(
-      timestamp - 60_000,
-      timestamp
-    );
+    this.dependencies.repository.recoverStaleInternetArchiveDownloads(timestamp);
   }
 
   private selected(ids?: string[]): DownloadAttempt[] {

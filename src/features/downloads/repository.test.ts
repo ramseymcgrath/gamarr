@@ -126,7 +126,7 @@ describe("SqliteDownloadRepository", () => {
     database.$client.close();
   });
 
-  it("fails interrupted Internet Archive downloads without touching others", () => {
+  it("fails every non-terminal legacy Internet Archive download", () => {
     const { database, repository } = setup();
     const claim = (value: DownloadAttempt) => repository.claimSubmission({
       library: {
@@ -139,18 +139,18 @@ describe("SqliteDownloadRepository", () => {
       attempt: value
     });
     claim(attempt({
-      id: "ia-active",
-      submissionKey: "key-ia",
-      marker: "gamarr-ia-active",
+      id: "ia-unknown",
+      submissionKey: "key-ia-unknown",
+      marker: "gamarr-ia-unknown",
       source: "internet-archive",
-      status: "Downloading",
+      status: "Unknown",
       iaFileName: "Game.zip",
       progress: 40
     }));
     claim(attempt({
-      id: "ia-beating",
-      submissionKey: "key-beat",
-      marker: "gamarr-ia-beating",
+      id: "ia-fresh",
+      submissionKey: "key-ia-fresh",
+      marker: "gamarr-ia-fresh",
       source: "internet-archive",
       status: "Downloading",
       iaFileName: "Game.zip",
@@ -165,18 +165,17 @@ describe("SqliteDownloadRepository", () => {
       progress: 40
     }));
 
-    repository.recoverStaleInternetArchiveDownloads(200, 500);
+    repository.recoverStaleInternetArchiveDownloads(500);
 
-    expect(repository.get("ia-active")).toMatchObject({
+    expect(repository.get("ia-unknown")).toMatchObject({
       status: "Failed",
-      failureDetail: "Download was interrupted before completion",
+      failureDetail: "The direct download path was removed",
       updatedAt: 500
     });
-    // Heartbeat newer than the cutoff: the stream is still live.
-    expect(repository.get("ia-beating")).toMatchObject({
-      status: "Downloading",
-      failureDetail: null,
-      updatedAt: 300
+    expect(repository.get("ia-fresh")).toMatchObject({
+      status: "Failed",
+      failureDetail: "The direct download path was removed",
+      updatedAt: 500
     });
     expect(repository.get("nz-active")?.status).toBe("Downloading");
     database.$client.close();
