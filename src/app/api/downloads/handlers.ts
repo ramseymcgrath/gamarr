@@ -48,10 +48,11 @@ export async function handleSubmitDownload(
       typeof body.candidateId !== "string" ||
       !Number.isInteger(body.gameId) ||
       !Number.isInteger(body.platformId) ||
-      (body.fileName !== undefined && typeof body.fileName !== "string") ||
-      (body.delivery !== undefined
-        && body.delivery !== "file"
-        && body.delivery !== "torrent")
+      (body.selectedFiles !== undefined && (
+        !Array.isArray(body.selectedFiles)
+        || !body.selectedFiles.every((index) =>
+          Number.isInteger(index) && index >= 0)
+      ))
     ) {
       throw validationError("Invalid download submission");
     }

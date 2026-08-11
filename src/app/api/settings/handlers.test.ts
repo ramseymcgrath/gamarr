@@ -1,25 +1,26 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-import { SettingsService, type SettingsRepository } from "@/features/settings/service";
+import {
+  handleGetSettings,
+  handlePutIgdb,
+  handlePutProwlarr,
+  handlePutQbittorrent,
+  handleTestQbittorrent,
+  handleTestProwlarr
+} from "@/app/api/settings/handlers";
 import type {
   IgdbSettingsRecord,
-  IndexerRecord,
+  ProwlarrSettingsRecord,
   QbittorrentSettingsRecord,
   SabnzbdSettingsRecord
 } from "@/features/settings/models";
-import {
-  handleDeleteIndexer,
-  handleGetSettings,
-  handlePutIndexer,
-  handlePutIgdb,
-  handlePutQbittorrent
-} from "@/app/api/settings/handlers";
+import { SettingsService, type SettingsRepository } from "@/features/settings/service";
 import { parseOriginPolicy } from "@/lib/trusted-mutation";
 
 class MemoryRepository implements SettingsRepository {
   igdb: IgdbSettingsRecord | null = null;
   qbittorrent: QbittorrentSettingsRecord | null = null;
-  indexers: IndexerRecord[] = [];
+  prowlarr: ProwlarrSettingsRecord | null = null;
   getIgdb = () => this.igdb;
   saveIgdb = (value: IgdbSettingsRecord) => { this.igdb = value; };
   getSabnzbd = (): SabnzbdSettingsRecord | null => null;
@@ -29,18 +30,9 @@ class MemoryRepository implements SettingsRepository {
     this.qbittorrent = value;
   };
   recordQbittorrentTest = () => undefined;
-  listIndexers = (): IndexerRecord[] => this.indexers;
-  saveIndexer = (value: IndexerRecord) => {
-    const index = this.indexers.findIndex((item) => item.id === value.id);
-    if (index === -1) this.indexers.push(value);
-    else this.indexers[index] = value;
-  };
-  deleteIndexer = (id: string, deletedAt: number) => {
-    const indexer = this.indexers.find((item) => item.id === id);
-    if (indexer) {
-      indexer.deletedAt = deletedAt;
-      indexer.enabled = false;
-    }
+  getProwlarr = () => this.prowlarr;
+  saveProwlarr = (value: ProwlarrSettingsRecord) => {
+    this.prowlarr = value;
   };
 }
 
@@ -75,6 +67,45 @@ function putQbittorrentRequest(origin = "http://gamarr.local") {
       password: { action: "replace", value: "never-return-this" },
       defaultCategory: "games"
     })
+  });
+}
+
+function putProwlarrRequest(
+  apiKey = "prowlarr-secret-key",
+  origin = "http://gamarr.local"
+) {
+  return new Request("http://gamarr.local/api/settings/prowlarr", {
+    method: "PUT",
+    headers: {
+      host: "gamarr.local",
+      origin,
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({
+      baseUrl: "http://prowlarr.lan:9696",
+      apiKey: { action: "replace", value: apiKey },
+      timeoutMs: 10_000
+    })
+  });
+}
+
+function testProwlarrRequest(origin = "http://gamarr.local") {
+  return new Request("http://gamarr.local/api/settings/prowlarr/test", {
+    method: "POST",
+    headers: {
+      host: "gamarr.local",
+      origin
+    }
+  });
+}
+
+function testQbittorrentRequest(origin = "http://gamarr.local") {
+  return new Request("http://gamarr.local/api/settings/qbittorrent/test", {
+    method: "POST",
+    headers: {
+      host: "gamarr.local",
+      origin
+    }
   });
 }
 
@@ -151,58 +182,163 @@ describe("settings HTTP handlers", () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({
       igdb: null,
-      indexers: [],
+      prowlarr: null,
       qbittorrent: null,
       sabnzbd: null
     });
   });
 
-  it("updates and soft-deletes a named indexer", async () => {
+  it("never returns the prowlarr api key", async () => {
+    const key = "prowlarr-secret-key";
     const repository = new MemoryRepository();
-    const service = new SettingsService(repository, () => 100, () => "indexer");
-    service.saveIndexer({
-      name: "Old",
-      baseUrl: "https://indexer.test/api",
-      apiKey: { action: "replace", value: "secret" },
-      enabled: true,
-      categoryIds: [],
-      timeoutMs: 10_000
-    });
-    const update = await handlePutIndexer(
-      "indexer",
-      new Request("http://gamarr.local/api/settings/indexers/indexer", {
-        method: "PUT",
-        headers: {
-          host: "gamarr.local",
-          origin: "http://gamarr.local",
-          "content-type": "application/json"
-        },
-        body: JSON.stringify({
-          name: "New",
-          baseUrl: "https://indexer.test/api",
-          apiKey: { action: "retain" },
-          enabled: true,
-          categoryIds: ["4050"],
-          timeoutMs: 10_000
-        })
-      }),
+    const service = new SettingsService(repository, () => 100);
+
+    const response = await handlePutProwlarr(
+      putProwlarrRequest(key),
       { service, policy }
     );
-    const deleted = await handleDeleteIndexer(
-      "indexer",
-      new Request("http://gamarr.local/api/settings/indexers/indexer", {
-        method: "DELETE",
-        headers: {
-          host: "gamarr.local",
-          origin: "http://gamarr.local"
-        }
-      }),
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(repository.prowlarr?.apiKey).toBe(key);
+    expect(body.prowlarr).toEqual({
+      baseUrl: "http://prowlarr.lan:9696",
+      hasApiKey: true,
+      timeoutMs: 10_000,
+      lastTestStatus: null,
+      lastTestedAt: null,
+      configRevision: 1
+    });
+    expect(JSON.stringify(body)).not.toContain(key);
+  });
+
+  it("rejects a cross-origin mutation", async () => {
+    const repository = new MemoryRepository();
+    const service = new SettingsService(repository);
+
+    const response = await handlePutProwlarr(
+      putProwlarrRequest("secret", "http://attacker.test"),
       { service, policy }
     );
 
-    expect(update.status).toBe(200);
-    expect(await update.json()).toMatchObject({ id: "indexer", name: "New" });
-    expect(deleted.status).toBe(204);
-    expect(repository.indexers[0]?.deletedAt).toBe(100);
+    expect(response.status).toBe(403);
+    expect(repository.prowlarr).toBeNull();
+  });
+
+  it("returns discovered indexer names and protocols from a test", async () => {
+    const key = "prowlarr-secret-key";
+    const listIndexers = vi.fn(async () => [
+      {
+        id: "7",
+        name: "1337x",
+        protocol: "torrent" as const,
+        priority: 10,
+        categoryIds: ["1000"]
+      },
+      {
+        id: "3",
+        name: "NZBgeek",
+        protocol: "usenet" as const,
+        priority: 25,
+        categoryIds: ["4000"]
+      }
+    ]);
+    const recordResult = vi.fn();
+
+    const response = await handleTestProwlarr(testProwlarrRequest(), {
+      policy,
+      getSettings: () => ({
+        baseUrl: "http://prowlarr.lan:9696",
+        apiKey: key,
+        timeoutMs: 10_000,
+        lastTestStatus: null,
+        lastTestedAt: null,
+        configRevision: 1,
+        updatedAt: 1
+      }),
+      clientFactory: () => ({ listIndexers }),
+      recordResult
+    });
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body).toEqual({
+      indexers: [
+        { id: "7", name: "1337x", protocol: "torrent", priority: 10 },
+        { id: "3", name: "NZBgeek", protocol: "usenet", priority: 25 }
+      ],
+      usenet: 1,
+      torrent: 1
+    });
+    expect(listIndexers).toHaveBeenCalledOnce();
+    expect(recordResult).toHaveBeenCalledWith("ok");
+    expect(JSON.stringify(body)).not.toContain(key);
+  });
+
+  it("rejects a cross-origin Prowlarr test before discovery", async () => {
+    const listIndexers = vi.fn();
+    const recordResult = vi.fn();
+
+    const response = await handleTestProwlarr(
+      testProwlarrRequest("http://attacker.test"),
+      {
+        policy,
+        getSettings: () => null,
+        clientFactory: () => ({ listIndexers }),
+        recordResult
+      }
+    );
+
+    expect(response.status).toBe(403);
+    expect(listIndexers).not.toHaveBeenCalled();
+    expect(recordResult).not.toHaveBeenCalled();
+  });
+
+  it("tests qBittorrent through an injected client without exposing its password", async () => {
+    const password = "qbittorrent-secret";
+    const testConnection = vi.fn(async () => undefined);
+    const recordResult = vi.fn();
+
+    const response = await handleTestQbittorrent(testQbittorrentRequest(), {
+      policy,
+      getSettings: () => ({
+        baseUrl: "http://qbit.lan:8080",
+        username: "admin",
+        password,
+        defaultCategory: "games",
+        lastTestStatus: null,
+        lastTestedAt: null,
+        configRevision: 1,
+        updatedAt: 1
+      }),
+      clientFactory: () => ({ testConnection }),
+      recordResult
+    });
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body).toEqual({ status: "ok" });
+    expect(testConnection).toHaveBeenCalledOnce();
+    expect(recordResult).toHaveBeenCalledWith("ok");
+    expect(JSON.stringify(body)).not.toContain(password);
+  });
+
+  it("rejects a cross-origin qBittorrent test before connecting", async () => {
+    const testConnection = vi.fn();
+    const recordResult = vi.fn();
+
+    const response = await handleTestQbittorrent(
+      testQbittorrentRequest("http://attacker.test"),
+      {
+        policy,
+        getSettings: () => null,
+        clientFactory: () => ({ testConnection }),
+        recordResult
+      }
+    );
+
+    expect(response.status).toBe(403);
+    expect(testConnection).not.toHaveBeenCalled();
+    expect(recordResult).not.toHaveBeenCalled();
   });
 });

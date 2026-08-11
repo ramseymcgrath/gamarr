@@ -10,17 +10,16 @@ export default function SetupPage() {
   const settings = new SqliteSettingsRepository(database);
   const igdb = settings.getIgdb();
   const sabnzbd = settings.getSabnzbd();
-  const indexers = settings.listIndexers();
+  const prowlarr = settings.getProwlarr();
   const platforms = new SqliteCatalogRepository(database).listPlatforms();
   return <SetupScreen readiness={{
     igdbReady: Boolean(
       igdb?.clientId && igdb.clientSecret && igdb.lastTestStatus === "ok"
     ),
     platformsReady: platforms.some((platform) => platform.visible),
-    indexerReady: indexers.some((indexer) =>
-      indexer.enabled &&
-      indexer.deletedAt === null &&
-      indexer.lastTestStatus === "ok"),
+    indexerReady: Boolean(
+      prowlarr?.baseUrl && prowlarr.apiKey && prowlarr.lastTestStatus === "ok"
+    ),
     sabnzbdReady: Boolean(
       sabnzbd?.baseUrl &&
       sabnzbd.apiKey &&

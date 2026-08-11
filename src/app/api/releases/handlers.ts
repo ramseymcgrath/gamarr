@@ -52,8 +52,8 @@ export async function handleReleaseSearch(
 }
 
 /**
- * Lists the downloadable files of an Internet Archive item bound to a
- * live release candidate. Read-only, so there is no mutation guard: the
+ * Lists the files declared by torrent metainfo bound to a live release
+ * candidate. Read-only, so there is no mutation guard: the
  * opaque candidate ID means the request cannot be aimed at anything the
  * server did not already mint. Which files are selectable is release-search
  * domain policy and lives in the feature slice, not here.
