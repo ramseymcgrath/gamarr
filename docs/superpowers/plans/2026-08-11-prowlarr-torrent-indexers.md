@@ -2004,7 +2004,21 @@ Apply the deletions and the new shapes. In `repository.ts`, update the `SqliteCa
 - [ ] **Step 4: Run tests**
 
 Run: `pnpm test src/features/release-search/ && pnpm typecheck`
-Expected: release-search PASS. `typecheck` still fails in `downloads` and `src/app/api/**`.
+
+Expected: the release-search **service, matcher, query-planner and repository** tests PASS.
+
+`typecheck` is still expected to fail, and so are some test files. Do not treat any of the following as a contradiction — each is fixed by a later task, and this task must not touch them:
+
+| Still broken after this task | Fixed by |
+| --- | --- |
+| `src/features/release-search/download-dialog.tsx` + its test | Task 13 |
+| `src/features/release-search/release-results.tsx` + its test | Task 13 |
+| `src/features/settings/settings-screen.tsx` + its test | Task 13 |
+| `src/features/settings/setup-screen.tsx` + its test | Task 13 |
+| `src/features/downloads/**` | Tasks 10–11 |
+| `src/app/api/**` | Task 12 |
+
+Deleting `file-selection.ts` breaks `download-dialog.tsx`, which imports `SelectableFile` from it. That is expected — Task 13 repoints the dialog at `TorrentFile`. Do not edit the dialog here.
 
 - [ ] **Step 5: Commit**
 
