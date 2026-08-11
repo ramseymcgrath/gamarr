@@ -2316,6 +2316,7 @@ git commit -m "feat(api): compose the Prowlarr release and settings routes"
 
 **Files:**
 - Modify: `src/features/settings/settings-screen.tsx`, `setup-screen.tsx`, `src/features/release-search/release-results.tsx`, `download-dialog.tsx`, and their tests
+- Modify: `src/features/catalog/game-detail.tsx` and `game-detail.test.tsx` — it renders `ReleaseResults` and must thread `usenetClientConfigured` / `torrentClientConfigured` from the search response into it. Do not default either value: defaulting misrepresents configuration state, and re-fetching settings inside the dialog would bypass the designed data flow.
 
 **Interfaces:**
 - Consumes: `PublicProwlarrSettings` (Task 8), `PublicReleaseSource` / `CandidateFilesResponse` (Task 9).
