@@ -2220,7 +2220,8 @@ git commit -m "feat(downloads): apply file selection and reconcile every torrent
 
 **Files:**
 - Modify: `src/app/api/settings/**`, `src/app/api/releases/**`, `src/app/api/downloads/**`, `src/app/api/platforms/**`
-- Delete: any indexer-specific route directory under `src/app/api/settings/`
+- Modify: `src/app/setup/page.tsx` — it calls the deleted `settings.listIndexers()` and must read the Prowlarr record instead
+- Delete: `src/app/api/settings/indexers/` in full (route, test-handler, and its test)
 
 **Interfaces:**
 - Consumes: every feature from Tasks 8–11.

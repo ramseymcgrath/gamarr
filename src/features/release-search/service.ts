@@ -2,36 +2,30 @@ import { randomUUID } from "node:crypto";
 
 import type { CatalogRepository } from "@/features/catalog/ports";
 import {
-  selectCandidateFiles,
-  selectItemTorrent,
-  type SelectableFile
-} from "@/features/release-search/file-selection";
-import {
   deduplicateReleases,
   rankRelease
 } from "@/features/release-search/matcher";
-import {
-  INTERNET_ARCHIVE_INDEXER_ID,
-  INTERNET_ARCHIVE_INDEXER_NAME,
-  type ItemTorrent,
-  type RankedRelease,
-  type Release,
-  type ReleaseSourceType
+import type {
+  RankedRelease
 } from "@/features/release-search/models";
 import { planPrimaryQuery } from "@/features/release-search/query-planner";
 import type {
   CandidateRepository,
-  InternetArchiveSearchPort,
-  ListReleaseIndexersPort,
-  NewznabClientFactory,
-  TorrentClientConfiguredPort
+  ProwlarrPort,
+  ReleaseCandidateRecord
 } from "@/features/release-search/ports";
-import { AppError, validationError } from "@/lib/errors";
+// Pure validation/decoding modules are the deliberate no-I/O exception to the
+// feature/integration boundary documented in CLAUDE.md.
+import {
+  decodeTorrentFiles,
+  type TorrentFile
+} from "@/integrations/prowlarr/metainfo";
 import {
   DownloadUrlPolicyError,
   validateDownloadUrl,
   type DownloadUrlRejectionReason
-} from "@/integrations/newznab/url-policy";
+} from "@/integrations/prowlarr/url-policy";
+import { AppError, validationError } from "@/lib/errors";
 
 const rejectionLabels: Array<[DownloadUrlRejectionReason, string]> = [
   ["malformed", "malformed"],
@@ -42,7 +36,7 @@ const rejectionLabels: Array<[DownloadUrlRejectionReason, string]> = [
 
 /**
  * Built only from counts and fixed labels — never from the rejected URL or the
- * caught message — so an indexer API key cannot reach a user-facing warning.
+ * caught message — so a Prowlarr API key cannot reach a user-facing warning.
  */
 function unsafeDownloadUrlWarning(
   byReason: Map<DownloadUrlRejectionReason, number>
@@ -57,13 +51,30 @@ function unsafeDownloadUrlWarning(
     : `Ignored ${total} release results: unsafe download URLs (${detail}).`;
 }
 
+type FetchedRelease =
+  | { kind: "nzb"; bytes: Uint8Array }
+  | { kind: "torrent"; bytes: Uint8Array }
+  | { kind: "magnet"; uri: string };
+
+interface ReleaseFetcherPort {
+  fetch(input: {
+    candidate: ReleaseCandidateRecord;
+    magnetUrl: string | null;
+    maxBytes: number;
+  }): Promise<FetchedRelease>;
+}
+
 interface ReleaseSearchDependencies {
   catalog: CatalogRepository;
-  listIndexers: ListReleaseIndexersPort;
   candidates: CandidateRepository;
-  clientFactory: NewznabClientFactory;
-  internetArchive?: InternetArchiveSearchPort;
-  torrentClientConfigured: TorrentClientConfiguredPort;
+  prowlarr: ProwlarrPort | null;
+  /** Effective base URL, including any test-only origin override. */
+  prowlarrBaseUrl: string;
+  prowlarrConfigRevision: number;
+  fetcher: ReleaseFetcherPort;
+  maxTorrentBytes: number;
+  usenetClientConfigured: () => boolean;
+  torrentClientConfigured: () => boolean;
   now?: () => number;
   id?: () => string;
   overallTimeoutMs?: number;
@@ -78,7 +89,8 @@ export interface ReleaseSearchInput {
 export interface PublicReleaseSource {
   candidateId: string;
   indexerName: string;
-  source: ReleaseSourceType;
+  protocol: "usenet" | "torrent";
+  seeders: number | null;
 }
 
 export interface PublicRelease {
@@ -100,14 +112,55 @@ export interface ReleaseSearchResponse {
     indexerName: string;
     message: string;
   }>;
+  usenetClientConfigured: boolean;
+  torrentClientConfigured: boolean;
 }
 
 export interface CandidateFilesResponse {
-  files: SelectableFile[];
-  /** Null when the item has not been derived and has no torrent. */
-  torrent: ItemTorrent | null;
-  /** Reported separately so an available torrent is not hidden when disabled. */
-  torrentClientConfigured: boolean;
+  files: TorrentFile[];
+  metadataPending: boolean;
+}
+
+/**
+ * Newznab groups categories in thousand-blocks: an indexer advertising 1010 or
+ * 1020 can serve a request for the 1000 block. Sending a category an indexer
+ * does not support yields an empty result set rather than an error, so the
+ * query carries only categories the indexer actually claims.
+ */
+export function intersectCategories(
+  platformCategoryIds: string[],
+  indexerCategoryIds: string[]
+): string[] {
+  const advertised = new Set(indexerCategoryIds);
+  const blocks = new Set(
+    indexerCategoryIds.map((id) => String(Math.floor(Number(id) / 1000) * 1000))
+  );
+  return platformCategoryIds.filter((id) => {
+    if (advertised.has(id)) return true;
+    const numeric = Number(id);
+    if (!Number.isFinite(numeric)) return false;
+    const block = String(Math.floor(numeric / 1000) * 1000);
+    // A block root is satisfied by any member of its block; a member is
+    // satisfied by the indexer advertising the block root itself.
+    return (numeric % 1000 === 0 && blocks.has(id)) || advertised.has(block);
+  });
+}
+
+function snapshotMagnetUrl(sourceSnapshot: string): string | null {
+  try {
+    const parsed: unknown = JSON.parse(sourceSnapshot);
+    if (
+      typeof parsed === "object"
+      && parsed !== null
+      && "magnetUrl" in parsed
+      && typeof parsed.magnetUrl === "string"
+    ) {
+      return parsed.magnetUrl;
+    }
+  } catch {
+    // Candidates minted before magnet snapshots existed still use the proxy.
+  }
+  return null;
 }
 
 export class ReleaseSearchService {
@@ -128,55 +181,69 @@ export class ReleaseSearchService {
     if (!platform?.visible) {
       throw validationError("Selected platform is not visible");
     }
+    const prowlarr = this.dependencies.prowlarr;
+    if (prowlarr === null) {
+      throw new AppError("UNAVAILABLE", 503, "Prowlarr is not configured");
+    }
 
     const conflictingAliases = this.dependencies.catalog.listPlatforms()
       .filter((candidate) => candidate.id !== platform.id)
       .flatMap((candidate) => candidate.aliases);
-    const indexers = this.dependencies.listIndexers()
-      .filter((indexer) => indexer.enabled && indexer.deletedAt === null);
     const ranked: RankedRelease[] = [];
     const warnings: ReleaseSearchResponse["warnings"] = [];
     const controller = new AbortController();
-    const overallTimeoutMs = this.dependencies.overallTimeoutMs ??
-      Math.min(60_000, Math.max(20_000, 5_000 + indexers.length * 2_500));
-    const timeout = setTimeout(
+    const startedAt = Date.now();
+    let timeout = setTimeout(
       () => controller.abort(new Error("Release search timed out")),
-      overallTimeoutMs
+      this.dependencies.overallTimeoutMs ?? 60_000
     );
+
+    let indexers;
     try {
-      const indexerFanOut = this.forEachConcurrent(
+      try {
+        indexers = await prowlarr.listIndexers(controller.signal);
+      } catch {
+        throw new AppError("UNAVAILABLE", 502, "Prowlarr is unavailable");
+      }
+
+      const overallTimeoutMs = this.dependencies.overallTimeoutMs
+        ?? Math.min(60_000, Math.max(20_000, 5_000 + indexers.length * 2_500));
+      clearTimeout(timeout);
+      timeout = setTimeout(
+        () => controller.abort(new Error("Release search timed out")),
+        Math.max(0, overallTimeoutMs - (Date.now() - startedAt))
+      );
+
+      await this.forEachConcurrent(
         indexers,
         this.dependencies.concurrency ?? 4,
         async (indexer) => {
-          const categories = [...new Set([
-            ...(platform.categoryIds ?? []),
-            ...indexer.categoryIds
-          ])];
-          const queries = [planPrimaryQuery({
+          const categories = intersectCategories(
+            platform.categoryIds ?? [],
+            indexer.categoryIds
+          );
+          const query = planPrimaryQuery({
             title: game.name,
             releaseYear: game.releaseYear,
             titleIsAmbiguous: false,
             categoryIds: categories
-          })];
+          });
           try {
-            const client = this.dependencies.clientFactory(indexer);
-            for (const query of queries) {
-              const result = await client.search(query, controller.signal);
-              warnings.push(...result.warnings.map((message) => ({
-                indexerId: indexer.id,
-                indexerName: indexer.name,
-                message
-              })));
-              ranked.push(...result.releases.map((release) => rankRelease({
-                release,
-                canonicalTitle: game.name,
-                alternativeNames: game.alternativeNames,
-                selectedAliases: platform.aliases,
-                conflictingAliases,
-                releaseYear: game.releaseYear,
-                categoryIds: categories
-              })));
-            }
+            const result = await prowlarr.search(indexer, query, controller.signal);
+            warnings.push(...result.warnings.map((message) => ({
+              indexerId: indexer.id,
+              indexerName: indexer.name,
+              message
+            })));
+            ranked.push(...result.releases.map((release) => rankRelease({
+              release,
+              canonicalTitle: game.name,
+              alternativeNames: game.alternativeNames,
+              selectedAliases: platform.aliases,
+              conflictingAliases,
+              releaseYear: game.releaseYear,
+              categoryIds: platform.categoryIds ?? []
+            })));
           } catch {
             warnings.push({
               indexerId: indexer.id,
@@ -188,21 +255,11 @@ export class ReleaseSearchService {
           }
         }
       );
-      await Promise.all([
-        indexerFanOut,
-        this.searchInternetArchive(game.name, game.alternativeNames, {
-          releaseYear: game.releaseYear,
-          selectedAliases: platform.aliases,
-          conflictingAliases,
-          signal: controller.signal,
-          ranked,
-          warnings
-        })
-      ]);
     } finally {
       clearTimeout(timeout);
     }
 
+    const indexerById = new Map(indexers.map((indexer) => [indexer.id, indexer]));
     const timestamp = this.now();
     // Reasons are counted per indexer so one unusable enclosure costs only that
     // release, not every result from every indexer.
@@ -210,44 +267,32 @@ export class ReleaseSearchService {
       string,
       Map<DownloadUrlRejectionReason, number>
     >();
-    const releases = deduplicateReleases(ranked).flatMap((release) => {
+    const releases = deduplicateReleases(
+      ranked,
+      (indexerId) => indexerById.get(indexerId)?.priority ?? Number.MAX_SAFE_INTEGER
+    ).flatMap((release) => {
       const sources = release.sources.flatMap((source): PublicReleaseSource[] => {
-        if (source.source === "internet-archive") {
-          // IA items need no download-URL policy: the candidate carries only
-          // the validated item identifier, and the download URL is rebuilt
-          // server-side from operator configuration at submission time.
-          const candidateId = this.id();
-          this.dependencies.candidates.save({
-            id: candidateId,
-            expiresAt: timestamp + 30 * 60 * 1000,
-            source: "internet-archive",
-            indexerId: null,
-            indexerConfigRevision: 0,
-            guid: source.guid,
-            title: source.title,
-            size: source.size,
-            downloadPath: `/details/${source.guid}`,
-            category: null,
-            sourceSnapshot: JSON.stringify({
-              indexerName: INTERNET_ARCHIVE_INDEXER_NAME,
-              identifier: source.guid,
-              origin: new URL(source.downloadUrl).origin
-            }),
-            createdAt: timestamp
-          });
-          return [{
-            candidateId,
-            indexerName: INTERNET_ARCHIVE_INDEXER_NAME,
-            source: "internet-archive" as const
-          }];
-        }
-        const indexer = indexers.find((candidate) => candidate.id === source.indexerId);
+        const indexer = indexerById.get(source.indexerId);
         if (!indexer) {
           throw validationError("Indexer changed during release search");
         }
         let safe;
         try {
-          safe = validateDownloadUrl(indexer.baseUrl, source.downloadUrl);
+          const directMagnet = source.protocol === "torrent"
+            && source.magnetUrl !== null
+            && source.downloadUrl === source.magnetUrl;
+          // Torznab may use the magnet itself as the enclosure. The fetcher
+          // short-circuits on the snapshot magnet, so retain a sanitized,
+          // unused Prowlarr path rather than persisting the untrusted URI.
+          safe = directMagnet
+            ? validateDownloadUrl(
+                this.dependencies.prowlarrBaseUrl,
+                this.dependencies.prowlarrBaseUrl
+              )
+            : validateDownloadUrl(
+                this.dependencies.prowlarrBaseUrl,
+                source.downloadUrl
+              );
         } catch (error) {
           if (!(error instanceof DownloadUrlPolicyError)) throw error;
           const byReason = rejectedSources.get(indexer.id)
@@ -256,28 +301,34 @@ export class ReleaseSearchService {
           rejectedSources.set(indexer.id, byReason);
           return [];
         }
+
         const candidateId = this.id();
         this.dependencies.candidates.save({
           id: candidateId,
           expiresAt: timestamp + 30 * 60 * 1000,
-          source: "newznab",
+          protocol: source.protocol,
           indexerId: indexer.id,
-          indexerConfigRevision: indexer.configRevision,
+          indexerConfigRevision: this.dependencies.prowlarrConfigRevision,
           guid: source.guid,
           title: source.title,
           size: source.size,
+          seeders: source.seeders,
           downloadPath: safe.downloadPath,
           category: source.category,
-          sourceSnapshot: JSON.stringify({
-            indexerName: indexer.name,
-            origin: safe.origin
-          }),
+          sourceSnapshot: JSON.stringify(source.protocol === "torrent"
+            ? {
+                indexerName: indexer.name,
+                origin: safe.origin,
+                magnetUrl: source.magnetUrl
+              }
+            : { indexerName: indexer.name, origin: safe.origin }),
           createdAt: timestamp
         });
         return [{
           candidateId,
           indexerName: indexer.name,
-          source: "newznab" as const
+          protocol: source.protocol,
+          seeders: source.seeders
         }];
       });
       if (sources.length === 0) return [];
@@ -294,22 +345,21 @@ export class ReleaseSearchService {
       }];
     });
     for (const [indexerId, byReason] of rejectedSources) {
-      const indexer = indexers.find((candidate) => candidate.id === indexerId);
+      const indexer = indexerById.get(indexerId);
       warnings.push({
         indexerId,
         indexerName: indexer?.name ?? indexerId,
         message: unsafeDownloadUrlWarning(byReason)
       });
     }
-    return { releases, warnings };
+    return {
+      releases,
+      warnings,
+      usenetClientConfigured: this.dependencies.usenetClientConfigured(),
+      torrentClientConfigured: this.dependencies.torrentClientConfigured()
+    };
   }
 
-  /**
-   * Lists the files of the Internet Archive item behind a live candidate, so
-   * the user can pick which one to download. Read-only: the opaque candidate
-   * ID means a caller cannot aim this at anything the server did not already
-   * mint during a search.
-   */
   async listCandidateFiles(
     candidateId: string
   ): Promise<CandidateFilesResponse> {
@@ -321,90 +371,29 @@ export class ReleaseSearchService {
     if (!candidate) {
       throw new AppError("NOT_FOUND", 404, "Release candidate has expired");
     }
-    if (candidate.source !== "internet-archive") {
-      throw validationError("Candidate is not an Internet Archive item");
+    if (candidate.protocol !== "torrent") {
+      throw validationError("Usenet candidates do not have selectable files");
     }
-    const internetArchive = this.dependencies.internetArchive;
-    if (!internetArchive) {
-      // Unreachable in a normal composition root — an IA candidate can only
-      // exist if a search ran with the port wired in — but a misconfigured
-      // deployment must fail loudly rather than report an empty item.
+
+    const fetched = await this.dependencies.fetcher.fetch({
+      candidate,
+      magnetUrl: snapshotMagnetUrl(candidate.sourceSnapshot),
+      maxBytes: this.dependencies.maxTorrentBytes
+    });
+    if (fetched.kind === "magnet") {
+      return { files: [], metadataPending: true };
+    }
+    if (fetched.kind !== "torrent") {
       throw new AppError(
         "UNAVAILABLE",
-        503,
-        "Internet Archive source is not configured"
+        502,
+        "Prowlarr returned an unexpected release payload"
       );
     }
-    // The item is addressed by the candidate's guid: the candidate ID is a
-    // server-minted handle and means nothing upstream.
-    const files = await internetArchive.listFiles(candidate.guid);
     return {
-      files: selectCandidateFiles(files),
-      torrent: selectItemTorrent(files),
-      torrentClientConfigured: this.dependencies.torrentClientConfigured()
+      files: decodeTorrentFiles(fetched.bytes),
+      metadataPending: false
     };
-  }
-
-  /**
-   * Queries the Internet Archive as one more bounded source inside the same
-   * overall deadline. Items become ordinary ranked releases with no category
-   * evidence; a failure here only produces a warning, like any indexer.
-   */
-  private async searchInternetArchive(
-    title: string,
-    alternativeNames: string[],
-    context: {
-      releaseYear: number | null;
-      selectedAliases: string[];
-      conflictingAliases: string[];
-      signal: AbortSignal;
-      ranked: RankedRelease[];
-      warnings: ReleaseSearchResponse["warnings"];
-    }
-  ): Promise<void> {
-    const internetArchive = this.dependencies.internetArchive;
-    if (!internetArchive) return;
-    try {
-      const result = await internetArchive.search(
-        { title },
-        context.signal
-      );
-      context.warnings.push(...result.warnings.map((message) => ({
-        indexerId: INTERNET_ARCHIVE_INDEXER_ID,
-        indexerName: INTERNET_ARCHIVE_INDEXER_NAME,
-        message
-      })));
-      for (const item of result.items) {
-        const release: Release = {
-          guid: item.identifier,
-          title: item.title,
-          source: "internet-archive",
-          indexerId: INTERNET_ARCHIVE_INDEXER_ID,
-          indexerName: INTERNET_ARCHIVE_INDEXER_NAME,
-          downloadUrl: item.detailsUrl,
-          size: item.size,
-          category: null,
-          publishedAt: item.publishedAt
-        };
-        context.ranked.push(rankRelease({
-          release,
-          canonicalTitle: title,
-          alternativeNames,
-          selectedAliases: context.selectedAliases,
-          conflictingAliases: context.conflictingAliases,
-          releaseYear: context.releaseYear,
-          categoryIds: []
-        }));
-      }
-    } catch {
-      context.warnings.push({
-        indexerId: INTERNET_ARCHIVE_INDEXER_ID,
-        indexerName: INTERNET_ARCHIVE_INDEXER_NAME,
-        message: context.signal.aborted
-          ? "Internet Archive search timed out"
-          : "Internet Archive search failed"
-      });
-    }
   }
 
   private async forEachConcurrent<T>(

@@ -5,7 +5,8 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { createDatabase } from "@/db/client";
 import { migrateDatabase } from "@/db/migrate";
-import { indexers, releaseCandidates } from "@/db/schema";
+import { releaseCandidates } from "@/db/schema";
+import type { ReleaseCandidateRecord } from "@/features/release-search/ports";
 import { SqliteCandidateRepository } from "@/features/release-search/repository";
 
 const temporaryDirectories: string[] = [];
@@ -21,37 +22,38 @@ function repository(now = 1_000) {
   temporaryDirectories.push(directory);
   const database = createDatabase(path.join(directory, "gamarr.db"));
   migrateDatabase(database, path.resolve("drizzle"));
-  database.insert(indexers).values({
-    id: "indexer",
-    name: "Indexer",
-    baseUrl: "https://indexer.test/api",
-    apiKey: "secret",
-    createdAt: 1,
-    updatedAt: 1
-  }).run();
   return {
     database,
     candidates: new SqliteCandidateRepository(database, () => now)
   };
 }
 
+function record(id: string, expiresAt: number): ReleaseCandidateRecord {
+  return {
+    id,
+    expiresAt,
+    protocol: "torrent",
+    indexerId: "7",
+    indexerConfigRevision: 3,
+    guid: `guid-${id}`,
+    title: "Game.NSW-GROUP",
+    size: 1234,
+    seeders: 42,
+    downloadPath: `/api/v1/indexer/7/download?link=${id}`,
+    category: "4050",
+    sourceSnapshot: JSON.stringify({
+      indexerName: "Tracker",
+      origin: "https://prowlarr.test",
+      magnetUrl: null
+    }),
+    createdAt: 900
+  };
+}
+
 describe("SqliteCandidateRepository", () => {
   it("round-trips an unexpired opaque release candidate", () => {
     const { database, candidates } = repository();
-    const candidate = {
-      id: "candidate",
-      expiresAt: 2_000,
-      source: "newznab" as const,
-      indexerId: "indexer",
-      indexerConfigRevision: 1,
-      guid: "guid",
-      title: "Game.NSW-GROUP",
-      size: 1234,
-      downloadPath: "/api?t=get&id=guid",
-      category: "4050",
-      sourceSnapshot: "{\"origin\":\"https://indexer.test\"}",
-      createdAt: 900
-    };
+    const candidate = record("candidate", 2_000);
 
     candidates.save(candidate);
 
@@ -61,20 +63,8 @@ describe("SqliteCandidateRepository", () => {
 
   it("does not resolve expired candidates", () => {
     const { database, candidates } = repository(2_001);
-    candidates.save({
-      id: "expired",
-      expiresAt: 2_000,
-      source: "newznab",
-      indexerId: "indexer",
-      indexerConfigRevision: 1,
-      guid: "guid",
-      title: "Game",
-      size: null,
-      downloadPath: "/api?t=get&id=guid",
-      category: null,
-      sourceSnapshot: "{}",
-      createdAt: 900
-    });
+
+    candidates.save(record("expired", 2_000));
 
     expect(candidates.get("expired")).toBeNull();
     database.$client.close();
@@ -82,25 +72,10 @@ describe("SqliteCandidateRepository", () => {
 
   it("purges expired candidates on write while keeping claimable ones", () => {
     const { database } = repository();
-    const record = (id: string, expiresAt: number) => ({
-      id,
-      expiresAt,
-      source: "newznab" as const,
-      indexerId: "indexer",
-      indexerConfigRevision: 1,
-      guid: `guid-${id}`,
-      title: "Game",
-      size: null,
-      downloadPath: "/api?t=get&id=guid",
-      category: null,
-      sourceSnapshot: "{}",
-      createdAt: 900
-    });
     const early = new SqliteCandidateRepository(database, () => 1_000);
     early.save(record("expired", 2_000));
     early.save(record("in-flight", 3_000));
 
-    // A later search is the only thing that triggers collection.
     const later = new SqliteCandidateRepository(database, () => 2_001);
     later.save(record("fresh", 4_000));
 
@@ -110,7 +85,6 @@ describe("SqliteCandidateRepository", () => {
       .all()
       .map((row) => row.id)
       .sort();
-
     expect(stored).toEqual(["fresh", "in-flight"]);
     expect(later.get("in-flight")).toMatchObject({ id: "in-flight" });
     database.$client.close();

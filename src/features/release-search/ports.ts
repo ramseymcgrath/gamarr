@@ -1,36 +1,35 @@
-import type { IndexerRecord } from "@/features/settings/models";
 import type {
-  InternetArchiveFile,
-  InternetArchiveSearchResult,
-  NewznabSearchResult,
   PlannedQuery,
-  ReleaseSourceType
+  Release
 } from "@/features/release-search/models";
 
-export interface NewznabPort {
-  search(
-    query: PlannedQuery,
-    signal: AbortSignal
-  ): Promise<NewznabSearchResult>;
+export interface ProwlarrIndexerSummary {
+  id: string;
+  name: string;
+  protocol: "usenet" | "torrent";
+  priority: number;
+  categoryIds: string[];
 }
 
-export interface InternetArchiveSearchPort {
+export interface ProwlarrPort {
+  listIndexers(signal: AbortSignal): Promise<ProwlarrIndexerSummary[]>;
   search(
-    input: { title: string },
+    indexer: ProwlarrIndexerSummary,
+    query: PlannedQuery,
     signal: AbortSignal
-  ): Promise<InternetArchiveSearchResult>;
-  listFiles(identifier: string): Promise<InternetArchiveFile[]>;
+  ): Promise<{ releases: Release[]; warnings: string[] }>;
 }
 
 export interface ReleaseCandidateRecord {
   id: string;
   expiresAt: number;
-  source: ReleaseSourceType;
-  indexerId: string | null;
+  protocol: "usenet" | "torrent";
+  indexerId: string;
   indexerConfigRevision: number;
   guid: string;
   title: string;
   size: number | null;
+  seeders: number | null;
   downloadPath: string;
   category: string | null;
   sourceSnapshot: string;
@@ -41,11 +40,3 @@ export interface CandidateRepository {
   save(value: ReleaseCandidateRecord): void;
   get(id: string): ReleaseCandidateRecord | null;
 }
-
-export type NewznabClientFactory = (indexer: IndexerRecord) => NewznabPort;
-
-/** Lists the configured indexers without exposing a settings repository. */
-export type ListReleaseIndexersPort = () => IndexerRecord[];
-
-/** Narrow read-only port used to report whether torrent delivery is usable. */
-export type TorrentClientConfiguredPort = () => boolean;
