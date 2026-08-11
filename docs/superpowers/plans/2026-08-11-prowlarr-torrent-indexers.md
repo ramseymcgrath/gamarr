@@ -972,13 +972,22 @@ let databasePath: string;
 beforeEach(() => {
   directory = mkdtempSync(join(tmpdir(), "gamarr-migration-"));
   databasePath = join(directory, "gamarr.db");
+  applied = new Set();
 });
 
 afterEach(() => {
   rmSync(directory, { recursive: true, force: true });
 });
 
-/** Applies migrations in journal order, stopping after `through` (inclusive). */
+/** Tags already applied to the current temp database. Reset per test. */
+let applied: Set<string>;
+
+/**
+ * Applies not-yet-applied migrations in journal order, stopping after
+ * `through` (inclusive). Resumable on purpose: a test seeds at 0005, then
+ * calls this again for 0006, and replaying 0000 would fail on
+ * "table download_attempts already exists".
+ */
 function applyMigrations(through: string): void {
   const journal = JSON.parse(
     readFileSync(join(process.cwd(), "drizzle/meta/_journal.json"), "utf8")
@@ -986,13 +995,16 @@ function applyMigrations(through: string): void {
   const database = new Database(databasePath);
   database.pragma("foreign_keys = ON");
   for (const entry of journal.entries) {
-    const sql = readFileSync(
-      join(process.cwd(), "drizzle", `${entry.tag}.sql`),
-      "utf8"
-    );
-    for (const statement of sql.split("--> statement-breakpoint")) {
-      const trimmed = statement.trim();
-      if (trimmed.length > 0) database.exec(trimmed);
+    if (!applied.has(entry.tag)) {
+      const sql = readFileSync(
+        join(process.cwd(), "drizzle", `${entry.tag}.sql`),
+        "utf8"
+      );
+      for (const statement of sql.split("--> statement-breakpoint")) {
+        const trimmed = statement.trim();
+        if (trimmed.length > 0) database.exec(trimmed);
+      }
+      applied.add(entry.tag);
     }
     if (entry.tag.startsWith(through)) break;
   }
