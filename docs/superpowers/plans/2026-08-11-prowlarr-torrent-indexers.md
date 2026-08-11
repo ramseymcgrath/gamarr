@@ -1440,12 +1440,12 @@ git commit -m "feat(prowlarr): discover indexers and search them individually"
     apiKey: string;
     timeoutMs: number;
     fetch?: typeof fetch;
-    lookup?: (hostname: string) => Promise<string[]>;
+    resolve?: ResolveHostname;
+    pinnedRequest?: PinnedRequest;
   }
   export class ProwlarrFetcher {
     fetch(input: {
-      protocol: "usenet" | "torrent";
-      downloadPath: string;
+      candidate: ReleaseCandidateRecord;
       magnetUrl: string | null;
       maxBytes: number;
     }): Promise<FetchedRelease>;
@@ -1453,14 +1453,23 @@ git commit -m "feat(prowlarr): discover indexers and search them individually"
   ```
   Task 10 injects this as `ReleaseFetcherPort`.
 
+  **The whole candidate is passed, not a narrowed subset.** `candidate.guid` is
+  load-bearing: `getApprovedRedirectOrigin` derives the single permitted
+  external redirect origin from it, and `candidate.protocol` tags the result.
+  `magnetUrl` is a separate parameter because it lives inside the candidate's
+  `sourceSnapshot` JSON, whose shape Tasks 9 and 10 own jointly — the fetcher
+  must not parse that blob itself.
+
 **Background:** `src/integrations/newznab/download.ts` already implements everything hard here: a manual redirect chain bounded at 3 hops, a single approved external-origin handoff, DNS resolution with socket pinning, rejection of non-public addresses, and `removeIndexerCredentials`, which rejects any redirect whose path or query echoes the configured API key. Port that file wholesale and add exactly two behaviours:
 
 1. **Short circuit on a feed-supplied magnet.** If `input.magnetUrl` is non-null, return `{ kind: "magnet", uri: validateMagnet(input.magnetUrl, apiKey) }` and make no HTTP request at all.
 2. **Magnet as a redirect terminal.** When a hop returns a 3xx whose `Location` starts with `magnet:`, stop following, run `validateMagnet(location, apiKey)`, and return `{ kind: "magnet", uri }`. This check must come **before** the existing `new URL(location, target)` resolution, because a magnet is not resolvable against an http base in a meaningful way.
 
-The returned `kind` for a successful body read is `"torrent"` when `input.protocol === "torrent"`, `"nzb"` otherwise. Do not sniff the content type to decide — Prowlarr's proxy is not consistent about it, and the indexer's declared protocol is authoritative.
+The returned `kind` for a successful body read is `"torrent"` when `input.candidate.protocol === "torrent"`, `"nzb"` otherwise. Do not sniff the content type to decide — Prowlarr's proxy is not consistent about it, and the indexer's declared protocol is authoritative.
 
-Rename the user-facing messages from "Indexer …" to "Prowlarr …" (e.g. `"Prowlarr returned an unsafe redirect"`), since there is now one upstream.
+**Preserve the approved-origin handoff exactly as it is.** `getApprovedRedirectOrigin(candidate.guid)`, the `externalOrigin` state machine, `assertPublicRedirectTarget`, the DNS-pinned request, and `removeIndexerCredentials` all carry across unchanged. This is not dead code: a Prowlarr indexer configured with `redirect: true` answers the download endpoint with a 302 to the tracker rather than proxying the bytes, and commit `87dae6c` on main exists because a real deployment hit exactly that. The security property being preserved is that a redirect may move at most once, only to an origin the feed itself already named in the release GUID, with the API key stripped and DNS pinned before the socket opens.
+
+Rename the user-facing messages from "Indexer …" to "Prowlarr …" (e.g. `"Prowlarr returned an unsafe redirect"`), and "NZB" to "release payload" where the message now covers torrents too, since there is one upstream and two payload kinds.
 
 - [ ] **Step 1: Write the failing test**
 

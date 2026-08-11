@@ -191,6 +191,7 @@ export type FetchedRelease =
 export interface ReleaseFetcherPort {
   fetch(input: {
     candidate: ReleaseCandidateRecord;
+    magnetUrl: string | null;
     maxBytes: number;
   }): Promise<FetchedRelease>;
 }
@@ -198,6 +199,18 @@ export interface ReleaseFetcherPort {
 
 The `indexer: IndexerRecord` parameter is gone — credentials now come from the
 single Prowlarr settings record, resolved inside the adapter.
+
+The whole candidate is passed rather than a narrowed subset because
+`candidate.guid` is load-bearing: it is what
+`getApprovedRedirectOrigin` binds the one permitted external redirect origin to.
+`magnetUrl` is a separate parameter rather than a candidate field because it
+lives inside `sourceSnapshot`, and the fetcher must not parse that blob.
+
+The approved-origin handoff survives this refactor unchanged. A Prowlarr
+indexer configured with `redirect: true` answers the download endpoint with a
+302 to the tracker instead of proxying, so the existing rule still applies: a
+redirect may move at most once, only to an origin the feed already named in the
+release GUID, with the API key stripped and DNS pinned before the socket opens.
 
 `InternetArchiveDownloadPort`, `InternetArchiveDownloadConfig` and
 `InternetArchiveTorrentConfig` are deleted.
