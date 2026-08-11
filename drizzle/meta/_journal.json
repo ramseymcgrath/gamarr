@@ -43,6 +43,13 @@
       "when": 1785990610237,
       "tag": "0005_cooing_vanisher",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1786424343811,
+      "tag": "0006_lush_azazel",
+      "breakpoints": true
     }
   ]
 }
