@@ -1539,6 +1539,8 @@ git commit -m "feat(prowlarr): fetch release payloads with a magnet fallback"
 **Files:**
 - Modify: `src/integrations/qbittorrent/client.ts`, `src/integrations/qbittorrent/client.test.ts`
 - Modify: `src/features/downloads/port.ts` (the `TorrentClientPort` interface only)
+- Modify: `src/features/downloads/service.ts` (the one `add(...)` call site — a temporary shim, rewritten in Task 10)
+- Modify: `src/features/downloads/service.test.ts` (the one `expect(add).toHaveBeenCalledWith(...)` assertion, which must move to the `payload` shape; Task 10 deletes the surrounding Internet Archive block entirely)
 
 **Interfaces:**
 - Consumes: nothing from earlier tasks.

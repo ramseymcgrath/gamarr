@@ -57,19 +57,22 @@ export class QbittorrentClient implements TorrentClientPort {
   }
 
   async add(input: {
-    torrent: Uint8Array;
-    filename: string;
+    payload: { torrent: Uint8Array; filename: string } | { magnet: string };
     category: string | null;
     tag: string;
   }): Promise<{ hash: string | null }> {
     const form = new FormData();
-    form.set(
-      "torrents",
-      new Blob([new Uint8Array(input.torrent)], {
-        type: "application/x-bittorrent"
-      }),
-      input.filename
-    );
+    if ("magnet" in input.payload) {
+      form.set("urls", input.payload.magnet);
+    } else {
+      form.set(
+        "torrents",
+        new Blob([new Uint8Array(input.payload.torrent)], {
+          type: "application/x-bittorrent"
+        }),
+        input.payload.filename
+      );
+    }
     form.set("tags", input.tag);
     if (input.category !== null) form.set("category", input.category);
 
@@ -194,14 +197,112 @@ export class QbittorrentClient implements TorrentClientPort {
     }));
   }
 
+  async listFiles(hash: string): Promise<Array<{ index: number; name: string }>> {
+    const search = new URLSearchParams({ hash });
+    let response: Response;
+    try {
+      response = await this.authenticatedRequest(
+        `torrents/files?${search.toString()}`,
+        { headers: { accept: "application/json" } }
+      );
+    } catch (error) {
+      if (error instanceof AppError) throw error;
+      throw new AppError(
+        "UNAVAILABLE",
+        502,
+        "qBittorrent file list request failed"
+      );
+    }
+    if (!response.ok) {
+      await discardBody(response);
+      throw new AppError(
+        "UNAVAILABLE",
+        502,
+        "qBittorrent file list request failed"
+      );
+    }
+    let payload: unknown;
+    try {
+      payload = await readBoundedJson(
+        response,
+        this.maxResponseBytes,
+        () => new AppError(
+          "UNAVAILABLE",
+          502,
+          "qBittorrent file list response is too large"
+        )
+      );
+    } catch (error) {
+      if (error instanceof AppError) throw error;
+      throw new AppError(
+        "UNAVAILABLE",
+        502,
+        "qBittorrent returned an invalid file list"
+      );
+    }
+    const parsed = z
+      .array(z.object({ name: z.string().min(1), index: z.number().optional() }))
+      .safeParse(payload);
+    if (!parsed.success) {
+      throw new AppError(
+        "UNAVAILABLE",
+        502,
+        "qBittorrent returned an invalid file list"
+      );
+    }
+    // WebAPI builds before 2.8.2 omit `index`; array position is the index
+    // there, and it is the same order the metainfo declares.
+    return parsed.data.map((file, position) => ({
+      index: file.index ?? position,
+      name: file.name
+    }));
+  }
+
+  async setFilePriorities(
+    hash: string,
+    indices: number[],
+    priority: 0
+  ): Promise<void> {
+    if (indices.length === 0) return;
+    const form = new URLSearchParams({
+      hash,
+      id: indices.join("|"),
+      priority: String(priority)
+    });
+    let response: Response;
+    try {
+      response = await this.authenticatedRequest("torrents/filePrio", {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: form
+      });
+    } catch (error) {
+      if (error instanceof AppError) throw error;
+      throw new AppError(
+        "UNAVAILABLE",
+        502,
+        "qBittorrent file priority request failed"
+      );
+    }
+    await discardBody(response);
+    if (!response.ok) {
+      throw new AppError(
+        "UNAVAILABLE",
+        502,
+        "qBittorrent file priority request failed"
+      );
+    }
+  }
+
   async testConnection(): Promise<void> {
     await this.list();
   }
 
   private apiUrl(path: string): URL {
     const url = new URL(this.baseUrl);
-    url.pathname = `${url.pathname.replace(/\/+$/, "")}/api/v2/${path.replace(/^\/+/, "")}`;
-    url.search = "";
+    const [pathname, search = ""] = path.split("?", 2);
+    url.pathname = `${url.pathname.replace(/\/+$/, "")}/api/v2/${pathname!.replace(/^\/+/, "")}`;
+    url.search = search;
     url.hash = "";
     return url;
   }

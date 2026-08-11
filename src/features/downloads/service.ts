@@ -422,8 +422,7 @@ export class DownloadService {
     });
     try {
       const result = await client.add({
-        torrent: bytes,
-        filename: torrent.name,
+        payload: { torrent: bytes, filename: torrent.name },
         category: config.defaultCategory(),
         tag: sabMarker
       });

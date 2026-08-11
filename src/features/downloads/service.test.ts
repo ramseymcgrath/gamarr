@@ -1035,8 +1035,10 @@ describe("DownloadService Internet Archive submissions", () => {
       "game-item_archive.torrent"
     );
     expect(add).toHaveBeenCalledWith({
-      torrent: new Uint8Array([1, 2, 3]),
-      filename: "game-item_archive.torrent",
+      payload: {
+        torrent: new Uint8Array([1, 2, 3]),
+        filename: "game-item_archive.torrent"
+      },
       category: "archive",
       tag: `gamarr-${attempt.id}`
     });

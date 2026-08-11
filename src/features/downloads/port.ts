@@ -55,11 +55,16 @@ export interface TorrentJob {
 
 export interface TorrentClientPort {
   add(input: {
-    torrent: Uint8Array;
-    filename: string;
+    payload: { torrent: Uint8Array; filename: string } | { magnet: string };
     category: string | null;
     tag: string;
   }): Promise<{ hash: string | null }>;
+  listFiles(hash: string): Promise<Array<{ index: number; name: string }>>;
+  setFilePriorities(
+    hash: string,
+    indices: number[],
+    priority: 0
+  ): Promise<void>;
   /**
    * Every torrent the client knows about, in one request. qBittorrent's `tag=`
    * filter accepts a single value, so filtering server-side would cost one

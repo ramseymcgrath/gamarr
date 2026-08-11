@@ -36,11 +36,11 @@ describe("migrateDatabase", () => {
       "download_attempts",
       "games",
       "igdb_settings",
-      "indexers",
       "library_entries",
-      "platform_indexer_categories",
+      "platform_categories",
       "platform_settings",
       "platforms",
+      "prowlarr_settings",
       "release_candidates",
       "sabnzbd_settings"
     ]));
