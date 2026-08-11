@@ -37,11 +37,11 @@ const steps = [
   },
   {
     key: "indexerReady" as const,
-    title: "Add a Newznab indexer",
-    copy: "Gamarr searches enabled indexers and explains each match.",
+    title: "Connect Prowlarr",
+    copy: "Gamarr searches every enabled Prowlarr indexer and explains each match.",
     icon: Radio,
-    href: "/settings#indexers",
-    action: "Continue with indexers"
+    href: "/settings#prowlarr",
+    action: "Continue with Prowlarr"
   },
   {
     key: "sabnzbdReady" as const,

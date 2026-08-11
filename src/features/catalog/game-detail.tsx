@@ -82,6 +82,8 @@ export function GameDetail({
           platformId={platformId}
           releases={response.releases}
           warnings={response.warnings}
+          usenetClientConfigured={response.usenetClientConfigured}
+          torrentClientConfigured={response.torrentClientConfigured}
         />
       )}
     </div>

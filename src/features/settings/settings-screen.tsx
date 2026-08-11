@@ -2,7 +2,6 @@
 
 import {
   ExternalLink,
-  Plus,
   RefreshCw,
   Save,
   TestTube2
@@ -55,6 +54,14 @@ export function SettingsScreen({
   const [igdbSecret, setIgdbSecret] = useState("");
   const [sabKey, setSabKey] = useState("");
   const [qbPassword, setQbPassword] = useState("");
+  const [prowlarrKey, setProwlarrKey] = useState("");
+  const [clearProwlarrKey, setClearProwlarrKey] = useState(false);
+  const [discoveredIndexers, setDiscoveredIndexers] = useState<Array<{
+    id: string;
+    name: string;
+    protocol: "usenet" | "torrent";
+    priority: number;
+  }>>([]);
 
   const run = async (label: string, action: () => Promise<unknown>) => {
     setBusy(label);
@@ -120,24 +127,25 @@ export function SettingsScreen({
     });
   };
 
-  const addIndexer = (event: FormEvent<HTMLFormElement>) => {
+  const saveProwlarr = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const formElement = event.currentTarget;
-    const form = new FormData(formElement);
-    void run("Indexer save", async () => {
-      const indexer = await mutate("/api/settings/indexers", "POST", {
-        name: form.get("name"),
+    const form = new FormData(event.currentTarget);
+    void run("Prowlarr save", async () => {
+      await mutate("/api/settings/prowlarr", "PUT", {
         baseUrl: form.get("baseUrl"),
-        apiKey: { action: "replace", value: form.get("apiKey") },
-        enabled: true,
-        categoryIds: String(form.get("categories") ?? "")
-          .split(",")
-          .map((value) => value.trim())
-          .filter(Boolean),
-        timeoutMs: 10_000
+        apiKey: clearProwlarrKey
+          ? { action: "clear" }
+          : prowlarrKey
+            ? { action: "replace", value: prowlarrKey }
+            : { action: "retain" },
+        timeoutMs: Number(form.get("timeoutMs"))
       });
-      await mutate(`/api/settings/indexers/${indexer.id}/test`, "POST");
-      formElement.reset();
+      const result = await mutate("/api/settings/prowlarr/test", "POST") as {
+        indexers: typeof discoveredIndexers;
+      };
+      setDiscoveredIndexers(result.indexers);
+      setProwlarrKey("");
+      setClearProwlarrKey(false);
     });
   };
 
@@ -147,7 +155,7 @@ export function SettingsScreen({
         <div>
           <p className="eyebrow">SYSTEM CONFIGURATION</p>
           <h1>Settings</h1>
-          <p>Catalog, platform, indexer, and download-client connections.</p>
+          <p>Catalog, platform, Prowlarr, and download-client connections.</p>
         </div>
         {message && <p className="notice" role="status">{message}</p>}
       </header>
@@ -264,7 +272,7 @@ export function SettingsScreen({
             status={settings.qbittorrent?.lastTestStatus}
           />
           <p className="muted">
-            Gamarr sends selected Internet Archive torrents to qBittorrent.
+            Gamarr sends selected torrent releases to qBittorrent.
           </p>
           <form onSubmit={saveQbittorrent} className="form-grid">
             <label htmlFor="qbittorrent-base-url">
@@ -318,9 +326,88 @@ export function SettingsScreen({
           </form>
         </Card>
 
-        <Card id="platforms" className="settings-card settings-card-wide">
+        <Card id="prowlarr" className="settings-card settings-card-wide">
           <SettingsCardHeader
             number="04"
+            title="Prowlarr"
+            status={settings.prowlarr?.lastTestStatus}
+          />
+          <p className="muted">
+            Gamarr searches every enabled indexer from this Prowlarr connection.
+          </p>
+          <form onSubmit={saveProwlarr} className="form-grid">
+            <label>
+              Base URL
+              <Input
+                name="baseUrl"
+                type="url"
+                required
+                placeholder="http://prowlarr:9696"
+                defaultValue={settings.prowlarr?.baseUrl}
+              />
+            </label>
+            <label>
+              API key
+              <Input
+                type="password"
+                value={prowlarrKey}
+                onChange={(event) => {
+                  setProwlarrKey(event.target.value);
+                  if (event.target.value) setClearProwlarrKey(false);
+                }}
+                required={!settings.prowlarr?.hasApiKey && !clearProwlarrKey}
+                placeholder={settings.prowlarr?.hasApiKey
+                  ? "Leave blank to retain"
+                  : "Required"}
+                autoComplete="new-password"
+              />
+              <CredentialState saved={settings.prowlarr?.hasApiKey ?? false} />
+            </label>
+            {settings.prowlarr?.hasApiKey && (
+              <label className="platform-check">
+                <input
+                  type="checkbox"
+                  checked={clearProwlarrKey}
+                  onChange={(event) => setClearProwlarrKey(event.target.checked)}
+                />
+                <span>Clear saved API key</span>
+              </label>
+            )}
+            <label>
+              Timeout (milliseconds)
+              <Input
+                name="timeoutMs"
+                type="number"
+                min="1000"
+                max="30000"
+                required
+                defaultValue={settings.prowlarr?.timeoutMs ?? 10_000}
+              />
+            </label>
+            <Button type="submit" disabled={busy !== null}>
+              <TestTube2 aria-hidden="true" /> Save and test
+            </Button>
+          </form>
+          {discoveredIndexers.length > 0 && (
+            <div className="connection-list">
+              <p className="muted">Indexers are managed in Prowlarr.</p>
+              {discoveredIndexers.map((indexer) => (
+                <div className="connection-row" key={indexer.id}>
+                  <div>
+                    <strong>{indexer.name}</strong>
+                    <span className="mono">
+                      <span>{indexer.protocol}</span> · <span>priority {indexer.priority}</span>
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </Card>
+
+        <Card id="platforms" className="settings-card settings-card-wide">
+          <SettingsCardHeader
+            number="05"
             title="Platforms"
             status={platforms.some((platform) => platform.visible) ? "ready" : null}
           />
@@ -361,51 +448,6 @@ export function SettingsScreen({
               ))}
             </div>
           )}
-        </Card>
-
-        <Card id="indexers" className="settings-card settings-card-wide">
-          <SettingsCardHeader
-            number="05"
-            title="Newznab indexers"
-            status={settings.indexers.some((indexer) => indexer.enabled)
-              ? "ready"
-              : null}
-          />
-          {settings.indexers.length > 0 && (
-            <div className="connection-list">
-              {settings.indexers.map((indexer) => (
-                <div className="connection-row" key={indexer.id}>
-                  <div>
-                    <strong>{indexer.name}</strong>
-                    <span className="mono">{new URL(indexer.baseUrl).host}</span>
-                  </div>
-                  <CredentialState saved={indexer.hasApiKey} />
-                  <StatusPill
-                    status={indexer.lastTestStatus}
-                    label={indexer.lastTestStatus ?? "Untested"}
-                  />
-                  <Button
-                    variant="secondary"
-                    onClick={() => void run(
-                      `${indexer.name} test`,
-                      () => mutate(`/api/settings/indexers/${indexer.id}/test`, "POST")
-                    )}
-                  >
-                    <TestTube2 aria-hidden="true" /> Test connection
-                  </Button>
-                </div>
-              ))}
-            </div>
-          )}
-          <form onSubmit={addIndexer} className="indexer-form">
-            <label>Name<Input name="name" required placeholder="My indexer" /></label>
-            <label>Newznab URL<Input name="baseUrl" type="url" required placeholder="https://indexer.example/api" /></label>
-            <label>API key<Input name="apiKey" type="password" required autoComplete="new-password" /></label>
-            <label>Categories<Input name="categories" placeholder="4050, 100000" /></label>
-            <Button type="submit" disabled={busy !== null}>
-              <Plus aria-hidden="true" /> Add and test indexer
-            </Button>
-          </form>
         </Card>
       </div>
     </div>
