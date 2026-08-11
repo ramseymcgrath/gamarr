@@ -344,11 +344,14 @@ function bytes(value: string): Uint8Array {
   return new TextEncoder().encode(value);
 }
 
-/** `d4:infod6:lengthi1024e4:name8:Game.xcieee` */
+/**
+ * Bencode string lengths are byte counts and must be exact — `a.xci` is 5
+ * bytes, so it is `5:a.xci`. A decoder that accepts a wrong count is broken.
+ */
 const singleFile = bytes("d4:infod6:lengthi1024e4:name8:Game.xciee");
 
 const multiFile = bytes(
-  "d4:infod5:filesld6:lengthi10e4:pathl6:a.xciee"
+  "d4:infod5:filesld6:lengthi10e4:pathl5:a.xciee"
   + "d6:lengthi20e4:pathl3:sub5:b.xcieee"
   + "4:name10:Collectionee"
 );
