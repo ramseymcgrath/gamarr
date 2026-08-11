@@ -1,10 +1,5 @@
 import type { NzbUpload, SabJob } from "@/features/downloads/models";
-import type {
-  InternetArchiveFile,
-  ItemTorrent
-} from "@/features/release-search/models";
 import type { ReleaseCandidateRecord } from "@/features/release-search/ports";
-import type { IndexerRecord } from "@/features/settings/models";
 import { AppError } from "@/lib/errors";
 
 /**
@@ -81,59 +76,15 @@ export interface SabnzbdPort {
   testConnection(): Promise<void>;
 }
 
-export interface NzbFetcherPort {
+export type FetchedRelease =
+  | { kind: "nzb"; bytes: Uint8Array }
+  | { kind: "torrent"; bytes: Uint8Array }
+  | { kind: "magnet"; uri: string };
+
+export interface ReleaseFetcherPort {
   fetch(input: {
     candidate: ReleaseCandidateRecord;
-    indexer: IndexerRecord;
+    magnetUrl: string | null;
     maxBytes: number;
-  }): Promise<Uint8Array>;
-}
-
-/**
- * Direct server-side download of one file from an Internet Archive item.
- * Implemented by the internet-archive integration (client metadata lookup
- * plus streaming downloader); injected into DownloadService as a single
- * narrowed port.
- */
-export interface InternetArchiveDownloadPort {
-  getFileInfo(input: {
-    identifier: string;
-    fileName: string;
-  }): Promise<InternetArchiveFile | null>;
-  download(input: {
-    identifier: string;
-    fileName: string;
-    destinationDir: string;
-    attemptId: string;
-    maxBytes: number;
-    onProgress: (received: number, total: number | null) => void;
-  }): Promise<{ bytes: number; filePath: string }>;
-}
-
-export interface InternetArchiveDownloadConfig
-  extends InternetArchiveDownloadPort {
-  downloadDir: string;
-  maxBytes: number;
-}
-
-/**
- * Everything the torrent path needs, bound in the composition root. Separate
- * from `InternetArchiveDownloadConfig` because the two deliveries share no
- * machinery: one streams bytes to disk under a heartbeat, the other hands
- * metainfo to a client that owns the download from then on.
- */
-export interface InternetArchiveTorrentConfig {
-  /** Resolves the item's `_archive.torrent`, or null when it has none. */
-  findTorrent(identifier: string): Promise<ItemTorrent | null>;
-  fetchTorrent(identifier: string, fileName: string): Promise<Uint8Array>;
-  client(): TorrentClientPort | null;
-  /**
-   * A function, not a value, for the same reason `client()` is: the category
-   * lives in `qbittorrent_settings`, and the composition root is built during
-   * startup recovery — before migrations have necessarily run. Reading it
-   * eagerly makes `buildDownloadService()` query a table that may not exist
-   * yet, which turns a deferrable "schema not ready" into a hard failure and
-   * masks any genuine error the recovery pass was meant to surface.
-   */
-  defaultCategory(): string | null;
+  }): Promise<FetchedRelease>;
 }

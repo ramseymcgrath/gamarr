@@ -51,10 +51,12 @@ function attempt(overrides: Partial<DownloadAttempt> = {}): DownloadAttempt {
     newznabGuid: "guid",
     iaFileName: null,
     torrentHash: null,
+    selectedFiles: null,
+    filesAppliedAt: null,
     size: 10,
     category: "games",
     sabnzbdConfigRevision: 1,
-    sabMarker: "gamarr-attempt",
+    marker: "gamarr-attempt",
     sabJobId: null,
     progress: 0,
     failureDetail: null,
@@ -139,7 +141,7 @@ describe("SqliteDownloadRepository", () => {
     claim(attempt({
       id: "ia-active",
       submissionKey: "key-ia",
-      sabMarker: "gamarr-ia-active",
+      marker: "gamarr-ia-active",
       source: "internet-archive",
       status: "Downloading",
       iaFileName: "Game.zip",
@@ -148,7 +150,7 @@ describe("SqliteDownloadRepository", () => {
     claim(attempt({
       id: "ia-beating",
       submissionKey: "key-beat",
-      sabMarker: "gamarr-ia-beating",
+      marker: "gamarr-ia-beating",
       source: "internet-archive",
       status: "Downloading",
       iaFileName: "Game.zip",
@@ -158,7 +160,7 @@ describe("SqliteDownloadRepository", () => {
     claim(attempt({
       id: "nz-active",
       submissionKey: "key-nz",
-      sabMarker: "gamarr-nz-active",
+      marker: "gamarr-nz-active",
       status: "Downloading",
       progress: 40
     }));

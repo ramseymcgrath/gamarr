@@ -1,15 +1,13 @@
-import type { ReleaseSourceType } from "@/features/release-search/models";
-
 /**
- * How an attempt's payload is delivered. Wider than `ReleaseSourceType`
- * because torrent delivery is a property of the *attempt*, not of the release:
- * an Internet Archive search result can be taken either way, and the choice is
- * made at submit time. Stored on the attempt because `assertSameRequest`
- * recomputes a replayed fingerprint from it — the candidate that produced the
- * original may already have expired.
+ * New attempts are source-derived from Prowlarr's protocol. The remaining
+ * values are legacy history written before the Prowlarr refactor; they remain
+ * readable for replay compatibility but are never created.
  */
 export type AttemptSourceType =
-  | ReleaseSourceType
+  | "prowlarr-usenet"
+  | "prowlarr-torrent"
+  | "newznab"
+  | "internet-archive"
   | "internet-archive-torrent";
 
 export type DownloadStatus =
@@ -49,6 +47,11 @@ export interface SabJob {
   progress: number;
 }
 
+export interface SelectedFile {
+  index: number;
+  name: string;
+}
+
 export interface DownloadAttempt {
   id: string;
   libraryEntryId: string;
@@ -66,10 +69,13 @@ export interface DownloadAttempt {
    * before 2.14.0 answer `torrents/add` with a bare `Ok.`, and those attempts
    * are matched by tag instead. */
   torrentHash: string | null;
+  selectedFiles: SelectedFile[] | null;
+  filesAppliedAt: number | null;
   size: number | null;
   category: string | null;
   sabnzbdConfigRevision: number;
-  sabMarker: string;
+  /** Stored in the legacy `sab_marker` column; shared by SAB and qBittorrent. */
+  marker: string;
   sabJobId: string | null;
   progress: number;
   failureDetail: string | null;
@@ -95,20 +101,6 @@ export interface SubmitDownloadInput {
   candidateId: string;
   gameId: number;
   platformId: number;
-  /**
-   * Which delivery an Internet Archive candidate should use. Defaults to
-   * `"file"` so existing clients keep working unchanged. Ignored for Newznab
-   * candidates, which have only one delivery.
-   */
-  delivery?: "file" | "torrent";
-  /**
-   * Required for Internet Archive candidates, which bundle many files per
-   * item; ignored for Newznab candidates, whose fingerprint never includes it
-   * so a replay carrying one still matches.
-   *
-   * Whitespace is significant. The name is matched against Internet Archive
-   * metadata by exact equality and becomes both a URL path segment and the
-   * file name on disk, so " Game.zip" is a different file from "Game.zip".
-   */
-  fileName?: string;
+  /** Torrent metainfo indices. Empty or absent means the whole torrent. */
+  selectedFiles?: number[];
 }
