@@ -89,7 +89,8 @@ export function rankRelease(input: RankInput): RankedRelease {
 }
 
 export function deduplicateReleases(
-  releases: RankedRelease[]
+  releases: RankedRelease[],
+  priorityOf: (indexerId: string) => number
 ): RankedRelease[] {
   const grouped = new Map<string, RankedRelease>();
   for (const release of releases) {
@@ -114,10 +115,20 @@ export function deduplicateReleases(
       existing.conflictingReasons = release.conflictingReasons;
     }
   }
-  // MIN_SAFE_INTEGER, not -Infinity: `-Infinity - -Infinity` is NaN, which makes
-  // the comparator non-transitive whenever two undated releases meet — and
-  // undated Internet Archive items arrive in batches. Unknowns still sink.
-  return [...grouped.values()].sort((left, right) =>
+  const output = [...grouped.values()];
+  for (const release of output) {
+    release.sources.sort((left, right) =>
+      (right.seeders ?? Number.MIN_SAFE_INTEGER) -
+        (left.seeders ?? Number.MIN_SAFE_INTEGER) ||
+      priorityOf(left.indexerId) - priorityOf(right.indexerId) ||
+      (right.publishedAt ?? Number.MIN_SAFE_INTEGER) -
+        (left.publishedAt ?? Number.MIN_SAFE_INTEGER)
+    );
+  }
+  // MIN_SAFE_INTEGER, not -Infinity: `-Infinity - -Infinity` is NaN, which
+  // makes the comparator non-transitive when two undated releases meet.
+  // Unknowns still sink.
+  return output.sort((left, right) =>
     right.score - left.score ||
     (right.publishedAt ?? Number.MIN_SAFE_INTEGER) -
       (left.publishedAt ?? Number.MIN_SAFE_INTEGER) ||

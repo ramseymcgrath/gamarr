@@ -3,6 +3,7 @@
 import {
   ArrowDownUp,
   Check,
+  Download,
   HardDrive,
   TriangleAlert
 } from "lucide-react";
@@ -48,11 +49,15 @@ export function ReleaseResults({
   gameId,
   platformId,
   releases,
+  usenetClientConfigured,
+  torrentClientConfigured,
   warnings = []
 }: {
   gameId: number;
   platformId: number;
   releases: PublicRelease[];
+  usenetClientConfigured: boolean;
+  torrentClientConfigured: boolean;
   warnings?: Array<{ indexerName: string; message: string }>;
 }) {
   const [sort, setSort] = useState<"best" | "newest" | "smallest">("best");
@@ -60,7 +65,8 @@ export function ReleaseResults({
     candidateId: string;
     title: string;
     indexerName: string;
-    source: PublicReleaseSource["source"];
+    protocol: PublicReleaseSource["protocol"];
+    clientConfigured: boolean;
   } | null>(null);
   const sorted = useMemo(() => [...releases].sort((left, right) => {
     if (sort === "newest") return publishedOrder(right) - publishedOrder(left);
@@ -146,16 +152,26 @@ export function ReleaseResults({
                 {release.sources.map((source) => (
                   <Button
                     key={source.candidateId}
+                    aria-label={`${source.indexerName} ${source.protocol}`}
                     onClick={() => setSelection({
                       candidateId: source.candidateId,
                       title: release.title,
                       indexerName: source.indexerName,
-                      source: source.source
+                      protocol: source.protocol,
+                      clientConfigured: source.protocol === "torrent"
+                        ? torrentClientConfigured
+                        : usenetClientConfigured
                     })}
                   >
-                    {source.source === "internet-archive"
-                      ? "Download"
-                      : "Send to SABnzbd"}
+                    {source.protocol === "torrent"
+                      ? <Download aria-hidden="true" />
+                      : <HardDrive aria-hidden="true" />}
+                    <span>{source.protocol === "torrent" ? "Torrent" : "Usenet"}</span>
+                    {source.protocol === "torrent" && (
+                      <small>{source.seeders === null
+                        ? "Seeder count unknown"
+                        : `${source.seeders} seeders`}</small>
+                    )}
                     <small>{source.indexerName}</small>
                   </Button>
                 ))}

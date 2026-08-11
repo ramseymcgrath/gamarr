@@ -2,7 +2,6 @@ import { and, eq, gt, lte } from "drizzle-orm";
 
 import type { Database } from "@/db/client";
 import { releaseCandidates } from "@/db/schema";
-import type { ReleaseSourceType } from "@/features/release-search/models";
 import type {
   CandidateRepository,
   ReleaseCandidateRecord
@@ -49,7 +48,11 @@ export class SqliteCandidateRepository implements CandidateRepository {
       ))
       .get();
     return row
-      ? { ...row, source: row.source as ReleaseSourceType }
+      ? {
+          ...row,
+          indexerId: row.indexerId as string,
+          protocol: row.protocol as ReleaseCandidateRecord["protocol"]
+        }
       : null;
   }
 }

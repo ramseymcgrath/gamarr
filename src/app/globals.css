@@ -448,6 +448,19 @@ label {
   font-family: "IBM Plex Mono", monospace;
 }
 
+/* Stacks the visibility toggle above its category field so a wide grid cell
+   does not squeeze the input to an unusable width. */
+.platform-check-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.platform-categories {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.85rem;
+}
+
 .inline-empty {
   padding: 22px;
   border: 1px dashed var(--rule);

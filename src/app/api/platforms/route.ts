@@ -1,9 +1,7 @@
 import { catalogService } from "@/app/api/catalog/dependencies";
-import {
-  handleSetPlatform,
-  platformListResponse
-} from "@/app/api/catalog/handlers";
-import { settingsDependencies } from "@/app/api/settings/dependencies";
+import { platformListResponse } from "@/app/api/catalog/handlers";
+import { platformDependencies } from "@/app/api/platforms/dependencies";
+import { handleSetPlatform } from "@/app/api/platforms/handlers";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -13,8 +11,5 @@ export function GET(): Response {
 }
 
 export function PUT(request: Request): Promise<Response> {
-  return handleSetPlatform(request, {
-    service: catalogService(),
-    policy: settingsDependencies().policy
-  });
+  return handleSetPlatform(request, platformDependencies());
 }

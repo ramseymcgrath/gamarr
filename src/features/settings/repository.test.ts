@@ -5,7 +5,9 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { createDatabase } from "@/db/client";
 import { migrateDatabase } from "@/db/migrate";
+import { platforms } from "@/db/schema";
 import { SqliteSettingsRepository } from "@/features/settings/repository";
+import { SettingsService } from "@/features/settings/service";
 
 const temporaryDirectories: string[] = [];
 
@@ -98,24 +100,8 @@ describe("SqliteSettingsRepository", () => {
       configRevision: 1,
       updatedAt: 100
     });
-    settings.saveIndexer({
-      id: "indexer",
-      name: "Prowlarr",
-      baseUrl: "http://prowlarr.local/1/api",
-      apiKey: "indexer-key",
-      enabled: true,
-      categoryIds: ["4050"],
-      timeoutMs: 10_000,
-      configRevision: 1,
-      lastTestStatus: null,
-      lastTestedAt: null,
-      deletedAt: null,
-      createdAt: 100,
-      updatedAt: 100
-    });
     settings.recordIgdbTest("ok", 200);
     settings.recordSabnzbdTest("failed", 201);
-    settings.recordIndexerTest("indexer", "ok", 202);
 
     expect(settings.getIgdb()).toMatchObject({
       clientId: "client",
@@ -129,15 +115,97 @@ describe("SqliteSettingsRepository", () => {
       lastTestStatus: "failed",
       lastTestedAt: 201
     });
-    expect(settings.listIndexers()).toEqual([
-      expect.objectContaining({
-        id: "indexer",
-        categoryIds: ["4050"],
-        enabled: true,
-        lastTestStatus: "ok",
-        lastTestedAt: 202
-      })
-    ]);
+    database.$client.close();
+  });
+
+  it("round-trips prowlarr settings", () => {
+    const { database, repository: settings } = repository();
+    const record = {
+      baseUrl: "http://prowlarr.local:9696",
+      apiKey: "prowlarr-secret",
+      timeoutMs: 12_000,
+      lastTestStatus: "ok",
+      lastTestedAt: 90,
+      configRevision: 3,
+      updatedAt: 100
+    };
+
+    settings.saveProwlarr(record);
+
+    expect(settings.getProwlarr()).toEqual(record);
+    database.$client.close();
+  });
+
+  it("returns null when prowlarr is unconfigured", () => {
+    const { database, repository: settings } = repository();
+
+    expect(settings.getProwlarr()).toBeNull();
+
+    database.$client.close();
+  });
+
+  it("bumps configRevision on save", () => {
+    const { database, repository: settings } = repository();
+    const service = new SettingsService(settings, () => 100);
+    service.saveProwlarr({
+      baseUrl: "http://prowlarr.local:9696",
+      apiKey: { action: "replace", value: "prowlarr-secret" },
+      timeoutMs: 10_000
+    });
+
+    service.saveProwlarr({
+      baseUrl: "http://prowlarr.local:9797",
+      apiKey: { action: "retain" },
+      timeoutMs: 10_000
+    });
+
+    expect(settings.getProwlarr()?.configRevision).toBe(2);
+    database.$client.close();
+  });
+
+  it("records a connection test without touching the credential", () => {
+    const { database, repository: settings } = repository();
+    settings.saveProwlarr({
+      baseUrl: "http://prowlarr.local:9696",
+      apiKey: "prowlarr-secret",
+      timeoutMs: 10_000,
+      lastTestStatus: null,
+      lastTestedAt: null,
+      configRevision: 1,
+      updatedAt: 100
+    });
+
+    settings.recordProwlarrTest("ok", 200);
+
+    expect(settings.getProwlarr()).toEqual({
+      baseUrl: "http://prowlarr.local:9696",
+      apiKey: "prowlarr-secret",
+      timeoutMs: 10_000,
+      lastTestStatus: "ok",
+      lastTestedAt: 200,
+      configRevision: 1,
+      updatedAt: 100
+    });
+    database.$client.close();
+  });
+
+  it("replaces a platform's categories wholesale", () => {
+    const { database, repository: settings } = repository();
+    database.insert(platforms)
+      .values({ id: 130, name: "Switch", lastSyncedAt: 100 })
+      .run();
+    settings.savePlatformCategories(130, ["1080", "4000"]);
+
+    settings.savePlatformCategories(130, ["4050"]);
+
+    expect(settings.listPlatformCategories(130)).toEqual(["4050"]);
+    database.$client.close();
+  });
+
+  it("returns an empty category list for an unknown platform", () => {
+    const { database, repository: settings } = repository();
+
+    expect(settings.listPlatformCategories(999)).toEqual([]);
 
     database.$client.close();
   });

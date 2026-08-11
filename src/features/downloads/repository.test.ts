@@ -51,10 +51,12 @@ function attempt(overrides: Partial<DownloadAttempt> = {}): DownloadAttempt {
     newznabGuid: "guid",
     iaFileName: null,
     torrentHash: null,
+    selectedFiles: null,
+    filesAppliedAt: null,
     size: 10,
     category: "games",
     sabnzbdConfigRevision: 1,
-    sabMarker: "gamarr-attempt",
+    marker: "gamarr-attempt",
     sabJobId: null,
     progress: 0,
     failureDetail: null,
@@ -124,7 +126,7 @@ describe("SqliteDownloadRepository", () => {
     database.$client.close();
   });
 
-  it("fails interrupted Internet Archive downloads without touching others", () => {
+  it("fails every non-terminal legacy Internet Archive download", () => {
     const { database, repository } = setup();
     const claim = (value: DownloadAttempt) => repository.claimSubmission({
       library: {
@@ -137,18 +139,18 @@ describe("SqliteDownloadRepository", () => {
       attempt: value
     });
     claim(attempt({
-      id: "ia-active",
-      submissionKey: "key-ia",
-      sabMarker: "gamarr-ia-active",
+      id: "ia-unknown",
+      submissionKey: "key-ia-unknown",
+      marker: "gamarr-ia-unknown",
       source: "internet-archive",
-      status: "Downloading",
+      status: "Unknown",
       iaFileName: "Game.zip",
       progress: 40
     }));
     claim(attempt({
-      id: "ia-beating",
-      submissionKey: "key-beat",
-      sabMarker: "gamarr-ia-beating",
+      id: "ia-fresh",
+      submissionKey: "key-ia-fresh",
+      marker: "gamarr-ia-fresh",
       source: "internet-archive",
       status: "Downloading",
       iaFileName: "Game.zip",
@@ -158,23 +160,22 @@ describe("SqliteDownloadRepository", () => {
     claim(attempt({
       id: "nz-active",
       submissionKey: "key-nz",
-      sabMarker: "gamarr-nz-active",
+      marker: "gamarr-nz-active",
       status: "Downloading",
       progress: 40
     }));
 
-    repository.recoverStaleInternetArchiveDownloads(200, 500);
+    repository.recoverStaleInternetArchiveDownloads(500);
 
-    expect(repository.get("ia-active")).toMatchObject({
+    expect(repository.get("ia-unknown")).toMatchObject({
       status: "Failed",
-      failureDetail: "Download was interrupted before completion",
+      failureDetail: "The direct download path was removed",
       updatedAt: 500
     });
-    // Heartbeat newer than the cutoff: the stream is still live.
-    expect(repository.get("ia-beating")).toMatchObject({
-      status: "Downloading",
-      failureDetail: null,
-      updatedAt: 300
+    expect(repository.get("ia-fresh")).toMatchObject({
+      status: "Failed",
+      failureDetail: "The direct download path was removed",
+      updatedAt: 500
     });
     expect(repository.get("nz-active")?.status).toBe("Downloading");
     database.$client.close();
@@ -325,6 +326,35 @@ describe("SqliteDownloadRepository", () => {
     });
 
     expect(after.torrentHash).toBeNull();
+    database.$client.close();
+  });
+
+  it("refuses a filesAppliedAt stamp on a terminal attempt", () => {
+    const { database, repository } = setup();
+    repository.claimSubmission({
+      library,
+      attempt: attempt({
+        source: "prowlarr-torrent",
+        status: "Completed",
+        selectedFiles: [{ index: 0, name: "Game.NSW" }],
+        filesAppliedAt: null,
+        progress: 100,
+        completedAt: 3,
+        updatedAt: 3
+      })
+    });
+
+    const returned = repository.update("attempt", {
+      filesAppliedAt: 4,
+      updatedAt: 4
+    });
+
+    expect(returned).toMatchObject({
+      status: "Completed",
+      filesAppliedAt: null,
+      updatedAt: 3
+    });
+    expect(repository.get("attempt")).toEqual(returned);
     database.$client.close();
   });
 });

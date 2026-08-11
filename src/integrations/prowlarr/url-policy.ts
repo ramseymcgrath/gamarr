@@ -14,7 +14,7 @@ export type DownloadUrlRejectionReason =
 /**
  * A per-release rejection. Typed so callers can skip the offending source
  * without mistaking it for a request-wide failure. The rejected URL is
- * deliberately never stored on the error: it routinely carries the indexer API
+ * deliberately never stored on the error: it routinely carries the Prowlarr API
  * key, and these errors reach user-facing warnings.
  */
 export class DownloadUrlPolicyError extends AppError {
@@ -53,7 +53,7 @@ export function validateDownloadUrl(
   if (target.origin !== base.origin) {
     throw new DownloadUrlPolicyError(
       "differentOrigin",
-      "Download URL leaves the configured indexer origin"
+      "Download URL leaves the configured Prowlarr origin"
     );
   }
   target.searchParams.delete("apikey");

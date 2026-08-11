@@ -50,37 +50,16 @@ export const platformPopularGames = sqliteTable("platform_popular_games", {
   fetchedAt: integer("fetched_at").notNull()
 });
 
-export const indexers = sqliteTable("indexers", {
-  id: text("id").primaryKey(),
-  name: text("name").notNull(),
-  baseUrl: text("base_url").notNull(),
-  apiKey: text("api_key").notNull(),
-  enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
-  categoryIds: jsonText<string[]>("category_ids").notNull().default([]),
-  timeoutMs: integer("timeout_ms").notNull().default(10_000),
-  configRevision: integer("config_revision").notNull().default(1),
-  lastTestStatus: text("last_test_status"),
-  lastTestedAt: integer("last_tested_at"),
-  deletedAt: integer("deleted_at"),
-  createdAt: integer("created_at").notNull(),
-  updatedAt: integer("updated_at").notNull()
-}, (table) => [
-  check("indexers_timeout_range", sql`${table.timeoutMs} between 1000 and 30000`)
-]);
-
-export const platformIndexerCategories = sqliteTable(
-  "platform_indexer_categories",
+export const platformCategories = sqliteTable(
+  "platform_categories",
   {
     platformId: integer("platform_id")
       .notNull()
       .references(() => platforms.id, { onDelete: "cascade" }),
-    indexerId: text("indexer_id")
-      .notNull()
-      .references(() => indexers.id, { onDelete: "cascade" }),
     categoryId: text("category_id").notNull()
   },
   (table) => [
-    primaryKey({ columns: [table.platformId, table.indexerId, table.categoryId] })
+    primaryKey({ columns: [table.platformId, table.categoryId] })
   ]
 );
 
@@ -111,6 +90,23 @@ export const sabnzbdSettings = sqliteTable("sabnzbd_settings", {
   check(
     "sabnzbd_nzb_size_range",
     sql`${table.maxNzbBytes} between ${sql.raw("1048576")} and ${sql.raw("104857600")}`
+  )
+]);
+
+export const prowlarrSettings = sqliteTable("prowlarr_settings", {
+  id: integer("id").primaryKey().default(1),
+  baseUrl: text("base_url").notNull(),
+  apiKey: text("api_key").notNull(),
+  timeoutMs: integer("timeout_ms").notNull().default(10_000),
+  lastTestStatus: text("last_test_status"),
+  lastTestedAt: integer("last_tested_at"),
+  configRevision: integer("config_revision").notNull().default(1),
+  updatedAt: integer("updated_at").notNull()
+}, (table) => [
+  check("prowlarr_singleton", sql`${table.id} = 1`),
+  check(
+    "prowlarr_timeout_range",
+    sql`${table.timeoutMs} between 1000 and 30000`
   )
 ]);
 
@@ -151,13 +147,13 @@ export const releaseCandidates = sqliteTable(
   {
     id: text("id").primaryKey(),
     expiresAt: integer("expires_at").notNull(),
-    source: text("source").notNull().default("newznab"),
-    indexerId: text("indexer_id")
-      .references(() => indexers.id, { onDelete: "cascade" }),
+    protocol: text("protocol").notNull(),
+    indexerId: text("indexer_id"),
     indexerConfigRevision: integer("indexer_config_revision").notNull(),
     guid: text("guid").notNull(),
     title: text("title").notNull(),
     size: integer("size"),
+    seeders: integer("seeders"),
     downloadPath: text("download_path").notNull(),
     category: text("category"),
     sourceSnapshot: text("source_snapshot").notNull(),
@@ -166,8 +162,8 @@ export const releaseCandidates = sqliteTable(
   (table) => [
     index("release_candidates_expiry_idx").on(table.expiresAt),
     check(
-      "release_candidates_source_valid",
-      sql`${table.source} in ('newznab', 'internet-archive')`
+      "release_candidates_protocol_valid",
+      sql`${table.protocol} in ('usenet', 'torrent')`
     )
   ]
 );
@@ -184,12 +180,14 @@ export const downloadAttempts = sqliteTable(
     status: text("status").notNull(),
     source: text("source").notNull().default("newznab"),
     releaseTitle: text("release_title").notNull(),
-    indexerId: text("indexer_id").references(() => indexers.id, { onDelete: "set null" }),
+    indexerId: text("indexer_id"),
     indexerNameSnapshot: text("indexer_name_snapshot").notNull(),
     indexerUrlSnapshot: text("indexer_url_snapshot"),
     newznabGuid: text("newznab_guid"),
     iaFileName: text("ia_file_name"),
     torrentHash: text("torrent_hash"),
+    selectedFiles: text("selected_files"),
+    filesAppliedAt: integer("files_applied_at"),
     size: integer("size"),
     category: text("category"),
     sabnzbdConfigRevision: integer("sabnzbd_config_revision").notNull(),
@@ -220,6 +218,10 @@ export const downloadAttempts = sqliteTable(
     check(
       "download_attempts_size_nonnegative",
       sql`${table.size} is null or ${table.size} >= 0`
+    ),
+    check(
+      "download_attempts_source_valid",
+      sql`${table.source} in ('prowlarr-usenet', 'prowlarr-torrent', 'newznab', 'internet-archive', 'internet-archive-torrent')`
     )
   ]
 );

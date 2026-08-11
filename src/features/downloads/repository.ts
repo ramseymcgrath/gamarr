@@ -1,9 +1,10 @@
 import {
   TERMINAL_DOWNLOAD_STATUSES,
   type DownloadAttempt,
+  type SelectedFile,
   type SubmissionClaimInput
 } from "@/features/downloads/models";
-import { and, desc, eq, inArray, lt, notInArray } from "drizzle-orm";
+import { and, desc, eq, lt, notInArray } from "drizzle-orm";
 
 import type { Database } from "@/db/client";
 import {
@@ -26,7 +27,7 @@ export interface DownloadRepository {
   get(id: string): DownloadAttempt | null;
   list(): DownloadAttempt[];
   recoverStaleSubmitting(before: number, updatedAt: number): void;
-  recoverStaleInternetArchiveDownloads(before: number, updatedAt: number): void;
+  recoverStaleInternetArchiveDownloads(updatedAt: number): void;
 }
 
 function mapAttempt(
@@ -46,10 +47,12 @@ function mapAttempt(
     newznabGuid: row.newznabGuid,
     iaFileName: row.iaFileName,
     torrentHash: row.torrentHash,
+    selectedFiles: parseSelectedFiles(row.selectedFiles),
+    filesAppliedAt: row.filesAppliedAt,
     size: row.size,
     category: row.category,
     sabnzbdConfigRevision: row.sabnzbdConfigRevision,
-    sabMarker: row.sabMarker,
+    marker: row.sabMarker,
     sabJobId: row.sabJobId,
     progress: row.progress,
     failureDetail: row.failureDetail,
@@ -57,6 +60,46 @@ function mapAttempt(
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     completedAt: row.completedAt
+  };
+}
+
+function parseSelectedFiles(value: string | null): SelectedFile[] | null {
+  if (value === null) return null;
+  const parsed: unknown = JSON.parse(value);
+  if (
+    !Array.isArray(parsed)
+    || parsed.some((file) =>
+      typeof file !== "object"
+      || file === null
+      || !Number.isInteger((file as { index?: unknown }).index)
+      || typeof (file as { name?: unknown }).name !== "string")
+  ) {
+    throw new Error("Download attempt has invalid selected files");
+  }
+  return parsed as SelectedFile[];
+}
+
+function toRowValues(attempt: DownloadAttempt) {
+  const { marker, selectedFiles, ...values } = attempt;
+  return {
+    ...values,
+    sabMarker: marker,
+    selectedFiles: selectedFiles === null ? null : JSON.stringify(selectedFiles)
+  };
+}
+
+function toRowPatch(patch: Partial<DownloadAttempt>) {
+  const { marker, selectedFiles, ...values } = patch;
+  return {
+    ...values,
+    ...(marker === undefined ? {} : { sabMarker: marker }),
+    ...(selectedFiles === undefined
+      ? {}
+      : {
+          selectedFiles: selectedFiles === null
+            ? null
+            : JSON.stringify(selectedFiles)
+        })
   };
 }
 
@@ -86,7 +129,10 @@ export class SqliteDownloadRepository implements DownloadRepository {
         .get();
       if (!library) throw new Error("Failed to claim library entry");
       const result = transaction.insert(downloadAttempts)
-        .values({ ...input.attempt, libraryEntryId: library.id })
+        .values({
+          ...toRowValues(input.attempt),
+          libraryEntryId: library.id
+        })
         .onConflictDoNothing({
           target: downloadAttempts.submissionKey
         })
@@ -127,7 +173,7 @@ export class SqliteDownloadRepository implements DownloadRepository {
    */
   update(id: string, patch: Partial<DownloadAttempt>): DownloadAttempt {
     this.database.update(downloadAttempts)
-      .set(patch)
+      .set(toRowPatch(patch))
       .where(and(
         eq(downloadAttempts.id, id),
         notInArray(downloadAttempts.status, [...TERMINAL_DOWNLOAD_STATUSES])
@@ -165,22 +211,16 @@ export class SqliteDownloadRepository implements DownloadRepository {
       .run();
   }
 
-  /**
-   * `before` is a cutoff on `updatedAt`, which an in-flight download stamps on
-   * a timer: a row quiet for longer than that has no process behind it. Without
-   * the cutoff this would fail whatever is streaming right now.
-   */
-  recoverStaleInternetArchiveDownloads(before: number, updatedAt: number): void {
+  recoverStaleInternetArchiveDownloads(updatedAt: number): void {
     this.database.update(downloadAttempts)
       .set({
         status: "Failed",
-        failureDetail: "Download was interrupted before completion",
+        failureDetail: "The direct download path was removed",
         updatedAt
       })
       .where(and(
         eq(downloadAttempts.source, "internet-archive"),
-        inArray(downloadAttempts.status, ["Pending", "Downloading"]),
-        lt(downloadAttempts.updatedAt, before)
+        notInArray(downloadAttempts.status, [...TERMINAL_DOWNLOAD_STATUSES])
       ))
       .run();
   }

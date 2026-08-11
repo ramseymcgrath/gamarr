@@ -10,22 +10,12 @@ import {
 import { useEffect, useId, useState } from "react";
 
 import { Button } from "@/components/ui/button";
-import type { ReleaseSourceType } from "@/features/release-search/models";
 
 interface CandidateFile {
-  name: string;
-  size: number | null;
-  format: string | null;
-}
-
-interface ItemTorrent {
+  index: number;
   name: string;
   size: number | null;
 }
-
-type DownloadSelection =
-  | { kind: "torrent" }
-  | { kind: "file"; name: string };
 
 function formatBytes(value: number | null): string {
   if (value === null) return "size unknown";
@@ -47,7 +37,8 @@ export function DownloadDialog({
   candidateId,
   title,
   indexerName,
-  source
+  protocol,
+  clientConfigured
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -56,69 +47,48 @@ export function DownloadDialog({
   candidateId: string;
   title: string;
   indexerName: string;
-  source: ReleaseSourceType;
+  protocol: "usenet" | "torrent";
+  clientConfigured: boolean;
 }) {
   const submissionKey = `gamarr-${candidateId}-${useId()}`;
-  const isArchive = source === "internet-archive";
   const [state, setState] = useState<
     "confirm" | "submitting" | "queued" | "unknown" | "failed"
   >("confirm");
-  const [detail, setDetail] = useState<string | null>(null);
   const [files, setFiles] = useState<CandidateFile[] | null>(null);
-  const [torrent, setTorrent] = useState<ItemTorrent | null>(null);
-  const [torrentClientConfigured, setTorrentClientConfigured] = useState(false);
-  const [filesError, setFilesError] = useState<string | null>(null);
-  const [selection, setSelection] = useState<DownloadSelection | null>(null);
-  const [reloadToken, setReloadToken] = useState(0);
+  const [metadataPending, setMetadataPending] = useState(false);
+  const [filesError, setFilesError] = useState(false);
+  const [selectedFiles, setSelectedFiles] = useState<number[]>([]);
+  const [detail, setDetail] = useState<string | null>(null);
 
-  // Internet Archive items bundle many files; the payload choice is part of
-  // the manual selection, so the list loads when the dialog opens.
   useEffect(() => {
-    if (!open || !isArchive) return;
+    if (!open || protocol !== "torrent") return;
     let cancelled = false;
     const load = async () => {
       setFiles(null);
-      setTorrent(null);
-      setTorrentClientConfigured(false);
-      setFilesError(null);
-      setSelection(null);
+      setMetadataPending(false);
+      setFilesError(false);
+      setSelectedFiles([]);
       try {
         const response = await fetch(
           `/api/releases/files?candidateId=${encodeURIComponent(candidateId)}`
         );
+        if (!response.ok) throw new Error();
         const body = await response.json() as {
           files?: CandidateFile[];
-          torrent?: ItemTorrent | null;
-          torrentClientConfigured?: boolean;
-          error?: { message?: string };
+          metadataPending?: boolean;
         };
-        if (!response.ok) {
-          throw new Error(
-            body.error?.message ?? "Could not load the item files"
-          );
-        }
         if (cancelled) return;
-        const items = body.files ?? [];
-        setFiles(items);
-        setTorrent(body.torrent ?? null);
-        setTorrentClientConfigured(body.torrentClientConfigured ?? false);
-        // The endpoint already sorts largest-first, so the preselection is
-        // the most likely payload. Keep the established direct-download
-        // gesture even when the item also offers a torrent.
-        setSelection(items[0] ? { kind: "file", name: items[0].name } : null);
-      } catch (error) {
-        if (!cancelled) {
-          setFilesError(error instanceof Error
-            ? error.message
-            : "Could not load the item files");
-        }
+        setFiles(body.files ?? []);
+        setMetadataPending(body.metadataPending === true);
+      } catch {
+        if (!cancelled) setFilesError(true);
       }
     };
     void load();
     return () => {
       cancelled = true;
     };
-  }, [open, isArchive, candidateId, reloadToken]);
+  }, [open, protocol, candidateId]);
 
   const submit = async () => {
     setState("submitting");
@@ -132,28 +102,33 @@ export function DownloadDialog({
           candidateId,
           gameId,
           platformId,
-          ...(isArchive && selection?.kind === "torrent"
-            ? { delivery: "torrent" as const }
-            : isArchive && selection?.kind === "file"
-              ? { delivery: "file" as const, fileName: selection.name }
-              : {})
+          ...(protocol === "torrent" && selectedFiles.length > 0
+            ? { selectedFiles }
+            : {})
         })
       });
-      const body = await response.json();
-      if (!response.ok) throw new Error(body.error?.message ?? "Download failed");
-      if (body.status === "Unknown") {
-        setState("unknown");
-      } else if (body.status === "Failed") {
-        setState("failed");
-      } else {
-        setState("queued");
-      }
+      const body = await response.json() as {
+        status?: "Unknown" | "Failed" | string;
+        failureDetail?: string | null;
+      };
+      if (!response.ok) throw new Error();
+      setState(body.status === "Unknown"
+        ? "unknown"
+        : body.status === "Failed" ? "failed" : "queued");
       setDetail(body.failureDetail ?? null);
-    } catch (error) {
+    } catch {
       setState("failed");
-      setDetail(error instanceof Error ? error.message : "Download failed");
+      setDetail("Download submission failed");
     }
   };
+
+  const clientName = protocol === "torrent" ? "qBittorrent" : "SABnzbd";
+  const submitLabel = protocol === "torrent" ? "Send to qBittorrent" : "Send to SABnzbd";
+  const toggleFile = (index: number) => setSelectedFiles((current) =>
+    current.includes(index)
+      ? current.filter((selected) => selected !== index)
+      : [...current, index]
+  );
 
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
@@ -164,47 +139,60 @@ export function DownloadDialog({
             <X aria-hidden="true" />
           </Dialog.Close>
           {state === "confirm" || state === "submitting" ? (
-            isArchive ? (
-              <ArchiveConfirm
-                title={title}
-                indexerName={indexerName}
-                files={files}
-                torrent={torrent}
-                torrentClientConfigured={torrentClientConfigured}
-                filesError={filesError}
-                selection={selection}
-                onSelect={setSelection}
-                onRetry={() => setReloadToken((value) => value + 1)}
-                submitting={state === "submitting"}
-                onSubmit={() => void submit()}
-              />
-            ) : (
-              <>
-                <p className="eyebrow">CONFIRM DOWNLOAD</p>
-                <Dialog.Title>Send to SABnzbd?</Dialog.Title>
-                <Dialog.Description>
-                  Gamarr will retrieve this NZB from <strong>{indexerName}</strong>,
-                  validate its size, and upload it to SABnzbd.
-                </Dialog.Description>
-                <div className="dialog-release mono">{title}</div>
-                <div className="dialog-actions">
-                  <Dialog.Close asChild>
-                    <Button variant="secondary">Cancel</Button>
-                  </Dialog.Close>
-                  <Button onClick={() => void submit()} disabled={state === "submitting"}>
-                    <Download aria-hidden="true" />
-                    {state === "submitting" ? "Retrieving and sending…" : "Send to SABnzbd"}
-                  </Button>
-                </div>
-              </>
-            )
+            <>
+              <p className="eyebrow">CONFIRM DOWNLOAD</p>
+              <Dialog.Title>{submitLabel}?</Dialog.Title>
+              <Dialog.Description>
+                {protocol === "torrent"
+                  ? <>Gamarr will add this torrent from <strong>{indexerName}</strong> to qBittorrent.</>
+                  : <>Gamarr will retrieve this NZB from <strong>{indexerName}</strong> and upload it to SABnzbd.</>}
+              </Dialog.Description>
+              <div className="dialog-release mono">{title}</div>
+              {protocol === "torrent" && files === null && !filesError && (
+                <p className="file-picker-status" role="status">Loading torrent files…</p>
+              )}
+              {protocol === "torrent" && filesError && (
+                <p className="warning-banner" role="alert">Could not load torrent files.</p>
+              )}
+              {protocol === "torrent" && metadataPending && (
+                <p className="file-picker-status">
+                  The file list is not known until metadata arrives; the whole torrent will be added.
+                </p>
+              )}
+              {protocol === "torrent" && files !== null && !metadataPending && files.length > 0 && (
+                <fieldset className="file-picker">
+                  <legend>Select torrent files (leave all unselected for the whole torrent)</legend>
+                  {files.map((file) => (
+                    <label className="file-option" key={file.index}>
+                      <input
+                        type="checkbox"
+                        checked={selectedFiles.includes(file.index)}
+                        onChange={() => toggleFile(file.index)}
+                      />
+                      <span className="file-option-name">{file.name}</span>
+                      <span className="file-option-meta mono">{formatBytes(file.size)}</span>
+                    </label>
+                  ))}
+                </fieldset>
+              )}
+              {!clientConfigured && (
+                <p className="warning-banner" role="alert">{clientName} is not configured</p>
+              )}
+              <div className="dialog-actions">
+                <Dialog.Close asChild>
+                  <Button variant="secondary">Cancel</Button>
+                </Dialog.Close>
+                <Button
+                  onClick={() => void submit()}
+                  disabled={state === "submitting" || !clientConfigured}
+                >
+                  <Download aria-hidden="true" />
+                  {state === "submitting" ? "Submitting…" : submitLabel}
+                </Button>
+              </div>
+            </>
           ) : (
-            <ResultState
-              state={state}
-              detail={detail}
-              isArchive={isArchive}
-              isTorrent={isArchive && selection?.kind === "torrent"}
-            />
+            <ResultState state={state} detail={detail} protocol={protocol} />
           )}
         </Dialog.Content>
       </Dialog.Portal>
@@ -212,138 +200,17 @@ export function DownloadDialog({
   );
 }
 
-function ArchiveConfirm({
-  title,
-  indexerName,
-  files,
-  torrent,
-  torrentClientConfigured,
-  filesError,
-  selection,
-  onSelect,
-  onRetry,
-  submitting,
-  onSubmit
-}: {
-  title: string;
-  indexerName: string;
-  files: CandidateFile[] | null;
-  torrent: ItemTorrent | null;
-  torrentClientConfigured: boolean;
-  filesError: string | null;
-  selection: DownloadSelection | null;
-  onSelect: (selection: DownloadSelection) => void;
-  onRetry: () => void;
-  submitting: boolean;
-  onSubmit: () => void;
-}) {
-  const torrentSelected = selection?.kind === "torrent";
-  return (
-    <>
-      <p className="eyebrow">CONFIRM DOWNLOAD</p>
-      <Dialog.Title>Download from Internet Archive?</Dialog.Title>
-      <Dialog.Description>
-        Choose a file to save from <strong>{indexerName}</strong>, or send the
-        {" "}entire item to qBittorrent. Track progress in Activity.
-      </Dialog.Description>
-      <div className="dialog-release mono">{title}</div>
-      {files === null && filesError === null && (
-        <p className="file-picker-status" role="status">Loading item files…</p>
-      )}
-      {filesError !== null && (
-        <>
-          <div className="warning-banner">
-            <AlertTriangle aria-hidden="true" />
-            <div>
-              <strong>Could not load files</strong>
-              <span>{filesError}</span>
-            </div>
-          </div>
-          <div className="dialog-actions">
-            <Dialog.Close asChild>
-              <Button variant="secondary">Cancel</Button>
-            </Dialog.Close>
-            <Button variant="secondary" onClick={onRetry}>Try again</Button>
-          </div>
-        </>
-      )}
-      {files !== null && files.length === 0 && torrent === null && filesError === null && (
-        <p className="file-picker-status" role="status">
-          This item has no downloadable files.
-        </p>
-      )}
-      {files !== null && (files.length > 0 || torrent !== null) && (
-        <>
-          <fieldset className="file-picker">
-            <legend>Select what to download</legend>
-            {torrent !== null && (
-              <>
-                <label className="file-option">
-                  <input
-                    type="radio"
-                    name="internet-archive-download"
-                    value="torrent"
-                    checked={torrentSelected}
-                    disabled={!torrentClientConfigured}
-                    onChange={() => onSelect({ kind: "torrent" })}
-                  />
-                  <span className="file-option-name">Entire item (torrent)</span>
-                  <span className="file-option-meta mono">
-                    {torrentClientConfigured
-                      ? `${formatBytes(torrent.size)} · via qBittorrent`
-                      : "qBittorrent is not configured"}
-                  </span>
-                </label>
-                {files.length > 0 && <hr className="file-picker-divider" />}
-              </>
-            )}
-            {files.map((file) => (
-              <label className="file-option" key={file.name}>
-                <input
-                  type="radio"
-                  name="internet-archive-download"
-                  value={file.name}
-                  checked={selection?.kind === "file" && selection.name === file.name}
-                  onChange={() => onSelect({ kind: "file", name: file.name })}
-                />
-                <span className="file-option-name">{file.name}</span>
-                <span className="file-option-meta mono">
-                  {[file.format, formatBytes(file.size)]
-                    .filter(Boolean)
-                    .join(" · ")}
-                </span>
-              </label>
-            ))}
-          </fieldset>
-          <div className="dialog-actions">
-            <Dialog.Close asChild>
-              <Button variant="secondary">Cancel</Button>
-            </Dialog.Close>
-            <Button onClick={onSubmit} disabled={submitting || selection === null}>
-              <Download aria-hidden="true" />
-              {submitting
-                ? torrentSelected ? "Sending to qBittorrent…" : "Starting download…"
-                : torrentSelected ? "Send to qBittorrent" : "Download file"}
-            </Button>
-          </div>
-        </>
-      )}
-    </>
-  );
-}
-
 function ResultState({
   state,
   detail,
-  isArchive,
-  isTorrent
+  protocol
 }: {
   state: "queued" | "unknown" | "failed";
   detail: string | null;
-  isArchive: boolean;
-  isTorrent: boolean;
+  protocol: "usenet" | "torrent";
 }) {
   const queued = state === "queued";
+  const clientName = protocol === "torrent" ? "qBittorrent" : "SABnzbd";
   return (
     <>
       {queued
@@ -351,29 +218,21 @@ function ResultState({
         : <AlertTriangle className="dialog-result-icon warning-icon" aria-hidden="true" />}
       <Dialog.Title>
         {queued
-          ? isTorrent
-            ? "Added to qBittorrent"
-            : isArchive ? "Download started" : "Added to SABnzbd"
+          ? `Added to ${clientName}`
           : state === "unknown"
             ? "Submission status is unknown"
             : "Could not submit download"}
       </Dialog.Title>
       <Dialog.Description>
         {queued
-          ? isTorrent
-            ? "The job is saved in your Gamarr library and queued in qBittorrent."
-            : isArchive
-            ? "The job is saved in your Gamarr library and the file is downloading to this machine."
-            : "The job is saved in your Gamarr library and queued for SABnzbd."
+          ? `The job is saved in your Gamarr library and queued in ${clientName}.`
           : state === "unknown"
             ? "Gamarr will not resubmit automatically. Refresh Activity to reconcile the durable marker."
-            : detail ?? "Review your indexer and SABnzbd settings, then search again."}
+            : detail ?? "Review your Prowlarr and download-client settings, then search again."}
       </Dialog.Description>
       <div className="dialog-actions">
         <Button asChild>
-          <a href={queued ? "/" : "/activity"}>
-            {queued ? "Open library" : "Open Activity"}
-          </a>
+          <a href={queued ? "/" : "/activity"}>{queued ? "Open library" : "Open Activity"}</a>
         </Button>
         <Dialog.Close asChild>
           <Button variant="secondary">Close</Button>

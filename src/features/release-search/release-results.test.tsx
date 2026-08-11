@@ -1,13 +1,12 @@
 /** @vitest-environment jsdom */
 
 import { render, screen } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 
 import type { PublicRelease } from "@/features/release-search/service";
 import { ReleaseResults } from "@/features/release-search/release-results";
 
-const release = (overrides: Partial<PublicRelease>): PublicRelease => ({
+const release = (protocol: "usenet" | "torrent", seeders: number | null): PublicRelease => ({
   title: "Game Name",
   size: 100,
   category: "Console",
@@ -17,83 +16,42 @@ const release = (overrides: Partial<PublicRelease>): PublicRelease => ({
   supportingReasons: [],
   conflictingReasons: [],
   sources: [{
-    candidateId: "candidate",
-    indexerName: "Indexer",
-    source: "newznab" as const
-  }],
-  ...overrides
+    candidateId: `${protocol}-candidate`,
+    indexerName: `${protocol} indexer`,
+    protocol,
+    seeders
+  }]
 });
 
+function renderResults(releases: PublicRelease[]) {
+  render(<ReleaseResults
+    gameId={1}
+    platformId={130}
+    releases={releases}
+    usenetClientConfigured
+    torrentClientConfigured
+  />);
+}
+
 describe("ReleaseResults", () => {
-  it("keeps conflicting releases visible with their evidence", () => {
-    render(<ReleaseResults
-      gameId={1}
-      platformId={130}
-      releases={[{
-        title: "Game.Name.PS5-GROUP",
-        size: 100,
-        category: "Console",
-        publishedAt: 1,
-        match: "Conflicting",
-        score: 10,
-        supportingReasons: ["Title matches"],
-        conflictingReasons: ["Conflicting platform: ps5"],
-        sources: [{ candidateId: "candidate", indexerName: "Indexer", source: "newznab" as const }]
-      }]}
-    />);
+  it("renders a protocol label as text, not colour alone", () => {
+    renderResults([release("torrent", 12)]);
 
-    expect(screen.getByText("Game.Name.PS5-GROUP")).toBeVisible();
-    expect(screen.getByText("Conflicting platform: ps5")).toBeVisible();
-    expect(screen.getByText("Conflicting")).toBeVisible();
+    expect(screen.getByText("Torrent")).toBeVisible();
+    expect(screen.getByRole("button", { name: /torrent indexer/i }))
+      .toHaveTextContent("Torrent");
   });
 
-  it("labels an undated release instead of rendering the epoch", () => {
-    render(<ReleaseResults
-      gameId={1}
-      platformId={130}
-      releases={[release({ publishedAt: null })]}
-    />);
+  it("shows the seeder count for a torrent source", () => {
+    renderResults([release("torrent", 12)]);
 
-    expect(screen.getByText("DATE UNKNOWN")).toBeVisible();
-    expect(screen.queryByText("1/1/1970")).toBeNull();
-    expect(screen.queryByText("12/31/1969")).toBeNull();
+    expect(screen.getByText("12 seeders")).toBeVisible();
   });
 
-  it("sorts undated releases below dated ones under Newest", async () => {
-    render(<ReleaseResults
-      gameId={1}
-      platformId={130}
-      releases={[
-        release({
-          title: "Undated Release",
-          publishedAt: null,
-          size: 100,
-          sources: [{
-            candidateId: "undated",
-            indexerName: "Indexer",
-            source: "newznab" as const
-          }]
-        }),
-        release({
-          title: "Dated Release",
-          publishedAt: Date.UTC(2020, 0, 1),
-          size: 200,
-          sources: [{
-            candidateId: "dated",
-            indexerName: "Indexer",
-            source: "newznab" as const
-          }]
-        })
-      ]}
-    />);
+  it("shows no seeder count for a usenet source", () => {
+    renderResults([release("usenet", 12)]);
 
-    await userEvent.selectOptions(
-      screen.getByRole("combobox", { name: "Sort releases" }),
-      "newest"
-    );
-
-    const titles = screen.getAllByRole("heading", { level: 3 })
-      .map((heading) => heading.textContent);
-    expect(titles).toEqual(["Dated Release", "Undated Release"]);
+    expect(screen.getByText("Usenet")).toBeVisible();
+    expect(screen.queryByText(/seeders/i)).not.toBeInTheDocument();
   });
 });

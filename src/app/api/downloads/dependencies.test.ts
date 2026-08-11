@@ -87,7 +87,9 @@ function seedAbandonedDownload(database: Database, updatedAt: number): void {
       size: null,
       category: null,
       sabnzbdConfigRevision: 0,
-      sabMarker: "gamarr-ia-orphan",
+      selectedFiles: null,
+      filesAppliedAt: null,
+      marker: "gamarr-ia-orphan",
       sabJobId: null,
       progress: 40,
       failureDetail: null,
@@ -120,7 +122,7 @@ describe("download composition root recovery", () => {
 
     expect(new SqliteDownloadRepository(database).get("ia-orphan")).toMatchObject({
       status: "Failed",
-      failureDetail: "Download was interrupted before completion"
+      failureDetail: "The direct download path was removed"
     });
     expect(consoleError).not.toHaveBeenCalled();
   });

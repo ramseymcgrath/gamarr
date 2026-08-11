@@ -36,9 +36,7 @@ describe("release search HTTP handler", () => {
     // `Promise<unknown>` — so an untyped fake would keep compiling after a
     // field is added to the response and this test would silently stop
     // covering the wire shape. The annotation is what makes that a build
-    // failure. Both `source` discriminants are pinned because
-    // release-results.tsx branches on them to pick "Download" vs
-    // "Send to SABnzbd".
+    // failure. Protocol and seeder health are pinned because the UI uses both.
     const searchResponse: ReleaseSearchResponse = {
       releases: [{
         title: "Game.NSW-GROUP",
@@ -53,16 +51,20 @@ describe("release search HTTP handler", () => {
           {
             candidateId: "candidate-nzb",
             indexerName: "Indexer",
-            source: "newznab"
+            protocol: "usenet",
+            seeders: null
           },
           {
             candidateId: "candidate-ia",
-            indexerName: "Internet Archive",
-            source: "internet-archive"
+            indexerName: "1337x",
+            protocol: "torrent",
+            seeders: 42
           }
         ]
       }],
-      warnings: []
+      warnings: [],
+      usenetClientConfigured: true,
+      torrentClientConfigured: true
     };
     const search = vi.fn(async (): Promise<ReleaseSearchResponse> => searchResponse);
 
@@ -91,16 +93,20 @@ describe("release search HTTP handler", () => {
           {
             candidateId: "candidate-nzb",
             indexerName: "Indexer",
-            source: "newznab"
+            protocol: "usenet",
+            seeders: null
           },
           {
             candidateId: "candidate-ia",
-            indexerName: "Internet Archive",
-            source: "internet-archive"
+            indexerName: "1337x",
+            protocol: "torrent",
+            seeders: 42
           }
         ]
       }],
-      warnings: []
+      warnings: [],
+      usenetClientConfigured: true,
+      torrentClientConfigured: true
     });
   });
 
@@ -188,6 +194,22 @@ describe("release search HTTP handler", () => {
     });
     expect(service.search).not.toHaveBeenCalled();
   });
+
+  it("returns 503 when Prowlarr is not configured", async () => {
+    const search = vi.fn(async () => {
+      throw new AppError("UNAVAILABLE", 503, "Prowlarr is not configured");
+    });
+
+    const response = await handleReleaseSearch(
+      searchRequest({ gameId: 1, platformId: 130 }),
+      { service: { search }, policy }
+    );
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({
+      error: { code: "UNAVAILABLE", message: "Prowlarr is not configured" }
+    });
+  });
 });
 
 const filesRequest = (candidateId: string | null) => new Request(
@@ -197,23 +219,18 @@ const filesRequest = (candidateId: string | null) => new Request(
 );
 
 /**
- * Which files are selectable — original-vs-derivative preference, unsafe-name
- * filtering, ordering, the cap, and the `{name, size, format}` projection — is
- * release-search domain policy and is covered by
- * src/features/release-search/file-selection.test.ts. The candidate lookup and
- * its 404/400 rejections are covered by service.test.ts. What remains here is
- * only the handler's own job: read the query parameter, delegate, and shape
- * the response.
+ * Torrent decoding and candidate policy are covered by the feature tests. What
+ * remains here is the handler's own job: read the query parameter, delegate,
+ * and shape the response.
  */
 describe("handleListCandidateFiles", () => {
   it("returns the service's listing verbatim and forbids caching", async () => {
     const listCandidateFiles = vi.fn(async (): Promise<CandidateFilesResponse> => ({
       files: [
-        { name: "big.zip", size: 20, format: "ZIP" },
-        { name: "unknown.bin", size: null, format: "Binary" }
+        { index: 0, name: "Game/big.zip", size: 20 },
+        { index: 1, name: "Game/unknown.bin", size: null }
       ],
-      torrent: { name: "game_archive.torrent", size: 42 },
-      torrentClientConfigured: true
+      metadataPending: false
     }));
 
     const response = await handleListCandidateFiles(
@@ -229,11 +246,10 @@ describe("handleListCandidateFiles", () => {
     expect(response.headers.get("cache-control")).toBe("no-store");
     expect(await response.json()).toEqual({
       files: [
-        { name: "big.zip", size: 20, format: "ZIP" },
-        { name: "unknown.bin", size: null, format: "Binary" }
+        { index: 0, name: "Game/big.zip", size: 20 },
+        { index: 1, name: "Game/unknown.bin", size: null }
       ],
-      torrent: { name: "game_archive.torrent", size: 42 },
-      torrentClientConfigured: true
+      metadataPending: false
     });
   });
 
@@ -282,13 +298,13 @@ describe("handleListCandidateFiles", () => {
     });
   });
 
-  it("surfaces a non-Internet-Archive candidate as a 400", async () => {
+  it("surfaces a usenet candidate as a 400", async () => {
     const response = await handleListCandidateFiles(
       filesRequest("candidate-nzb"),
       {
         service: {
           listCandidateFiles: vi.fn(async () => {
-            throw validationError("Candidate is not an Internet Archive item");
+            throw validationError("File selection is only available for torrents");
           })
         }
       }
@@ -301,7 +317,7 @@ describe("handleListCandidateFiles", () => {
     expect(body).toEqual({
       error: {
         code: "VALIDATION",
-        message: "Candidate is not an Internet Archive item"
+        message: "File selection is only available for torrents"
       }
     });
   });

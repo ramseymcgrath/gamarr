@@ -1,12 +1,10 @@
-import { randomUUID } from "node:crypto";
 import { ZodError } from "zod";
 
 import type {
   IgdbSettingsInput,
   IgdbSettingsRecord,
-  IndexerInput,
-  IndexerRecord,
-  PublicIndexer,
+  ProwlarrSettingsInput,
+  ProwlarrSettingsRecord,
   PublicSettings,
   QbittorrentSettingsInput,
   QbittorrentSettingsRecord,
@@ -16,11 +14,11 @@ import type {
 } from "@/features/settings/models";
 import {
   igdbSettingsInputSchema,
-  indexerInputSchema,
+  prowlarrSettingsInputSchema,
   qbittorrentSettingsInputSchema,
   sabnzbdSettingsInputSchema
 } from "@/features/settings/models";
-import { AppError, validationError } from "@/lib/errors";
+import { validationError } from "@/lib/errors";
 
 export interface SettingsRepository {
   getIgdb(): IgdbSettingsRecord | null;
@@ -30,9 +28,8 @@ export interface SettingsRepository {
   getQbittorrent(): QbittorrentSettingsRecord | null;
   saveQbittorrent(value: QbittorrentSettingsRecord): void;
   recordQbittorrentTest(status: string, testedAt: number): void;
-  listIndexers(): IndexerRecord[];
-  saveIndexer(value: IndexerRecord): void;
-  deleteIndexer(id: string, deletedAt: number): void;
+  getProwlarr(): ProwlarrSettingsRecord | null;
+  saveProwlarr(value: ProwlarrSettingsRecord): void;
 }
 
 function parseInput<T>(parse: () => T): T {
@@ -76,14 +73,14 @@ function normalizeServiceUrl(value: string): string {
 export class SettingsService {
   constructor(
     private readonly repository: SettingsRepository,
-    private readonly now: () => number = Date.now,
-    private readonly id: () => string = randomUUID
+    private readonly now: () => number = Date.now
   ) {}
 
   getRedacted(): PublicSettings {
     const igdb = this.repository.getIgdb();
     const sabnzbd = this.repository.getSabnzbd();
     const qbittorrent = this.repository.getQbittorrent();
+    const prowlarr = this.repository.getProwlarr();
     return {
       igdb: igdb ? {
         clientId: igdb.clientId,
@@ -110,9 +107,14 @@ export class SettingsService {
         lastTestedAt: qbittorrent.lastTestedAt,
         configRevision: qbittorrent.configRevision
       } : null,
-      indexers: this.repository.listIndexers()
-        .filter((item) => item.deletedAt === null)
-        .map((item) => this.toPublicIndexer(item))
+      prowlarr: prowlarr ? {
+        baseUrl: prowlarr.baseUrl,
+        hasApiKey: prowlarr.apiKey.length > 0,
+        timeoutMs: prowlarr.timeoutMs,
+        lastTestStatus: prowlarr.lastTestStatus,
+        lastTestedAt: prowlarr.lastTestedAt,
+        configRevision: prowlarr.configRevision
+      } : null
     };
   }
 
@@ -186,70 +188,27 @@ export class SettingsService {
     });
   }
 
-  saveIndexer(input: IndexerInput): PublicIndexer {
-    const parsed = parseInput(() => indexerInputSchema.parse(input));
-    // Soft-deleted indexers are invisible everywhere else, so an update must
-    // not silently restore one. Without the liveness filter the unconditional
-    // `deletedAt: null` below resurrected it.
-    const existing = parsed.id
-      ? this.repository.listIndexers()
-        .find((item) => item.id === parsed.id && item.deletedAt === null)
-      : undefined;
-    if (parsed.id && !existing) {
-      throw new AppError("NOT_FOUND", 404, "Indexer does not exist");
-    }
-
+  saveProwlarr(input: ProwlarrSettingsInput): void {
+    const parsed = parseInput(() => prowlarrSettingsInputSchema.parse(input));
+    const existing = this.repository.getProwlarr();
     const apiKey = resolveSecret(parsed.apiKey, existing?.apiKey);
     const baseUrl = normalizeServiceUrl(parsed.baseUrl);
     const changed =
       !existing ||
-      existing.name !== parsed.name ||
       existing.baseUrl !== baseUrl ||
       existing.apiKey !== apiKey ||
-      existing.enabled !== parsed.enabled ||
-      JSON.stringify(existing.categoryIds) !== JSON.stringify(parsed.categoryIds) ||
       existing.timeoutMs !== parsed.timeoutMs;
-    const timestamp = this.now();
-    const record: IndexerRecord = {
-      id: existing?.id ?? this.id(),
-      name: parsed.name,
+
+    this.repository.saveProwlarr({
       baseUrl,
       apiKey,
-      enabled: parsed.enabled,
-      categoryIds: [...new Set(parsed.categoryIds)],
       timeoutMs: parsed.timeoutMs,
-      configRevision: changed ? (existing?.configRevision ?? 0) + 1 : existing.configRevision,
       lastTestStatus: changed ? null : existing.lastTestStatus,
       lastTestedAt: changed ? null : existing.lastTestedAt,
-      deletedAt: null,
-      createdAt: existing?.createdAt ?? timestamp,
-      updatedAt: timestamp
-    };
-    this.repository.saveIndexer(record);
-    return this.toPublicIndexer(record);
-  }
-
-  deleteIndexer(id: string): void {
-    const existing = this.repository.listIndexers()
-      .find((item) => item.id === id && item.deletedAt === null);
-    if (!existing) {
-      throw validationError("Indexer does not exist");
-    }
-    this.repository.deleteIndexer(id, this.now());
-  }
-
-  private toPublicIndexer(record: IndexerRecord): PublicIndexer {
-    return {
-      id: record.id,
-      name: record.name,
-      baseUrl: record.baseUrl,
-      hasApiKey: record.apiKey.length > 0,
-      enabled: record.enabled,
-      categoryIds: record.categoryIds,
-      timeoutMs: record.timeoutMs,
-      configRevision: record.configRevision,
-      lastTestStatus: record.lastTestStatus,
-      lastTestedAt: record.lastTestedAt
-    };
+      configRevision: changed
+        ? (existing?.configRevision ?? 0) + 1
+        : existing.configRevision,
+      updatedAt: this.now()
+    });
   }
 }

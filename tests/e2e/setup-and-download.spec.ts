@@ -15,16 +15,23 @@ test("configures providers and sends a selected release to SABnzbd", async ({
   await page.getByRole("button", { name: "Refresh platforms" }).click();
   await expect(page.getByText("Platform refresh complete")).toBeVisible();
   await page.reload();
-  await page.locator("#platforms").getByLabel("Nintendo Switch").check();
+  // By role: the platform also has a "<name> search categories" field,
+  // so a plain label match resolves to both controls.
+  await page.locator("#platforms")
+    .getByRole("checkbox", { name: /Nintendo Switch/ })
+    .check();
 
-  const indexers = page.locator("#indexers");
-  await indexers.getByLabel("Name").fill("Fixture Indexer");
-  await indexers.getByLabel("Newznab URL")
-    .fill("http://127.0.0.1:4100/newznab/api");
-  await indexers.getByLabel("API key").fill("indexer-secret");
-  await indexers.getByLabel("Categories").fill("4050");
-  await indexers.getByRole("button", { name: "Add and test indexer" }).click();
-  await expect(page.getByText("Indexer save complete")).toBeVisible();
+  const prowlarr = page.locator("#prowlarr");
+  await prowlarr.getByLabel("Base URL").fill("http://prowlarr.test:9696");
+  // By role, not label: once a key is saved the card also renders a
+  // "Clear saved API key" checkbox, and getByLabel matches both.
+  await prowlarr
+    .getByRole("textbox", { name: /API key/ })
+    .fill("fixture-prowlarr-key");
+  await prowlarr.getByRole("button", { name: "Save and test" }).click();
+  await expect(page.getByText("Prowlarr save complete")).toBeVisible();
+  await expect(prowlarr.getByText("Fixture Torrent")).toBeVisible();
+  await expect(prowlarr.getByText("Fixture Usenet")).toBeVisible();
 
   const sab = page.locator("#sabnzbd");
   await sab.getByLabel("Base URL").fill("http://127.0.0.1:4100/sab");
@@ -58,7 +65,7 @@ test("configures providers and sends a selected release to SABnzbd", async ({
   await page.getByRole("button", { name: "Search games" }).click();
   await page.getByRole("link", { name: /Metroid Prime 4: Beyond/ }).click();
   await page.getByRole("button", { name: "Search releases" }).click();
-  await page.getByRole("button", { name: /Send to SABnzbd/ }).click();
+  await page.getByRole("button", { name: "Fixture Usenet usenet" }).click();
   await page.getByRole("dialog")
     .getByRole("button", { name: "Send to SABnzbd" })
     .click();

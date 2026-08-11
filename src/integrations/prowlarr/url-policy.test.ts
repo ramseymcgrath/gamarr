@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { validateDownloadUrl } from "@/integrations/newznab/url-policy";
+import { validateDownloadUrl } from "@/integrations/prowlarr/url-policy";
 import { AppError } from "@/lib/errors";
 
 describe("validateDownloadUrl", () => {

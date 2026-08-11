@@ -6,16 +6,17 @@ import { describe, expect, it } from "vitest";
 import { SetupScreen } from "@/features/settings/setup-screen";
 
 describe("SetupScreen", () => {
-  it("derives resumable progress and points to the next incomplete step", () => {
+  it("derives resumable progress and points to the Prowlarr setup step", () => {
     render(<SetupScreen readiness={{
       igdbReady: true,
-      platformsReady: false,
+      platformsReady: true,
       indexerReady: false,
       sabnzbdReady: true
     }} />);
 
-    expect(screen.getByText("2 of 4 complete")).toBeVisible();
-    expect(screen.getByRole("link", { name: "Continue with platforms" }))
-      .toHaveAttribute("href", "/settings#platforms");
+    expect(screen.getByText("3 of 4 complete")).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Connect Prowlarr" })).toBeVisible();
+    expect(screen.getByRole("link", { name: "Continue with Prowlarr" }))
+      .toHaveAttribute("href", "/settings#prowlarr");
   });
 });

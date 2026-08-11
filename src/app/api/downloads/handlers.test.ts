@@ -12,7 +12,7 @@ const attempt = {
   submissionKey: "private-key",
   requestFingerprint: "private-fingerprint",
   status: "Queued" as const,
-  source: "newznab" as const,
+  source: "prowlarr-usenet" as const,
   releaseTitle: "Game.NSW",
   indexerId: "indexer",
   indexerNameSnapshot: "Indexer",
@@ -20,10 +20,12 @@ const attempt = {
   newznabGuid: "guid",
   iaFileName: null,
   torrentHash: null,
+  selectedFiles: null,
+  filesAppliedAt: null,
   size: 123,
   category: "games",
   sabnzbdConfigRevision: 1,
-  sabMarker: "gamarr-attempt",
+  marker: "gamarr-attempt",
   sabJobId: "job",
   progress: 0,
   failureDetail: null,
@@ -75,7 +77,7 @@ describe("download HTTP handlers", () => {
     expect(body).toMatchObject({ id: "attempt", status: "Queued" });
   });
 
-  it("rejects an unknown delivery value", async () => {
+  it("forwards selected torrent file indices", async () => {
     const submit = vi.fn(async () => attempt);
     const response = await handleSubmitDownload(
       request("/api/downloads", {
@@ -83,7 +85,33 @@ describe("download HTTP handlers", () => {
         candidateId: "candidate",
         gameId: 1,
         platformId: 130,
-        delivery: "magnet"
+        selectedFiles: [0, 2]
+      }),
+      {
+        service: { submit, reconcile: vi.fn() },
+        policy: parseOriginPolicy("http://gamarr.local")
+      }
+    );
+
+    expect(response.status).toBe(201);
+    expect(submit).toHaveBeenCalledWith({
+      submissionKey: "key",
+      candidateId: "candidate",
+      gameId: 1,
+      platformId: 130,
+      selectedFiles: [0, 2]
+    });
+  });
+
+  it("rejects an invalid selected-file list", async () => {
+    const submit = vi.fn(async () => attempt);
+    const response = await handleSubmitDownload(
+      request("/api/downloads", {
+        submissionKey: "key",
+        candidateId: "candidate",
+        gameId: 1,
+        platformId: 130,
+        selectedFiles: [0, -1]
       }),
       {
         service: { submit, reconcile: vi.fn() },
@@ -92,6 +120,32 @@ describe("download HTTP handlers", () => {
     );
 
     expect(response.status).toBe(400);
+    expect(submit).not.toHaveBeenCalled();
+  });
+
+  it("rejects a cross-origin mutation", async () => {
+    const submit = vi.fn(async () => attempt);
+    const untrusted = new Request("http://gamarr.local/api/downloads", {
+      method: "POST",
+      headers: {
+        host: "gamarr.local",
+        origin: "http://attacker.test",
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        submissionKey: "key",
+        candidateId: "candidate",
+        gameId: 1,
+        platformId: 130
+      })
+    });
+
+    const response = await handleSubmitDownload(untrusted, {
+      service: { submit, reconcile: vi.fn() },
+      policy: parseOriginPolicy("http://gamarr.local")
+    });
+
+    expect(response.status).toBe(403);
     expect(submit).not.toHaveBeenCalled();
   });
 

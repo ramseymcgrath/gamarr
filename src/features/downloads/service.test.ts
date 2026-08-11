@@ -1,76 +1,88 @@
+import { createHash } from "node:crypto";
+
 import { describe, expect, it, vi } from "vitest";
 
-import type {
-  DownloadAttempt,
-  SubmissionClaimInput
+import {
+  isTerminalDownloadStatus,
+  type DownloadAttempt,
+  type NzbUpload,
+  type SubmissionClaimInput,
+  type SubmitDownloadInput
 } from "@/features/downloads/models";
-import { isTerminalDownloadStatus } from "@/features/downloads/models";
 import {
   SabnzbdUploadError,
   TorrentAddError,
+  type SabnzbdPort,
+  type TorrentClientPort,
   type TorrentJob
 } from "@/features/downloads/port";
 import type { DownloadRepository } from "@/features/downloads/repository";
 import { DownloadService } from "@/features/downloads/service";
-import type { CandidateRepository } from "@/features/release-search/ports";
+import type {
+  CandidateRepository,
+  ReleaseCandidateRecord
+} from "@/features/release-search/ports";
 import type { SettingsRepository } from "@/features/settings/service";
-import { AppError, validationError } from "@/lib/errors";
 
 class MemoryDownloads implements DownloadRepository {
-  attempts = new Map<string, DownloadAttempt>();
+  readonly attempts = new Map<string, DownloadAttempt>();
 
-  findBySubmissionKey(key: string) {
-    return [...this.attempts.values()].find((value) =>
-      value.submissionKey === key) ?? null;
+  constructor(private readonly claimEvents?: string[]) {}
+
+  findBySubmissionKey(key: string): DownloadAttempt | null {
+    return [...this.attempts.values()].find((attempt) =>
+      attempt.submissionKey === key) ?? null;
   }
 
   claimSubmission(input: SubmissionClaimInput) {
+    this.claimEvents?.push("claim-start");
     const existing = this.findBySubmissionKey(input.attempt.submissionKey);
-    if (existing) return { attempt: existing, created: false };
+    if (existing) {
+      this.claimEvents?.push("claim-end");
+      return { attempt: existing, created: false };
+    }
     this.attempts.set(input.attempt.id, input.attempt);
+    this.claimEvents?.push("claim-end");
     return { attempt: input.attempt, created: true };
   }
 
-  update(id: string, patch: Partial<DownloadAttempt>) {
+  update(id: string, patch: Partial<DownloadAttempt>): DownloadAttempt {
     const current = this.attempts.get(id);
     if (!current) throw new Error("Download attempt does not exist");
-    // Mirrors SqliteDownloadRepository: a terminal row accepts no further
-    // writes, so a late callback cannot resurrect it.
     if (isTerminalDownloadStatus(current.status)) return current;
-    const value = { ...current, ...patch };
-    this.attempts.set(id, value);
-    return value;
+    const updated = { ...current, ...patch };
+    this.attempts.set(id, updated);
+    return updated;
   }
 
-  get(id: string) {
+  get(id: string): DownloadAttempt | null {
     return this.attempts.get(id) ?? null;
   }
 
-  list() {
+  list(): DownloadAttempt[] {
     return [...this.attempts.values()];
   }
 
-  recoverStaleSubmitting(before: number, updatedAt: number) {
+  recoverStaleSubmitting(before: number, updatedAt: number): void {
     for (const attempt of this.attempts.values()) {
       if (
-        attempt.status === "Submitting" &&
-        (attempt.sabRequestStartedAt ?? 0) < before
+        attempt.status === "Submitting"
+        && (attempt.sabRequestStartedAt ?? 0) < before
       ) {
         this.update(attempt.id, { status: "Unknown", updatedAt });
       }
     }
   }
 
-  recoverStaleInternetArchiveDownloads(before: number, updatedAt: number) {
+  recoverStaleInternetArchiveDownloads(updatedAt: number): void {
     for (const attempt of this.attempts.values()) {
       if (
-        attempt.source === "internet-archive" &&
-        (attempt.status === "Pending" || attempt.status === "Downloading") &&
-        attempt.updatedAt < before
+        attempt.source === "internet-archive"
+        && !isTerminalDownloadStatus(attempt.status)
       ) {
         this.update(attempt.id, {
           status: "Failed",
-          failureDetail: "Download was interrupted before completion",
+          failureDetail: "The direct download path was removed",
           updatedAt
         });
       }
@@ -78,1025 +90,367 @@ class MemoryDownloads implements DownloadRepository {
   }
 }
 
-const candidate = {
-  id: "candidate-a",
-  expiresAt: 99_999,
-  source: "newznab" as const,
-  indexerId: "indexer",
-  indexerConfigRevision: 1,
-  guid: "guid",
-  title: "Game.NSW-GROUP",
-  size: 1234,
-  downloadPath: "/api?t=get&id=guid",
-  category: "4050",
+const torrentBytes = new TextEncoder().encode(
+  "d4:infod5:filesld6:lengthi10e4:pathl5:a.xciee"
+  + "d6:lengthi20e4:pathl3:sub5:b.xcieee"
+  + "4:name10:Collectionee"
+);
+const magnet =
+  "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567";
+
+function candidate(
+  protocol: "usenet" | "torrent",
+  overrides: Partial<ReleaseCandidateRecord> = {}
+): ReleaseCandidateRecord {
+  return {
+    id: `candidate-${protocol}`,
+    expiresAt: 99_999,
+    protocol,
+    indexerId: protocol === "usenet" ? "3" : "7",
+    indexerConfigRevision: 4,
+    guid: `${protocol}-guid`,
+    title: protocol === "usenet" ? "Game.NZB" : "Game.Torrent",
+    size: 1234,
+    seeders: protocol === "torrent" ? 42 : null,
+    downloadPath: `/api/v1/indexer/${protocol === "usenet" ? "3" : "7"}/download`,
+    category: "4050",
+    sourceSnapshot: JSON.stringify({
+      indexerName: protocol === "usenet" ? "NZBgeek" : "1337x",
+      origin: "http://prowlarr.test",
+      magnetUrl: null
+    }),
+    createdAt: 1,
+    ...overrides
+  };
+}
+
+const usenetCandidate = candidate("usenet");
+const torrentCandidate = candidate("torrent");
+const magnetCandidate = candidate("torrent", {
+  id: "candidate-magnet",
   sourceSnapshot: JSON.stringify({
-    origin: "https://indexer.test",
-    indexerName: "Indexer"
-  }),
-  createdAt: 1
-};
+    indexerName: "Magnet Tracker",
+    origin: "http://prowlarr.test",
+    magnetUrl: magnet
+  })
+});
+
+const candidateRecords = new Map([
+  [usenetCandidate.id, usenetCandidate],
+  [torrentCandidate.id, torrentCandidate],
+  [magnetCandidate.id, magnetCandidate]
+]);
 
 const candidates: CandidateRepository = {
   save: () => undefined,
-  get: (id) => id.startsWith("candidate") ? { ...candidate, id } : null
+  get: (id) => candidateRecords.get(id) ?? null
 };
 
-const settings: SettingsRepository = {
-  getIgdb: () => null,
-  saveIgdb: () => undefined,
-  getSabnzbd: () => ({
-    baseUrl: "http://sab.test",
-    apiKey: "sab-key",
-    defaultCategory: "games",
-    maxNzbBytes: 1_048_576,
-    lastTestStatus: null,
-    lastTestedAt: null,
-    configRevision: 1,
-    updatedAt: 1
-  }),
-  saveSabnzbd: () => undefined,
-  getQbittorrent: () => null,
-  saveQbittorrent: () => undefined,
-  recordQbittorrentTest: () => undefined,
-  listIndexers: () => [{
-    id: "indexer",
-    name: "Indexer",
-    baseUrl: "https://indexer.test/api",
-    apiKey: "indexer-key",
-    enabled: true,
-    categoryIds: [],
-    timeoutMs: 10_000,
-    configRevision: 1,
-    lastTestStatus: null,
-    lastTestedAt: null,
-    deletedAt: null,
+function submission(
+  overrides: Partial<SubmitDownloadInput> = {}
+): SubmitDownloadInput {
+  return {
+    submissionKey: "submission-key",
+    candidateId: "candidate-torrent",
+    gameId: 1,
+    platformId: 130,
+    ...overrides
+  };
+}
+
+function fingerprint(parts: Array<string | number>): string {
+  return createHash("sha256")
+    .update(JSON.stringify(parts))
+    .digest("hex");
+}
+
+function storedAttempt(
+  overrides: Partial<DownloadAttempt> = {}
+): DownloadAttempt {
+  return {
+    id: "stored-attempt",
+    libraryEntryId: "library-1-130",
+    submissionKey: "stored-key",
+    requestFingerprint: "fingerprint",
+    status: "Queued",
+    source: "prowlarr-usenet",
+    releaseTitle: "Game",
+    indexerId: "3",
+    indexerNameSnapshot: "NZBgeek",
+    indexerUrlSnapshot: "http://prowlarr.test",
+    newznabGuid: "guid",
+    iaFileName: null,
+    torrentHash: null,
+    selectedFiles: null,
+    filesAppliedAt: null,
+    size: 1234,
+    category: "games",
+    sabnzbdConfigRevision: 2,
+    marker: "gamarr-stored-attempt",
+    sabJobId: "job-1",
+    progress: 0,
+    failureDetail: null,
+    sabRequestStartedAt: 1,
     createdAt: 1,
-    updatedAt: 1
-  }],
-  saveIndexer: () => undefined,
-  deleteIndexer: () => undefined
-};
+    updatedAt: 2,
+    completedAt: null,
+    ...overrides
+  };
+}
 
-const input = (overrides: Partial<{
-  submissionKey: string;
-  candidateId: string;
-  fileName: string;
-}> = {}) => ({
-  submissionKey: "same-key",
-  candidateId: "candidate-a",
-  gameId: 1,
-  platformId: 130,
-  ...overrides
-});
+interface BuildOptions {
+  repository?: MemoryDownloads;
+  fetched?:
+    | { kind: "nzb"; bytes: Uint8Array }
+    | { kind: "torrent"; bytes: Uint8Array }
+    | { kind: "magnet"; uri: string };
+  fetchError?: unknown;
+  addError?: unknown;
+  torrentHash?: string | null;
+  torrentConfigured?: boolean;
+  sabConfigured?: boolean;
+  uploadError?: unknown;
+  events?: string[];
+  torrents?: TorrentJob[];
+  fileLists?: Array<Array<{ index: number; name: string }>>;
+  now?: () => number;
+}
 
-const newznabService = (repository: MemoryDownloads) => new DownloadService({
-  repository,
-  candidates,
-  settings,
-  nzbFetcher: { fetch: async () => new Uint8Array([1]) },
-  sabFactory: () => ({
-    upload: async () => ({ jobId: "job" }),
+function build(options: BuildOptions = {}) {
+  const repository = options.repository ?? new MemoryDownloads(options.events);
+  const settings: SettingsRepository = {
+    getIgdb: () => null,
+    saveIgdb: () => undefined,
+    getSabnzbd: () => options.sabConfigured === false ? null : ({
+      baseUrl: "http://sab.test",
+      apiKey: "sab-key",
+      defaultCategory: "games",
+      maxNzbBytes: 1_048_576,
+      lastTestStatus: null,
+      lastTestedAt: null,
+      configRevision: 2,
+      updatedAt: 1
+    }),
+    saveSabnzbd: () => undefined,
+    getQbittorrent: () => options.torrentConfigured === false ? null : ({
+      baseUrl: "http://qbit.test",
+      username: "gamarr",
+      password: "qbit-password",
+      defaultCategory: "games",
+      lastTestStatus: null,
+      lastTestedAt: null,
+      configRevision: 3,
+      updatedAt: 1
+    }),
+    saveQbittorrent: () => undefined,
+    recordQbittorrentTest: () => undefined,
+    getProwlarr: () => ({
+      baseUrl: "http://prowlarr.test",
+      apiKey: "prowlarr-secret-key",
+      timeoutMs: 10_000,
+      lastTestStatus: null,
+      lastTestedAt: null,
+      configRevision: 4,
+      updatedAt: 1
+    }),
+    saveProwlarr: () => undefined
+  };
+  const fetch = vi.fn(async (input: {
+    candidate: ReleaseCandidateRecord;
+    magnetUrl: string | null;
+    maxBytes: number;
+  }) => {
+    options.events?.push("fetch");
+    if (options.fetchError !== undefined) throw options.fetchError;
+    if (options.fetched) return options.fetched;
+    if (input.candidate.id === magnetCandidate.id) {
+      return { kind: "magnet" as const, uri: magnet };
+    }
+    return input.candidate.protocol === "usenet"
+      ? { kind: "nzb" as const, bytes: new Uint8Array([1, 2, 3]) }
+      : { kind: "torrent" as const, bytes: torrentBytes };
+  });
+  const add = vi.fn(async () => {
+    if (options.addError !== undefined) throw options.addError;
+    return {
+      hash: options.torrentHash === undefined ? "torrent-hash" : options.torrentHash
+    };
+  });
+  const fileLists = [...(options.fileLists ?? [[]])];
+  const listFiles = vi.fn(async () => fileLists.shift() ?? []);
+  const setFilePriorities = vi.fn(async () => undefined);
+  const torrentClient: TorrentClientPort = {
+    add,
+    listFiles,
+    setFilePriorities,
+    list: async () => options.torrents ?? [],
+    testConnection: async () => undefined
+  };
+  const upload = vi.fn(async (uploadInput: NzbUpload) => {
+    void uploadInput;
+    if (options.uploadError !== undefined) throw options.uploadError;
+    return { jobId: "sab-job" };
+  });
+  const sab: SabnzbdPort = {
+    upload,
     getQueue: async () => [],
     getHistory: async () => [],
     testConnection: async () => undefined
-  }),
-  id: () => "attempt-1",
-  now: () => 1_000
-});
-
-describe("DownloadService", () => {
-  it("returns the same attempt for a repeated submission key and submits once", async () => {
-    const repository = new MemoryDownloads();
-    let uploads = 0;
-    const service = new DownloadService({
-      repository,
-      candidates,
-      settings,
-      nzbFetcher: { fetch: async () => new TextEncoder().encode("<nzb />") },
-      sabFactory: () => ({
-        upload: async () => ({ jobId: `job-${++uploads}` }),
-        getQueue: async () => [],
-        getHistory: async () => [],
-        testConnection: async () => undefined
-      }),
-      id: () => "attempt-1",
-      now: () => 1_000
-    });
-
-    const first = await service.submit(input());
-    const second = await service.submit(input());
-
-    expect(second.id).toBe(first.id);
-    expect(first).toMatchObject({ status: "Queued", sabJobId: "job-1" });
-    expect(uploads).toBe(1);
-  });
-
-  it("uses a synthetic NZB filename instead of exposing the provider GUID", async () => {
-    const repository = new MemoryDownloads();
-    let uploadedFilename = "";
-    const service = new DownloadService({
-      repository,
-      candidates: {
-        save: () => undefined,
-        get: () => ({
-          ...candidate,
-          guid: "https://provider.example/details/guid?token=provider-secret"
-        })
-      },
-      settings,
-      nzbFetcher: { fetch: async () => new TextEncoder().encode("<nzb />") },
-      sabFactory: () => ({
-        upload: async ({ filename }) => {
-          uploadedFilename = filename;
-          return { jobId: "job-1" };
-        },
-        getQueue: async () => [],
-        getHistory: async () => [],
-        testConnection: async () => undefined
-      }),
-      id: () => "attempt-1",
-      now: () => 1_000
-    });
-
-    await service.submit(input({ submissionKey: "safe-filename" }));
-
-    expect(uploadedFilename).toBe("gamarr-attempt-1.nzb");
-    expect(uploadedFilename).not.toContain("provider-secret");
-  });
-
-  it("marks an ambiguous acknowledgement Unknown and never auto-resubmits", async () => {
-    const repository = new MemoryDownloads();
-    let uploads = 0;
-    const service = new DownloadService({
-      repository,
-      candidates,
-      settings,
-      nzbFetcher: { fetch: async () => new Uint8Array([1]) },
-      sabFactory: () => ({
-        upload: async () => {
-          uploads += 1;
-          throw new Error("connection closed after accept");
-        },
-        getQueue: async () => [],
-        getHistory: async () => [],
-        testConnection: async () => undefined
-      }),
-      id: () => "attempt-1",
-      now: () => 1_000
-    });
-
-    const attempt = await service.submit(input({ submissionKey: "ambiguous" }));
-    await service.reconcile([attempt.id]);
-
-    expect(repository.get(attempt.id)?.status).toBe("Unknown");
-    expect(uploads).toBe(1);
-  });
-
-  it("rejects a repeated submission key with a different fingerprint", async () => {
-    const repository = new MemoryDownloads();
-    const service = new DownloadService({
-      repository,
-      candidates,
-      settings,
-      nzbFetcher: { fetch: async () => new Uint8Array([1]) },
-      sabFactory: () => ({
-        upload: async () => ({ jobId: "job" }),
-        getQueue: async () => [],
-        getHistory: async () => [],
-        testConnection: async () => undefined
-      }),
-      id: () => "attempt-1",
-      now: () => 1_000
-    });
-
-    await service.submit(input());
-    await expect(service.submit(input({ candidateId: "candidate-b" })))
-      .rejects.toMatchObject({ code: "CONFLICT" });
-  });
-
-  it("replays a Newznab submission that carries an ignored file name", async () => {
-    const repository = new MemoryDownloads();
-    const service = newznabService(repository);
-
-    const first = await service.submit(input({ submissionKey: "nz-ignored" }));
-    const replay = await service.submit(input({
-      submissionKey: "nz-ignored",
-      fileName: "Game.zip"
-    }));
-
-    expect(replay.id).toBe(first.id);
-  });
-
-  it("replays a Newznab submission whose first request carried a file name", async () => {
-    const repository = new MemoryDownloads();
-    const service = newznabService(repository);
-
-    const first = await service.submit(input({
-      submissionKey: "nz-dropped",
-      fileName: "Game.zip"
-    }));
-    const replay = await service.submit(input({ submissionKey: "nz-dropped" }));
-
-    expect(replay.id).toBe(first.id);
-  });
-
-  it("still matches a legacy Newznab fingerprint written before file selection existed", async () => {
-    const repository = new MemoryDownloads();
-    const service = newznabService(repository);
-    // Literal SHA-256 of JSON.stringify(["candidate-a", 1, 130]). Recomputing
-    // this expectation would let an incompatible fingerprint change silently
-    // invalidate every deployed Newznab replay.
-    const legacyFingerprint =
-      "f0422f33b09f2cb694977563c0a76941b8615836a92927f617ea2919de1ccc4f";
-    repository.attempts.set("legacy", {
-      id: "legacy",
-      libraryEntryId: "library-1-130",
-      submissionKey: "legacy-key",
-      requestFingerprint: legacyFingerprint,
-      status: "Queued",
-      source: "newznab",
-      releaseTitle: "Game.NSW-GROUP",
-      indexerId: "indexer",
-      indexerNameSnapshot: "Indexer",
-      indexerUrlSnapshot: "https://indexer.test",
-      newznabGuid: "guid",
-      iaFileName: null,
-      torrentHash: null,
-      size: 1234,
-      category: "games",
-      sabnzbdConfigRevision: 1,
-      sabMarker: "gamarr-legacy",
-      sabJobId: "job",
-      progress: 0,
-      failureDetail: null,
-      sabRequestStartedAt: null,
-      createdAt: 1,
-      updatedAt: 1,
-      completedAt: null
-    });
-
-    const replay = await service.submit(input({
-      submissionKey: "legacy-key",
-      fileName: "Game.zip"
-    }));
-
-    expect(replay.id).toBe("legacy");
-  });
-
-  it("uses history precedence and never regresses a terminal attempt", async () => {
-    const repository = new MemoryDownloads();
-    const service = new DownloadService({
-      repository,
-      candidates,
-      settings,
-      nzbFetcher: { fetch: async () => new Uint8Array([1]) },
-      sabFactory: () => ({
-        upload: async () => ({ jobId: "job" }),
-        getQueue: async () => [{
-          jobId: "job",
-          marker: "gamarr-attempt-1",
-          status: "Downloading",
-          progress: 50
-        }],
-        getHistory: async () => [{
-          jobId: "job",
-          marker: "gamarr-attempt-1",
-          status: "Completed",
-          progress: 100
-        }],
-        testConnection: async () => undefined
-      }),
-      id: () => "attempt-1",
-      now: () => 2_000
-    });
-    const queued = await service.submit(input({ submissionKey: "terminal" }));
-
-    const [completed] = await service.reconcile([queued.id]);
-    repository.update(queued.id, {
-      status: "Completed",
-      progress: 100,
-      completedAt: 2_000
-    });
-    const [stillCompleted] = await service.reconcile([queued.id]);
-
-    expect(completed).toMatchObject({ status: "Completed", progress: 100 });
-    expect(stillCompleted).toMatchObject({ status: "Completed", progress: 100 });
-  });
-
-  const postProcessing = [
-    "Queued",
-    "QuickCheck",
-    "Verifying",
-    "Repairing",
-    "Fetching",
-    "Extracting",
-    "Moving",
-    "Running"
-  ];
-
-  it.each(postProcessing)(
-    "leaves an attempt reconcilable while history reports %s",
-    async (historyStatus) => {
-      const repository = new MemoryDownloads();
-      const service = new DownloadService({
-        repository,
-        candidates,
-        settings,
-        nzbFetcher: { fetch: async () => new Uint8Array([1]) },
-        sabFactory: () => ({
-          upload: async () => ({ jobId: "job" }),
-          getQueue: async () => [],
-          getHistory: async () => [{
-            jobId: "job",
-            marker: "gamarr-attempt-1",
-            status: historyStatus,
-            progress: 0
-          }],
-          testConnection: async () => undefined
-        }),
-        id: () => "attempt-1",
-        now: () => 2_000
-      });
-      const queued = await service.submit(input({ submissionKey: historyStatus }));
-
-      const [reconciled] = await service.reconcile([queued.id]);
-
-      expect(reconciled).toMatchObject({
-        status: "Queued",
-        failureDetail: null,
-        completedAt: null
-      });
-    }
-  );
-
-  it("completes an attempt that finished post-processing after an earlier poll", async () => {
-    const repository = new MemoryDownloads();
-    let historyStatus = "Extracting";
-    const service = new DownloadService({
-      repository,
-      candidates,
-      settings,
-      nzbFetcher: { fetch: async () => new Uint8Array([1]) },
-      sabFactory: () => ({
-        upload: async () => ({ jobId: "job" }),
-        getQueue: async () => [],
-        getHistory: async () => [{
-          jobId: "job",
-          marker: "gamarr-attempt-1",
-          status: historyStatus,
-          progress: 100
-        }],
-        testConnection: async () => undefined
-      }),
-      id: () => "attempt-1",
-      now: () => 2_000
-    });
-    const queued = await service.submit(input({ submissionKey: "post-process" }));
-
-    const [midway] = await service.reconcile([queued.id]);
-    historyStatus = "Completed";
-    const [settled] = await service.reconcile([queued.id]);
-
-    expect(midway).toMatchObject({ status: "Queued", completedAt: null });
-    expect(settled).toMatchObject({
-      status: "Completed",
-      progress: 100,
-      completedAt: 2_000
-    });
-  });
-
-  it("marks a genuine history failure as Failed", async () => {
-    const repository = new MemoryDownloads();
-    const service = new DownloadService({
-      repository,
-      candidates,
-      settings,
-      nzbFetcher: { fetch: async () => new Uint8Array([1]) },
-      sabFactory: () => ({
-        upload: async () => ({ jobId: "job" }),
-        getQueue: async () => [],
-        getHistory: async () => [{
-          jobId: "job",
-          marker: "gamarr-attempt-1",
-          status: "Failed",
-          progress: 0
-        }],
-        testConnection: async () => undefined
-      }),
-      id: () => "attempt-1",
-      now: () => 2_000
-    });
-    const queued = await service.submit(input({ submissionKey: "real-failure" }));
-
-    const [reconciled] = await service.reconcile([queued.id]);
-
-    expect(reconciled).toMatchObject({
-      status: "Failed",
-      failureDetail: "Failed",
-      completedAt: null
-    });
-  });
-
-  it("marks a locally rejected upload Failed because nothing was submitted", async () => {
-    const repository = new MemoryDownloads();
-    const service = new DownloadService({
-      repository,
-      candidates,
-      settings,
-      nzbFetcher: { fetch: async () => new Uint8Array([1]) },
-      sabFactory: () => ({
-        upload: async () => {
-          throw validationError("NZB exceeds the configured upload limit");
-        },
-        getQueue: async () => [],
-        getHistory: async () => [],
-        testConnection: async () => undefined
-      }),
-      id: () => "attempt-1",
-      now: () => 1_000
-    });
-
-    const attempt = await service.submit(input({ submissionKey: "too-large" }));
-
-    expect(attempt).toMatchObject({
-      status: "Failed",
-      failureDetail: "NZB exceeds the configured upload limit",
-      sabJobId: null
-    });
-  });
-
-  it("marks an upload SABnzbd explicitly rejected as Failed", async () => {
-    const repository = new MemoryDownloads();
-    const service = new DownloadService({
-      repository,
-      candidates,
-      settings,
-      nzbFetcher: { fetch: async () => new Uint8Array([1]) },
-      sabFactory: () => ({
-        upload: async () => {
-          throw new SabnzbdUploadError("rejected", "SABnzbd rejected the upload");
-        },
-        getQueue: async () => [],
-        getHistory: async () => [],
-        testConnection: async () => undefined
-      }),
-      id: () => "attempt-1",
-      now: () => 1_000
-    });
-
-    const attempt = await service.submit(input({ submissionKey: "rejected" }));
-
-    expect(attempt).toMatchObject({
-      status: "Failed",
-      failureDetail: "SABnzbd rejected the upload"
-    });
-  });
-
-  it("keeps a server-side upload failure Unknown because it may have been accepted", async () => {
-    const repository = new MemoryDownloads();
-    const service = new DownloadService({
-      repository,
-      candidates,
-      settings,
-      nzbFetcher: { fetch: async () => new Uint8Array([1]) },
-      sabFactory: () => ({
-        upload: async () => {
-          throw new SabnzbdUploadError(
-            "ambiguous",
-            "SABnzbd did not confirm the upload"
-          );
-        },
-        getQueue: async () => [],
-        getHistory: async () => [],
-        testConnection: async () => undefined
-      }),
-      id: () => "attempt-1",
-      now: () => 1_000
-    });
-
-    const attempt = await service.submit(input({ submissionKey: "server-error" }));
-
-    expect(attempt).toMatchObject({
-      status: "Unknown",
-      failureDetail: "SABnzbd acknowledgement was not confirmed"
-    });
-  });
-});
-
-describe("DownloadService Internet Archive submissions", () => {
-  const iaCandidate = {
-    id: "candidate-ia",
-    expiresAt: 99_999,
-    source: "internet-archive" as const,
-    indexerId: null,
-    indexerConfigRevision: 0,
-    guid: "game-item",
-    title: "Game Name (USA)",
-    size: 4096,
-    downloadPath: "/details/game-item",
-    category: null,
-    sourceSnapshot: JSON.stringify({
-      indexerName: "Internet Archive",
-      identifier: "game-item",
-      origin: "https://archive.org"
-    }),
-    createdAt: 1
   };
-
-  const iaCandidates: CandidateRepository = {
-    save: () => undefined,
-    get: (id) => id === "candidate-ia" ? iaCandidate : null
-  };
-
-  const noSabSettings: SettingsRepository = {
-    ...settings,
-    getSabnzbd: () => null
-  };
-
-  /** File names are matched by exact equality, exactly as the Internet Archive
-   * metadata lookup does — the padded entries exist so tests can prove the
-   * service never trims a name on its way upstream. */
-  const itemFiles = [
-    { name: "Game.zip", size: 512 },
-    { name: " Game.zip", size: 999 },
-    { name: " Game (USA).zip ", size: 777 }
-  ];
-
-  const iaPort = (overrides: {
-    download?: () => Promise<{ bytes: number; filePath: string }>;
-  } = {}) => {
-    const calls = {
-      downloads: 0,
-      fileInfo: 0,
-      requestedFileNames: [] as string[],
-      downloadedFileNames: [] as string[]
-    };
-    const port = {
-      getFileInfo: async (
-        { fileName }: { identifier: string; fileName: string }
-      ) => {
-        calls.fileInfo += 1;
-        calls.requestedFileNames.push(fileName);
-        const file = itemFiles.find((value) => value.name === fileName);
-        return file
-          ? { name: file.name, size: file.size, format: "ZIP", source: "original" }
-          : null;
-      },
-      download: async (input: {
-        fileName: string;
-        onProgress: (received: number, total: number | null) => void;
-      }) => {
-        calls.downloads += 1;
-        calls.downloadedFileNames.push(input.fileName);
-        if (overrides.download) return overrides.download();
-        input.onProgress(256, 512);
-        input.onProgress(512, 512);
-        return { bytes: 512, filePath: "/downloads/game-item/Game.zip" };
-      },
-      downloadDir: "/downloads",
-      maxBytes: 1_048_576
-    };
-    return { port, calls };
-  };
-
-  const iaInput = (overrides: Partial<{
-    submissionKey: string;
-    fileName: string;
-  }> = {}) => ({
-    submissionKey: "ia-key",
-    candidateId: "candidate-ia",
-    gameId: 1,
-    platformId: 130,
-    fileName: "Game.zip",
-    ...overrides
-  });
-
-  /** `build` freezes the clock at 1_000, which is younger than the stale
-   * window, so no fixture it produces can ever look stale. Tests that exercise
-   * recovery or the heartbeat inject their own clock here instead. */
-  const buildWithClock = (
-    repository: MemoryDownloads,
-    port: ReturnType<typeof iaPort>["port"],
-    now: () => number,
-    extra: {
-      scheduleHeartbeat?: (
-        callback: () => void,
-        intervalMs: number
-      ) => () => void;
-    } = {}
-  ) => new DownloadService({
+  const service = new DownloadService({
     repository,
-    candidates: iaCandidates,
-    settings: noSabSettings,
-    nzbFetcher: { fetch: async () => new Uint8Array() },
-    sabFactory: () => ({
-      upload: async () => {
-        throw new Error("SABnzbd must not be used for direct downloads");
-      },
-      getQueue: async () => [],
-      getHistory: async () => [],
-      testConnection: async () => undefined
-    }),
-    internetArchive: port,
+    candidates,
+    settings,
+    releaseFetcher: { fetch },
+    sabFactory: () => sab,
+    torrentClient: () => options.torrentConfigured === false
+      ? null
+      : torrentClient,
+    maxTorrentBytes: 8 * 1024 * 1024,
     id: () => "attempt-1",
-    now,
-    ...extra
+    now: options.now ?? (() => 1_000)
   });
-
-  const build = (
-    repository: MemoryDownloads,
-    port: ReturnType<typeof iaPort>["port"]
-  ) => buildWithClock(repository, port, () => 1_000);
-
-  const torrentInput = (overrides: Partial<{
-    submissionKey: string;
-    delivery: "file" | "torrent";
-    fileName: string;
-  }> = {}) => ({
-    submissionKey: "torrent-key",
-    candidateId: "candidate-ia",
-    gameId: 1,
-    platformId: 130,
-    delivery: "torrent" as const,
-    ...overrides
-  });
-
-  const torrentSetup = (overrides: {
-    hash?: string | null;
-    itemTorrent?: { name: string; size: number | null } | null;
-    clientConfigured?: boolean;
-    addError?: unknown;
-    fetchError?: unknown;
-    torrents?: TorrentJob[];
-    listError?: unknown;
-    sabConfigured?: boolean;
-    sabError?: unknown;
-    now?: () => number;
-  } = {}) => {
-    const repository = new MemoryDownloads();
-    const add = vi.fn(async () => {
-      if (overrides.addError !== undefined) throw overrides.addError;
-      return { hash: overrides.hash === undefined ? "abc123" : overrides.hash };
-    });
-    const findTorrent = vi.fn(async () => overrides.itemTorrent === undefined
-      ? { name: "game-item_archive.torrent", size: 2048 }
-      : overrides.itemTorrent);
-    const fetchTorrent = vi.fn(async () => {
-      if (overrides.fetchError !== undefined) throw overrides.fetchError;
-      return new Uint8Array([1, 2, 3]);
-    });
-    const list = vi.fn(async () => {
-      if (overrides.listError !== undefined) throw overrides.listError;
-      return overrides.torrents ?? [];
-    });
-    const scheduleHeartbeat = vi.fn(() => () => undefined);
-    const service = new DownloadService({
-      repository,
-      candidates: iaCandidates,
-      settings: overrides.sabConfigured ? settings : noSabSettings,
-      nzbFetcher: { fetch: async () => new Uint8Array() },
-      sabFactory: () => ({
-        upload: async () => {
-          throw new Error("SABnzbd must not be used for torrent submissions");
-        },
-        getQueue: async () => {
-          if (overrides.sabError !== undefined) throw overrides.sabError;
-          return [];
-        },
-        getHistory: async () => [],
-        testConnection: async () => undefined
-      }),
-      internetArchiveTorrent: {
-        findTorrent,
-        fetchTorrent,
-        client: () => overrides.clientConfigured === false ? null : {
-          add,
-          list,
-          testConnection: async () => undefined
-        },
-        defaultCategory: () => "archive"
-      },
-      id: () => "attempt-1",
-      now: overrides.now ?? (() => 1_000),
-      scheduleHeartbeat
-    });
-    return {
-      service,
-      repository,
-      add,
-      list,
-      findTorrent,
-      fetchTorrent,
-      scheduleHeartbeat
-    };
+  return {
+    service,
+    repository,
+    fetch,
+    add,
+    upload,
+    listFiles,
+    setFilePriorities
   };
+}
 
-  const queuedTorrent = async (overrides: Parameters<typeof torrentSetup>[0] = {}) => {
-    const torrents: TorrentJob[] = [];
-    const setup = torrentSetup({ ...overrides, torrents });
-    const attempt = await setup.service.submit(torrentInput());
-    return { ...setup, attempt, torrents };
-  };
+describe("DownloadService submission by protocol", () => {
+  it("submits a torrent release to qBittorrent", async () => {
+    const { service, add, upload } = build();
 
-  it.each([
-    ["uploading", "Completed", 100],
-    ["stalledUP", "Completed", 100],
-    ["pausedUP", "Completed", 100],
-    ["queuedUP", "Completed", 100],
-    ["forcedUP", "Completed", 100],
-    ["checkingUP", "Completed", 100],
-    ["error", "Failed", 50],
-    ["missingFiles", "Failed", 50],
-    ["downloading", "Downloading", 50],
-    ["stalledDL", "Downloading", 50],
-    ["metaDL", "Downloading", 50],
-    ["forcedDL", "Downloading", 50],
-    ["checkingDL", "Downloading", 50],
-    ["allocating", "Downloading", 50],
-    ["queuedDL", "Queued", 50],
-    ["pausedDL", "Queued", 50],
-    ["checkingResumeData", "Queued", 50],
-    ["moving", "Queued", 50]
-  ] as const)("maps torrent state %s to %s", async (
-    state,
-    expectedStatus,
-    expectedProgress
-  ) => {
-    const { service, attempt, torrents } = await queuedTorrent();
-    torrents.push({
-      hash: "abc123",
-      tags: [attempt.sabMarker],
-      state,
-      progress: 50
-    });
-
-    const [result] = await service.reconcile([attempt.id]);
-
-    expect(result).toMatchObject({
-      status: expectedStatus,
-      progress: expectedProgress
-    });
-  });
-
-  it("leaves an unrecognised torrent state untouched", async () => {
-    const { service, attempt, torrents, list } = await queuedTorrent();
-    torrents.push({
-      hash: "abc123",
-      tags: [attempt.sabMarker],
-      state: "someFutureState",
-      progress: 50
-    });
-
-    const [result] = await service.reconcile([attempt.id]);
-
-    expect(result).toMatchObject({
-      status: "Queued",
-      progress: 0,
-      failureDetail: null,
-      completedAt: null
-    });
-    expect(list).toHaveBeenCalledOnce();
-  });
-
-  it("matches by tag and records the hash when none was returned by add", async () => {
-    const { service, attempt, torrents } = await queuedTorrent({ hash: null });
-    torrents.push({
-      hash: "abc123",
-      tags: ["other", attempt.sabMarker],
-      state: "uploading",
-      progress: 75
-    });
-
-    const [result] = await service.reconcile([attempt.id]);
-
-    expect(result).toMatchObject({
-      status: "Completed",
-      progress: 100,
-      torrentHash: "abc123",
-      failureDetail: null,
-      completedAt: 1_000
-    });
-  });
-
-  it("does not fall back to a matching tag when a different hash is recorded", async () => {
-    const { service, attempt, torrents, list } = await queuedTorrent();
-    torrents.push({
-      hash: "different-hash",
-      tags: [attempt.sabMarker],
-      state: "uploading",
-      progress: 100
-    });
-
-    const [result] = await service.reconcile([attempt.id]);
-
-    expect(result?.status).toBe("Queued");
-    expect(list).toHaveBeenCalledOnce();
-  });
-
-  it("clamps torrent progress to the attempt constraint", async () => {
-    const { service, attempt, torrents } = await queuedTorrent();
-    torrents.push({
-      hash: "abc123",
-      tags: [],
-      state: "downloading",
-      progress: 125
-    });
-
-    const [result] = await service.reconcile([attempt.id]);
-
-    expect(result).toMatchObject({ status: "Downloading", progress: 100 });
-  });
-
-  it("reconciles torrents with SABnzbd entirely unconfigured", async () => {
-    const { service, attempt, torrents } = await queuedTorrent();
-    torrents.push({
-      hash: "abc123",
-      tags: [attempt.sabMarker],
-      state: "uploading",
-      progress: 100
-    });
-
-    const [result] = await service.reconcile([attempt.id]);
-
-    expect(result?.status).toBe("Completed");
-  });
-
-  it("reconciles torrents when SABnzbd reconciliation fails", async () => {
-    const { service, attempt, torrents } = await queuedTorrent({
-      sabConfigured: true,
-      sabError: new Error("SABnzbd unavailable")
-    });
-    torrents.push({
-      hash: "abc123",
-      tags: [attempt.sabMarker],
-      state: "uploading",
-      progress: 100
-    });
-
-    const [result] = await service.reconcile([attempt.id]);
-
-    expect(result?.status).toBe("Completed");
-  });
-
-  it("still reconciles SABnzbd when torrent reconciliation fails", async () => {
-    const repository = new MemoryDownloads();
-    const list = vi.fn(async () => {
-      throw new Error("qBittorrent unavailable");
-    });
-    const service = new DownloadService({
-      repository,
-      candidates,
-      settings,
-      nzbFetcher: { fetch: async () => new Uint8Array([1]) },
-      sabFactory: () => ({
-        upload: async () => ({ jobId: "job" }),
-        getQueue: async () => [],
-        getHistory: async () => [{
-          jobId: "job",
-          marker: "gamarr-attempt-1",
-          status: "Completed",
-          progress: 100
-        }],
-        testConnection: async () => undefined
-      }),
-      internetArchiveTorrent: {
-        findTorrent: async () => null,
-        fetchTorrent: async () => new Uint8Array(),
-        client: () => ({
-          add: async () => ({ hash: null }),
-          list,
-          testConnection: async () => undefined
-        }),
-        defaultCategory: () => null
-      },
-      id: () => "attempt-1",
-      now: () => 2_000
-    });
-    const attempt = await service.submit(input({ submissionKey: "qbit-down" }));
-
-    const [result] = await service.reconcile([attempt.id]);
-
-    expect(result?.status).toBe("Completed");
-    expect(list).toHaveBeenCalledOnce();
-  });
-
-  it("swallows a torrent lookup failure and leaves its attempt reconcilable", async () => {
-    const { service, attempt, list } = await queuedTorrent({
-      listError: new Error("qBittorrent unavailable")
-    });
-
-    const [result] = await service.reconcile([attempt.id]);
-
-    expect(result?.status).toBe("Queued");
-    expect(list).toHaveBeenCalledOnce();
-  });
-
-  it("does not fail an in-flight torrent attempt during stale recovery", async () => {
-    const now = 1_000_000;
-    const { service, repository, attempt } = await queuedTorrent({
-      now: () => now
-    });
-    repository.update(attempt.id, {
-      status: "Downloading",
-      progress: 50,
-      updatedAt: now - 120_000
-    });
-
-    service.recoverStaleSubmissions(0);
-
-    expect(repository.get(attempt.id)).toMatchObject({
-      status: "Downloading",
-      progress: 50,
-      failureDetail: null
-    });
-  });
-
-  it("submits a torrent, records its hash, and does not start a heartbeat", async () => {
-    const {
-      service,
-      repository,
-      add,
-      fetchTorrent,
-      scheduleHeartbeat
-    } = torrentSetup();
-
-    const attempt = await service.submit(torrentInput());
+    const attempt = await service.submit(submission());
 
     expect(attempt).toMatchObject({
       status: "Queued",
-      source: "internet-archive-torrent",
-      iaFileName: null,
-      torrentHash: "abc123",
-      category: "archive"
+      source: "prowlarr-torrent",
+      torrentHash: "torrent-hash",
+      marker: "gamarr-attempt-1",
+      selectedFiles: []
     });
-    expect(repository.get(attempt.id)?.torrentHash).toBe("abc123");
-    expect(fetchTorrent).toHaveBeenCalledWith(
-      "game-item",
-      "game-item_archive.torrent"
-    );
     expect(add).toHaveBeenCalledWith({
-      torrent: new Uint8Array([1, 2, 3]),
-      filename: "game-item_archive.torrent",
-      category: "archive",
-      tag: `gamarr-${attempt.id}`
+      payload: {
+        torrent: torrentBytes,
+        filename: "gamarr-attempt-1.torrent"
+      },
+      category: "games",
+      tag: "gamarr-attempt-1"
     });
-    expect(scheduleHeartbeat).not.toHaveBeenCalled();
+    expect(upload).not.toHaveBeenCalled();
   });
 
-  it("queues a torrent when qBittorrent reports no hash", async () => {
-    const { service } = torrentSetup({ hash: null });
+  it("submits a magnet release to qBittorrent", async () => {
+    const { service, fetch, add } = build();
 
-    const attempt = await service.submit(torrentInput());
-
-    expect(attempt).toMatchObject({ status: "Queued", torrentHash: null });
-  });
-
-  it("replays an identical torrent submission without adding it again", async () => {
-    const { service, add } = torrentSetup();
-    const request = torrentInput();
-
-    const first = await service.submit(request);
-    const replay = await service.submit(request);
-
-    expect(replay.id).toBe(first.id);
-    expect(add).toHaveBeenCalledTimes(1);
-  });
-
-  it("conflicts when a torrent key is replayed as a direct file", async () => {
-    const { service } = torrentSetup();
-    await service.submit(torrentInput());
-
-    await expect(service.submit(torrentInput({
-      delivery: "file",
-      fileName: "Game.zip"
-    }))).rejects.toMatchObject({ code: "CONFLICT", status: 409 });
-  });
-
-  it("marks a rejected torrent Failed with its safe AppError detail", async () => {
-    const { service } = torrentSetup({
-      addError: new TorrentAddError(
-        "rejected",
-        "qBittorrent rejected the torrent"
-      )
-    });
-
-    const attempt = await service.submit(torrentInput());
+    const attempt = await service.submit(submission({
+      candidateId: "candidate-magnet"
+    }));
 
     expect(attempt).toMatchObject({
-      status: "Failed",
-      failureDetail: "qBittorrent rejected the torrent"
+      status: "Queued",
+      source: "prowlarr-torrent",
+      selectedFiles: []
+    });
+    expect(fetch).toHaveBeenCalledWith({
+      candidate: magnetCandidate,
+      magnetUrl: magnet,
+      maxBytes: 8 * 1024 * 1024
+    });
+    expect(add).toHaveBeenCalledWith({
+      payload: { magnet },
+      category: "games",
+      tag: "gamarr-attempt-1"
     });
   });
 
-  it("leaves a torrent Unknown when its acknowledgement is ambiguous", async () => {
-    const { service } = torrentSetup({
+  it("submits a usenet release to SABnzbd", async () => {
+    const { service, fetch, add, upload } = build();
+
+    const attempt = await service.submit(submission({
+      candidateId: "candidate-usenet"
+    }));
+
+    expect(attempt).toMatchObject({
+      status: "Queued",
+      source: "prowlarr-usenet",
+      sabJobId: "sab-job",
+      selectedFiles: null
+    });
+    expect(fetch).toHaveBeenCalledWith({
+      candidate: usenetCandidate,
+      magnetUrl: null,
+      maxBytes: 1_048_576
+    });
+    expect(upload).toHaveBeenCalledWith({
+      filename: "gamarr-attempt-1.nzb",
+      bytes: new Uint8Array([1, 2, 3]),
+      category: "games",
+      marker: "gamarr-attempt-1"
+    });
+    expect(add).not.toHaveBeenCalled();
+  });
+
+  it("stores resolved names alongside selected file indices", async () => {
+    const { service } = build();
+
+    const attempt = await service.submit(submission({ selectedFiles: [1, 0] }));
+
+    expect(attempt.selectedFiles).toEqual([
+      { index: 0, name: "Collection/a.xci" },
+      { index: 1, name: "Collection/sub/b.xci" }
+    ]);
+  });
+
+  it("rejects a selected index the torrent does not contain", async () => {
+    const { service, repository, add } = build();
+
+    await expect(service.submit(submission({ selectedFiles: [2] })))
+      .rejects.toMatchObject({
+        code: "VALIDATION",
+        status: 400,
+        message: "Selected torrent file is not available"
+      });
+    expect(add).not.toHaveBeenCalled();
+    expect(repository.list()).toHaveLength(1);
+    expect(repository.list()[0]).toMatchObject({
+      status: "Failed",
+      failureDetail: "Selected torrent file is not available"
+    });
+  });
+
+  it("rejects a file selection on a magnet release", async () => {
+    const { service, repository, add } = build();
+
+    await expect(service.submit(submission({
+      candidateId: "candidate-magnet",
+      selectedFiles: [0]
+    }))).rejects.toMatchObject({
+      code: "VALIDATION",
+      status: 400,
+      message: "File selection is not available for a magnet release"
+    });
+    expect(add).not.toHaveBeenCalled();
+    expect(repository.list()[0]).toMatchObject({
+      status: "Failed",
+      failureDetail: "File selection is not available for a magnet release"
+    });
+  });
+
+  it("parks an ambiguous add in Unknown", async () => {
+    const { service } = build({
       addError: new TorrentAddError(
         "ambiguous",
         "qBittorrent did not confirm the torrent"
       )
     });
 
-    const attempt = await service.submit(torrentInput());
+    const attempt = await service.submit(submission());
 
     expect(attempt).toMatchObject({
       status: "Unknown",
@@ -1104,455 +458,541 @@ describe("DownloadService Internet Archive submissions", () => {
     });
   });
 
-  it("redacts a raw qBittorrent error from failure detail", async () => {
-    const { service } = torrentSetup({
-      addError: new Error("request failed at http://admin:secret@qbit.test")
-    });
+  it("returns the existing attempt when a submission key replays", async () => {
+    const { service, fetch, add } = build();
+    const request = submission();
 
-    const attempt = await service.submit(torrentInput());
+    const first = await service.submit(request);
+    const replay = await service.submit(request);
 
-    expect(attempt).toMatchObject({
-      status: "Unknown",
-      failureDetail: "qBittorrent acknowledgement was not confirmed"
-    });
-    expect(attempt.failureDetail).not.toContain("admin:secret");
+    expect(replay).toEqual(first);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(add).toHaveBeenCalledTimes(1);
   });
 
-  it("rejects a torrent submission when qBittorrent is not configured", async () => {
-    const { service, repository } = torrentSetup({ clientConfigured: false });
+  it("fails a replay whose selection differs", async () => {
+    const { service, add } = build();
+    await service.submit(submission({ selectedFiles: [0] }));
 
-    await expect(service.submit(torrentInput())).rejects.toMatchObject({
-      code: "VALIDATION",
-      status: 400,
-      message: "qBittorrent is not configured"
+    await expect(service.submit(submission({ selectedFiles: [1] })))
+      .rejects.toMatchObject({ code: "CONFLICT", status: 409 });
+    expect(add).toHaveBeenCalledTimes(1);
+  });
+
+  it("hashes a selection identically regardless of index order", async () => {
+    const { service, add } = build();
+
+    const first = await service.submit(submission({ selectedFiles: [1, 0] }));
+    const replay = await service.submit(submission({ selectedFiles: [0, 1] }));
+
+    expect(replay.id).toBe(first.id);
+    expect(first.requestFingerprint).toBe(
+      "0db20d75ae02fe0de0e07a4dcf8dd9b50da590d0a88c1e3e84d9881f014dbcde"
+    );
+    expect(add).toHaveBeenCalledTimes(1);
+  });
+
+  it("still matches a legacy newznab attempt on replay", async () => {
+    const repository = new MemoryDownloads();
+    const legacy = storedAttempt({
+      submissionKey: "legacy-newznab",
+      requestFingerprint:
+        "f0422f33b09f2cb694977563c0a76941b8615836a92927f617ea2919de1ccc4f",
+      source: "newznab"
     });
-    expect(repository.list()).toHaveLength(0);
+    repository.attempts.set(legacy.id, legacy);
+    const { service, fetch, add, upload } = build({ repository });
+
+    const replay = await service.submit(submission({
+      submissionKey: "legacy-newznab",
+      candidateId: "candidate-a"
+    }));
+
+    expect(replay).toEqual(legacy);
+    expect(fetch).not.toHaveBeenCalled();
+    expect(add).not.toHaveBeenCalled();
+    expect(upload).not.toHaveBeenCalled();
   });
 
-  it("rejects a torrent submission for an item with no torrent", async () => {
-    const { service, repository } = torrentSetup({ itemTorrent: null });
-
-    await expect(service.submit(torrentInput())).rejects.toMatchObject({
-      code: "VALIDATION",
-      status: 400,
-      message: "This item has no torrent; download a file instead"
+  it("still matches a legacy internet-archive attempt on replay", async () => {
+    const repository = new MemoryDownloads();
+    const legacy = storedAttempt({
+      submissionKey: "legacy-archive",
+      requestFingerprint:
+        "79751ab50f861ae192664dcecd5cf6fd444d5b28a9cad79210e7eb7a8ff97319",
+      source: "internet-archive",
+      iaFileName: "Game.zip"
     });
-    expect(repository.list()).toHaveLength(0);
+    repository.attempts.set(legacy.id, legacy);
+    const { service, fetch, add, upload } = build({ repository });
+
+    const replay = await service.submit(submission({
+      submissionKey: "legacy-archive",
+      candidateId: "candidate-a"
+    }));
+
+    expect(replay).toEqual(legacy);
+    expect(fetch).not.toHaveBeenCalled();
+    expect(add).not.toHaveBeenCalled();
+    expect(upload).not.toHaveBeenCalled();
   });
 
-  it("rejects a torrent submission that also names a file", async () => {
-    const { service, findTorrent, repository } = torrentSetup();
+  it("never contains an external await inside the claim transaction", async () => {
+    const events: string[] = [];
+    const repository = new MemoryDownloads(events);
+    const { service } = build({ repository, events });
 
-    await expect(service.submit(torrentInput({ fileName: "Game.zip" })))
-      .rejects.toMatchObject({
-        code: "VALIDATION",
-        status: 400,
-        message: "A torrent covers the whole item; do not select a file"
-      });
-    expect(findTorrent).not.toHaveBeenCalled();
-    expect(repository.list()).toHaveLength(0);
+    await service.submit(submission());
+
+    expect(events).toEqual(["claim-start", "claim-end", "fetch"]);
+  });
+});
+
+describe("DownloadService submission safety", () => {
+  it("uses a synthetic filename rather than a provider guid", async () => {
+    const secretCandidate = candidate("usenet", {
+      id: "candidate-secret-guid",
+      guid: "https://provider.test/details?token=provider-secret"
+    });
+    candidateRecords.set(secretCandidate.id, secretCandidate);
+    const { service, upload } = build();
+
+    await service.submit(submission({
+      submissionKey: "safe-filename",
+      candidateId: secretCandidate.id
+    }));
+
+    const uploadInput = upload.mock.calls[0]?.[0];
+    expect(uploadInput?.filename).toBe("gamarr-attempt-1.nzb");
+    expect(JSON.stringify(uploadInput)).not.toContain("provider-secret");
   });
 
-  it("fails torrent retrieval without exposing a raw upstream error", async () => {
-    const { service, add } = torrentSetup({
+  it("does not persist a raw fetch error that contains the Prowlarr key", async () => {
+    const { service } = build({
       fetchError: new Error(
-        "fetch failed for https://user:secret@archive.invalid/torrent"
+        "request failed for http://prowlarr.test/?apikey=prowlarr-secret-key"
       )
     });
 
-    const attempt = await service.submit(torrentInput());
+    const attempt = await service.submit(submission());
 
     expect(attempt).toMatchObject({
       status: "Failed",
-      failureDetail: "Torrent retrieval failed"
+      failureDetail: "Release payload retrieval failed"
     });
-    expect(add).not.toHaveBeenCalled();
+    expect(JSON.stringify(attempt)).not.toContain("prowlarr-secret-key");
   });
 
-  it("claims, downloads outside the request, and completes without SABnzbd", async () => {
-    const repository = new MemoryDownloads();
-    const { port, calls } = iaPort();
-    const service = build(repository, port);
+  it("keeps an ambiguous SABnzbd acknowledgement Unknown", async () => {
+    const { service } = build({
+      uploadError: new SabnzbdUploadError(
+        "ambiguous",
+        "SABnzbd did not confirm the upload"
+      )
+    });
 
-    const attempt = await service.submit(iaInput());
+    const attempt = await service.submit(submission({
+      candidateId: "candidate-usenet"
+    }));
 
     expect(attempt).toMatchObject({
+      status: "Unknown",
+      failureDetail: "SABnzbd acknowledgement was not confirmed"
+    });
+  });
+
+  it("rejects a submission key reused for a different candidate", async () => {
+    const { service } = build();
+    await service.submit(submission({ candidateId: "candidate-torrent" }));
+
+    await expect(service.submit(submission({ candidateId: "candidate-magnet" })))
+      .rejects.toMatchObject({ code: "CONFLICT", status: 409 });
+  });
+
+  it("derives legacy fingerprints from stored fields, not request-only data", () => {
+    expect(fingerprint(["candidate-a", 1, 130])).toBe(
+      "f0422f33b09f2cb694977563c0a76941b8615836a92927f617ea2919de1ccc4f"
+    );
+    expect(fingerprint(["candidate-a", 1, 130, "Game.zip"])).toBe(
+      "79751ab50f861ae192664dcecd5cf6fd444d5b28a9cad79210e7eb7a8ff97319"
+    );
+  });
+});
+
+describe("DownloadService torrent reconciliation and recovery", () => {
+  it("reconciles a prowlarr torrent by hash", async () => {
+    const repository = new MemoryDownloads();
+    const attempt = storedAttempt({
+      id: "prowlarr-by-hash",
+      submissionKey: "prowlarr-by-hash-key",
+      status: "Queued",
+      source: "prowlarr-torrent",
+      torrentHash: "hash-from-add",
+      selectedFiles: [],
+      marker: "gamarr-prowlarr-by-hash",
+      sabJobId: null
+    });
+    repository.attempts.set(attempt.id, attempt);
+    const { service } = build({
+      repository,
+      torrents: [{
+        hash: "hash-from-add",
+        tags: [],
+        state: "downloading",
+        progress: 41.6
+      }]
+    });
+
+    const [reconciled] = await service.reconcile([attempt.id]);
+
+    expect(reconciled).toMatchObject({
       status: "Downloading",
-      source: "internet-archive",
-      indexerId: null,
-      indexerNameSnapshot: "Internet Archive",
-      indexerUrlSnapshot: "https://archive.org",
-      iaFileName: "Game.zip",
-      sabJobId: null,
-      size: 512
+      progress: 42,
+      torrentHash: "hash-from-add",
+      failureDetail: null
     });
-    await vi.waitFor(() => {
-      expect(repository.get(attempt.id)?.status).toBe("Completed");
+  });
+
+  it("reconciles a prowlarr torrent by tag when no hash was returned", async () => {
+    const repository = new MemoryDownloads();
+    const attempt = storedAttempt({
+      id: "prowlarr-by-tag",
+      submissionKey: "prowlarr-by-tag-key",
+      status: "Unknown",
+      source: "prowlarr-torrent",
+      torrentHash: null,
+      selectedFiles: [],
+      marker: "gamarr-prowlarr-by-tag",
+      sabJobId: null
     });
-    expect(repository.get(attempt.id)).toMatchObject({
+    repository.attempts.set(attempt.id, attempt);
+    const { service } = build({
+      repository,
+      torrents: [{
+        hash: "hash-found-by-tag",
+        tags: ["unrelated", "gamarr-prowlarr-by-tag"],
+        state: "downloading",
+        progress: 12
+      }]
+    });
+
+    const [reconciled] = await service.reconcile([attempt.id]);
+
+    expect(reconciled).toMatchObject({
+      status: "Downloading",
+      progress: 12,
+      torrentHash: "hash-found-by-tag",
+      failureDetail: null
+    });
+  });
+
+  it("still reconciles a legacy internet-archive-torrent attempt", async () => {
+    const repository = new MemoryDownloads();
+    const attempt = storedAttempt({
+      id: "legacy-torrent",
+      submissionKey: "legacy-torrent-key",
+      status: "Queued",
+      source: "internet-archive-torrent",
+      torrentHash: "legacy-hash",
+      selectedFiles: null,
+      marker: "gamarr-legacy-torrent",
+      sabJobId: null
+    });
+    repository.attempts.set(attempt.id, attempt);
+    const { service } = build({
+      repository,
+      torrents: [{
+        hash: "legacy-hash",
+        tags: ["gamarr-legacy-torrent"],
+        state: "stalledUP",
+        progress: 100
+      }]
+    });
+
+    const [reconciled] = await service.reconcile([attempt.id]);
+
+    expect(reconciled).toMatchObject({
+      status: "Completed",
       progress: 100,
-      size: 512,
       completedAt: 1_000,
-      failureDetail: null
+      torrentHash: "legacy-hash"
     });
-    expect(calls.downloads).toBe(1);
   });
 
-  it("marks the attempt Failed when the archive node fails mid-stream", async () => {
+  it("skips file application until metadata arrives", async () => {
     const repository = new MemoryDownloads();
-    const { port } = iaPort({
-      // AppError, matching what InternetArchiveDownloader actually throws —
-      // only those messages are written to be shown to an operator.
-      download: async () => {
-        throw new AppError(
-          "UNAVAILABLE",
-          502,
-          "Internet Archive file exceeded the size limit"
-        );
-      }
+    const attempt = storedAttempt({
+      id: "metadata-pending",
+      submissionKey: "metadata-pending-key",
+      source: "prowlarr-torrent",
+      torrentHash: "metadata-hash",
+      selectedFiles: [{ index: 1, name: "Collection/b.xci" }],
+      marker: "gamarr-metadata-pending"
     });
-    const service = build(repository, port);
-
-    const attempt = await service.submit(iaInput({ submissionKey: "ia-fail" }));
-
-    await vi.waitFor(() => {
-      expect(repository.get(attempt.id)?.status).toBe("Failed");
+    repository.attempts.set(attempt.id, attempt);
+    const { service, listFiles, setFilePriorities } = build({
+      repository,
+      torrents: [{
+        hash: "metadata-hash",
+        tags: ["gamarr-metadata-pending"],
+        state: "downloading",
+        progress: 10
+      }],
+      fileLists: [
+        [],
+        [
+          { index: 0, name: "Collection/a.xci" },
+          { index: 1, name: "Collection/b.xci" }
+        ]
+      ]
     });
-    expect(repository.get(attempt.id)?.failureDetail)
-      .toBe("Internet Archive file exceeded the size limit");
+
+    await service.reconcile([attempt.id]);
+
+    expect(repository.get(attempt.id)?.filesAppliedAt).toBeNull();
+    expect(setFilePriorities).not.toHaveBeenCalled();
+
+    await service.reconcile([attempt.id]);
+
+    expect(listFiles).toHaveBeenCalledTimes(2);
+    expect(setFilePriorities).toHaveBeenCalledWith(
+      "metadata-hash",
+      [0],
+      0
+    );
+    expect(repository.get(attempt.id)?.filesAppliedAt).toBe(1_000);
   });
 
-  it("does not persist the message of a non-AppError failure", async () => {
+  it("deprioritises every unselected file", async () => {
     const repository = new MemoryDownloads();
-    // A raw node:fs error: its message carries the absolute download path, and
-    // `failureDetail` is persisted and rendered in Activity. Only AppError
-    // messages are written to be seen, so anything else must be replaced.
-    const { port } = iaPort({
-      download: async () => {
-        throw new Error(
-          "EACCES: permission denied, mkdir '/config/downloads/game-item'"
-        );
-      }
+    const attempt = storedAttempt({
+      id: "subset-selection",
+      submissionKey: "subset-selection-key",
+      source: "prowlarr-torrent",
+      torrentHash: "subset-hash",
+      selectedFiles: [{ index: 1, name: "Collection/b.xci" }],
+      marker: "gamarr-subset-selection"
     });
-    const service = build(repository, port);
-
-    const attempt = await service.submit(iaInput({ submissionKey: "ia-raw" }));
-
-    await vi.waitFor(() => {
-      expect(repository.get(attempt.id)?.status).toBe("Failed");
+    repository.attempts.set(attempt.id, attempt);
+    const { service, setFilePriorities } = build({
+      repository,
+      torrents: [{
+        hash: "subset-hash",
+        tags: ["gamarr-subset-selection"],
+        state: "downloading",
+        progress: 10
+      }],
+      fileLists: [[
+        { index: 0, name: "Collection/a.xci" },
+        { index: 1, name: "Collection/b.xci" },
+        { index: 2, name: "Collection/c.xci" }
+      ]]
     });
-    const detail = repository.get(attempt.id)?.failureDetail;
-    expect(detail).toBe("Internet Archive download failed");
-    expect(detail).not.toContain("/config/downloads");
-    expect(detail).not.toContain("EACCES");
+
+    await service.reconcile([attempt.id]);
+
+    expect(setFilePriorities).toHaveBeenCalledOnce();
+    expect(setFilePriorities).toHaveBeenCalledWith(
+      "subset-hash",
+      [0, 2],
+      0
+    );
   });
 
-  it("replays the same submission key and conflicts on a different file", async () => {
+  it("makes no priority call when every file is selected", async () => {
     const repository = new MemoryDownloads();
-    const { port, calls } = iaPort();
-    const service = build(repository, port);
-
-    const first = await service.submit(iaInput());
-    await vi.waitFor(() => {
-      expect(repository.get(first.id)?.status).toBe("Completed");
+    const attempt = storedAttempt({
+      id: "all-selected",
+      submissionKey: "all-selected-key",
+      source: "prowlarr-torrent",
+      torrentHash: "all-selected-hash",
+      selectedFiles: [
+        { index: 0, name: "Collection/a.xci" },
+        { index: 1, name: "Collection/b.xci" }
+      ],
+      marker: "gamarr-all-selected"
     });
-    const second = await service.submit(iaInput());
+    repository.attempts.set(attempt.id, attempt);
+    const { service, setFilePriorities } = build({
+      repository,
+      torrents: [{
+        hash: "all-selected-hash",
+        tags: ["gamarr-all-selected"],
+        state: "downloading",
+        progress: 10
+      }],
+      fileLists: [[
+        { index: 0, name: "Collection/a.xci" },
+        { index: 1, name: "Collection/b.xci" }
+      ]]
+    });
 
-    expect(second.id).toBe(first.id);
-    expect(calls.downloads).toBe(1);
-    await expect(service.submit(iaInput({ fileName: "Other.zip" })))
-      .rejects.toMatchObject({ code: "CONFLICT" });
+    await service.reconcile([attempt.id]);
+
+    expect(setFilePriorities).not.toHaveBeenCalled();
+    expect(repository.get(attempt.id)?.filesAppliedAt).toBe(1_000);
   });
 
-  it("requires a file selection for Internet Archive candidates", async () => {
+  it("stamps filesAppliedAt exactly once", async () => {
     const repository = new MemoryDownloads();
-    const { port } = iaPort();
-    const service = build(repository, port);
+    let timestamp = 1_000;
+    const attempt = storedAttempt({
+      id: "stamp-once",
+      submissionKey: "stamp-once-key",
+      source: "prowlarr-torrent",
+      torrentHash: "stamp-once-hash",
+      selectedFiles: [{ index: 0, name: "Collection/a.xci" }],
+      marker: "gamarr-stamp-once"
+    });
+    repository.attempts.set(attempt.id, attempt);
+    const { service, listFiles, setFilePriorities } = build({
+      repository,
+      torrents: [{
+        hash: "stamp-once-hash",
+        tags: ["gamarr-stamp-once"],
+        state: "downloading",
+        progress: 10
+      }],
+      fileLists: [[
+        { index: 0, name: "Collection/a.xci" },
+        { index: 1, name: "Collection/b.xci" }
+      ]],
+      now: () => timestamp
+    });
 
-    await expect(service.submit({
-      submissionKey: "no-file",
-      candidateId: "candidate-ia",
-      gameId: 1,
-      platformId: 130
-    })).rejects.toMatchObject({ code: "VALIDATION" });
-    await expect(service.submit(iaInput({ fileName: "../escape" })))
-      .rejects.toMatchObject({ code: "VALIDATION" });
-    expect(repository.list()).toHaveLength(0);
+    await service.reconcile([attempt.id]);
+    timestamp = 2_000;
+    await service.reconcile([attempt.id]);
+
+    expect(listFiles).toHaveBeenCalledOnce();
+    expect(setFilePriorities).toHaveBeenCalledOnce();
+    expect(repository.get(attempt.id)?.filesAppliedAt).toBe(1_000);
   });
 
-  it("rejects a file the item no longer lists before claiming anything", async () => {
+  it("resumes file application after a restart", async () => {
     const repository = new MemoryDownloads();
-    const { port } = iaPort();
-    const service = build(repository, port);
-
-    await expect(service.submit(iaInput({ fileName: "Missing.zip" })))
-      .rejects.toMatchObject({
-        code: "VALIDATION",
-        message: "The selected file is no longer available; search again"
-      });
-    expect(repository.list()).toHaveLength(0);
-  });
-
-  it("uses a listed file name verbatim when it carries surrounding whitespace", async () => {
-    const repository = new MemoryDownloads();
-    const { port, calls } = iaPort();
-    const service = build(repository, port);
-
-    const attempt = await service.submit(iaInput({
-      submissionKey: "ia-padded",
-      fileName: " Game (USA).zip "
-    }));
-
-    expect(calls.requestedFileNames).toEqual([" Game (USA).zip "]);
-    expect(attempt).toMatchObject({
-      status: "Downloading",
-      iaFileName: " Game (USA).zip ",
-      size: 777
+    const attempt = storedAttempt({
+      id: "restart-selection",
+      submissionKey: "restart-selection-key",
+      source: "prowlarr-torrent",
+      torrentHash: "restart-hash",
+      selectedFiles: [{ index: 1, name: "Collection/b.xci" }],
+      marker: "gamarr-restart-selection"
     });
-    await vi.waitFor(() => {
-      expect(repository.get(attempt.id)?.status).toBe("Completed");
-    });
-    expect(calls.downloadedFileNames).toEqual([" Game (USA).zip "]);
-  });
-
-  it("rejects a whitespace-only file name before touching the network", async () => {
-    const repository = new MemoryDownloads();
-    const { port, calls } = iaPort();
-    const service = build(repository, port);
-
-    await expect(service.submit(iaInput({ fileName: "   " })))
-      .rejects.toMatchObject({ code: "VALIDATION" });
-    expect(calls.fileInfo).toBe(0);
-    expect(repository.list()).toHaveLength(0);
-  });
-
-  it("treats two item files differing only by whitespace as different files", async () => {
-    const repository = new MemoryDownloads();
-    const { port } = iaPort();
-    const service = build(repository, port);
-
-    const padded = await service.submit(iaInput({
-      submissionKey: "ia-distinct",
-      fileName: " Game.zip"
-    }));
-
-    expect(padded).toMatchObject({ iaFileName: " Game.zip", size: 999 });
-  });
-
-  it("treats a padded Internet Archive name as a different submission", async () => {
-    const repository = new MemoryDownloads();
-    const { port } = iaPort();
-    const service = build(repository, port);
-
-    await service.submit(iaInput({ submissionKey: "ia-identity" }));
-
-    await expect(service.submit(iaInput({
-      submissionKey: "ia-identity",
-      fileName: " Game.zip"
-    }))).rejects.toMatchObject({ code: "CONFLICT" });
-  });
-
-  it("conflicts when an Internet Archive key is replayed with no file name", async () => {
-    const repository = new MemoryDownloads();
-    const { port } = iaPort();
-    const service = build(repository, port);
-
-    await service.submit(iaInput({ submissionKey: "ia-nofile" }));
-
-    await expect(service.submit({
-      submissionKey: "ia-nofile",
-      candidateId: "candidate-ia",
-      gameId: 1,
-      platformId: 130
-    })).rejects.toMatchObject({ code: "CONFLICT" });
-  });
-
-  it("returns Internet Archive attempts from reconcile without SABnzbd settings", async () => {
-    const repository = new MemoryDownloads();
-    const { port } = iaPort();
-    const service = build(repository, port);
-
-    const attempt = await service.submit(iaInput({ submissionKey: "ia-poll" }));
-    await vi.waitFor(() => {
-      expect(repository.get(attempt.id)?.status).toBe("Completed");
-    });
-
-    const [returned] = await service.reconcile([attempt.id]);
-    expect(returned).toMatchObject({ id: attempt.id, status: "Completed" });
-  });
-
-  const CLOCK = 1_000_000;
-
-  const fixture = (overrides: Partial<DownloadAttempt>): DownloadAttempt => ({
-    id: "seeded",
-    libraryEntryId: "library",
-    submissionKey: "seeded-key",
-    requestFingerprint: "fingerprint",
-    status: "Downloading",
-    source: "internet-archive",
-    releaseTitle: "Game",
-    indexerId: null,
-    indexerNameSnapshot: "Internet Archive",
-    indexerUrlSnapshot: "https://archive.org",
-    newznabGuid: null,
-    iaFileName: "Game.zip",
-    torrentHash: null,
-    size: null,
-    category: null,
-    sabnzbdConfigRevision: 0,
-    sabMarker: "gamarr-seeded",
-    sabJobId: null,
-    progress: 40,
-    failureDetail: null,
-    sabRequestStartedAt: null,
-    createdAt: 1,
-    updatedAt: CLOCK - 120_000,
-    completedAt: null,
-    ...overrides
-  });
-
-  it("fails abandoned Internet Archive downloads without touching live ones", () => {
-    const repository = new MemoryDownloads();
-    const live = fixture({ id: "ia-live", updatedAt: CLOCK - 1_000 });
-    repository.attempts.set("ia-stale", fixture({ id: "ia-stale" }));
-    repository.attempts.set("ia-pending", fixture({
-      id: "ia-pending",
-      status: "Pending"
-    }));
-    repository.attempts.set("ia-live", live);
-    repository.attempts.set("nz-stuck", fixture({
-      id: "nz-stuck",
-      source: "newznab",
-      submissionKey: "nz-key",
-      sabMarker: "gamarr-nz"
-    }));
-    const { port } = iaPort();
-    const service = buildWithClock(repository, port, () => CLOCK);
-
-    service.recoverStaleSubmissions();
-
-    expect(repository.get("ia-stale")).toMatchObject({
-      status: "Failed",
-      failureDetail: "Download was interrupted before completion"
-    });
-    expect(repository.get("ia-pending")?.status).toBe("Failed");
-    // Unchanged object identity of every field: a heartbeat this recent means
-    // the stream is alive, so recovery must not write to the row at all.
-    expect(repository.get("ia-live")).toEqual(live);
-    expect(repository.get("nz-stuck")?.status).toBe("Downloading");
-  });
-
-  it("leaves terminal Internet Archive attempts alone during recovery", () => {
-    const repository = new MemoryDownloads();
-    const completed = fixture({
-      id: "ia-done",
-      status: "Completed",
-      progress: 100,
-      completedAt: 5
-    });
-    const failed = fixture({
-      id: "ia-failed",
-      status: "Failed",
-      failureDetail: "earlier failure"
-    });
-    repository.attempts.set("ia-done", completed);
-    repository.attempts.set("ia-failed", failed);
-    const { port } = iaPort();
-    const service = buildWithClock(repository, port, () => CLOCK);
-
-    service.recoverStaleSubmissions();
-
-    expect(repository.get("ia-done")).toEqual(completed);
-    expect(repository.get("ia-failed")).toEqual(failed);
-  });
-
-  it("keeps a streaming download alive across a repeated recovery pass", async () => {
-    const repository = new MemoryDownloads();
-    let release: (() => void) | undefined;
-    const blocked = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    const { port } = iaPort({
-      download: async () => {
-        await blocked;
-        return { bytes: 512, filePath: "/downloads/game-item/Game.zip" };
-      }
-    });
-    const service = buildWithClock(repository, port, () => CLOCK);
-
-    const attempt = await service.submit(iaInput({ submissionKey: "ia-hmr" }));
-    service.recoverStaleSubmissions();
-
-    expect(repository.get(attempt.id)).toMatchObject({
-      status: "Downloading",
-      failureDetail: null
-    });
-
-    release?.();
-    await vi.waitFor(() => {
-      expect(repository.get(attempt.id)?.status).toBe("Completed");
-    });
-  });
-
-  it("heartbeats a stalled download that never reports progress", async () => {
-    const repository = new MemoryDownloads();
-    let clock = CLOCK;
-    let release: (() => void) | undefined;
-    const blocked = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    const { port } = iaPort({
-      download: async () => {
-        await blocked;
-        return { bytes: 512, filePath: "/downloads/game-item/Game.zip" };
-      }
-    });
-    let tick: (() => void) | undefined;
-    let cancelled = false;
-    const service = buildWithClock(repository, port, () => clock, {
-      scheduleHeartbeat: (callback) => {
-        tick = callback;
-        return () => {
-          cancelled = true;
-        };
-      }
-    });
-
-    const attempt = await service.submit(iaInput({ submissionKey: "ia-beat" }));
-    expect(repository.get(attempt.id)?.updatedAt).toBe(CLOCK);
-
-    clock = CLOCK + 5_000;
-    tick?.();
-
-    expect(repository.get(attempt.id)).toMatchObject({
-      status: "Downloading",
-      progress: 0,
-      updatedAt: CLOCK + 5_000
-    });
-
-    release?.();
-    await vi.waitFor(() => {
-      expect(repository.get(attempt.id)?.status).toBe("Completed");
-    });
-    expect(cancelled).toBe(true);
-  });
-
-  it("refuses to move a terminal attempt back to a non-terminal status", () => {
-    const repository = new MemoryDownloads();
-    const completed = fixture({
-      id: "ia-done",
-      status: "Completed",
-      progress: 100,
-      completedAt: 5
-    });
-    repository.attempts.set("ia-done", completed);
-
-    const result = repository.update("ia-done", {
-      status: "Downloading",
+    repository.attempts.set(attempt.id, attempt);
+    const torrent: TorrentJob = {
+      hash: "restart-hash",
+      tags: ["gamarr-restart-selection"],
+      state: "downloading",
       progress: 10
+    };
+    const beforeRestart = build({
+      repository,
+      torrents: [torrent],
+      fileLists: [[]]
     });
 
-    expect(result).toEqual(completed);
-    expect(repository.get("ia-done")).toEqual(completed);
+    await beforeRestart.service.reconcile([attempt.id]);
+    expect(repository.get(attempt.id)?.filesAppliedAt).toBeNull();
+
+    const afterRestart = build({
+      repository,
+      torrents: [torrent],
+      fileLists: [[
+        { index: 0, name: "Collection/a.xci" },
+        { index: 1, name: "Collection/b.xci" }
+      ]]
+    });
+
+    await afterRestart.service.reconcile([attempt.id]);
+
+    expect(afterRestart.setFilePriorities).toHaveBeenCalledWith(
+      "restart-hash",
+      [0],
+      0
+    );
+    expect(repository.get(attempt.id)?.filesAppliedAt).toBe(1_000);
+  });
+
+  it("aborts application when a name no longer matches its index", async () => {
+    const repository = new MemoryDownloads();
+    const attempt = storedAttempt({
+      id: "name-mismatch",
+      submissionKey: "name-mismatch-key",
+      source: "prowlarr-torrent",
+      torrentHash: "mismatch-hash",
+      selectedFiles: [{ index: 1, name: "Collection/b.xci" }],
+      marker: "gamarr-name-mismatch"
+    });
+    repository.attempts.set(attempt.id, attempt);
+    const { service, setFilePriorities } = build({
+      repository,
+      torrents: [{
+        hash: "mismatch-hash",
+        tags: ["gamarr-name-mismatch"],
+        state: "downloading",
+        progress: 10
+      }],
+      fileLists: [[
+        { index: 0, name: "Collection/a.xci" },
+        { index: 1, name: "Collection/renamed.xci" }
+      ]]
+    });
+
+    await service.reconcile([attempt.id]);
+
+    expect(setFilePriorities).not.toHaveBeenCalled();
+    expect(repository.get(attempt.id)).toMatchObject({
+      status: "Downloading",
+      filesAppliedAt: null,
+      failureDetail: "Torrent file list did not match the selection"
+    });
+  });
+
+  it("fails leftover internet-archive attempts on startup", () => {
+    const repository = new MemoryDownloads();
+    const statuses = [
+      "Pending",
+      "Submitting",
+      "Unknown",
+      "Queued",
+      "Downloading"
+    ] as const;
+    for (const status of statuses) {
+      const id = `legacy-direct-${status}`;
+      repository.attempts.set(id, storedAttempt({
+        id,
+        submissionKey: `${id}-key`,
+        status,
+        source: "internet-archive",
+        iaFileName: "Game.zip",
+        updatedAt: 1_000
+      }));
+    }
+    repository.attempts.set("legacy-direct-completed", storedAttempt({
+      id: "legacy-direct-completed",
+      submissionKey: "legacy-direct-completed-key",
+      status: "Completed",
+      source: "internet-archive",
+      iaFileName: "Game.zip",
+      completedAt: 900,
+      updatedAt: 900
+    }));
+    const { service } = build({ repository });
+
+    service.recoverStaleSubmissions();
+
+    for (const status of statuses) {
+      expect(repository.get(`legacy-direct-${status}`)).toMatchObject({
+        status: "Failed",
+        failureDetail: "The direct download path was removed",
+        updatedAt: 1_000
+      });
+    }
+    expect(repository.get("legacy-direct-completed")).toMatchObject({
+      status: "Completed",
+      failureDetail: null,
+      updatedAt: 900
+    });
   });
 });

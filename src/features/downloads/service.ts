@@ -1,116 +1,123 @@
 import { createHash, randomUUID } from "node:crypto";
-// Imported explicitly rather than taken from the global scope: `lib: ["dom"]`
-// types the global `setInterval` as returning a `number`, which has no
-// `unref()`, and an unref'd handle is what keeps a heartbeat from holding the
-// process open.
-import { clearInterval, setInterval } from "node:timers";
 
 import {
   isTerminalDownloadStatus,
   type AttemptSourceType,
   type DownloadAttempt,
   type DownloadStatus,
+  type SelectedFile,
   type SubmitDownloadInput
 } from "@/features/downloads/models";
 import {
   SabnzbdUploadError,
-  type InternetArchiveDownloadConfig,
-  type InternetArchiveTorrentConfig,
-  type NzbFetcherPort,
+  type ReleaseFetcherPort,
   type SabnzbdPort,
-  TorrentAddError
+  TorrentAddError,
+  type TorrentClientPort
 } from "@/features/downloads/port";
 import type { DownloadRepository } from "@/features/downloads/repository";
-import { INTERNET_ARCHIVE_INDEXER_NAME } from "@/features/release-search/models";
 import type {
   CandidateRepository,
   ReleaseCandidateRecord
 } from "@/features/release-search/ports";
 import type { SabnzbdSettingsRecord } from "@/features/settings/models";
 import type { SettingsRepository } from "@/features/settings/service";
-import {
-  isSafeInternetArchiveFileName,
-  isValidInternetArchiveIdentifier
-} from "@/integrations/internet-archive/path-policy";
+// Pure validation module with no I/O; importing it across the feature boundary
+// is the deliberate exception documented in CLAUDE.md.
+import { decodeTorrentFiles } from "@/integrations/prowlarr/metainfo";
 import { AppError, validationError } from "@/lib/errors";
 
 interface DownloadServiceDependencies {
   repository: DownloadRepository;
   candidates: CandidateRepository;
   settings: SettingsRepository;
-  nzbFetcher: NzbFetcherPort;
+  releaseFetcher: ReleaseFetcherPort;
   sabFactory: (settings: SabnzbdSettingsRecord) => SabnzbdPort;
-  internetArchive?: InternetArchiveDownloadConfig;
-  internetArchiveTorrent?: InternetArchiveTorrentConfig;
+  torrentClient: () => TorrentClientPort | null;
+  maxTorrentBytes: number;
   now?: () => number;
   id?: () => string;
-  /**
-   * Schedules the in-flight download heartbeat and returns its canceller.
-   * Injectable for the same reason `now` and `id` are: vitest's fake timers
-   * replace `globalThis.setInterval`, not the `node:timers` binding this
-   * module imports, so a test cannot otherwise drive the heartbeat.
-   */
-  scheduleHeartbeat?: (callback: () => void, intervalMs: number) => () => void;
 }
 
-/**
- * How often an in-flight Internet Archive download stamps `updatedAt` to prove
- * it is alive. Progress callbacks are not a liveness signal: a stalled archive
- * node can deliver zero chunks for an unbounded time, so this timer runs
- * unconditionally alongside the stream.
- */
-const IA_HEARTBEAT_MS = 5_000;
-
-/**
- * How quiet a Pending/Downloading Internet Archive row must be before recovery
- * treats it as orphaned. A comfortable multiple of the heartbeat interval
- * (12x) so ordinary event-loop pressure, a slow SQLite write, or a missed tick
- * can never make a live download look abandoned.
- */
-const IA_STALE_AFTER_MS = 60_000;
-
-/**
- * The exact string the Internet Archive path downloads. Identity, deliberately:
- * the name is matched verbatim upstream and on disk, so the fingerprint must
- * hash the same bytes the download uses. Kept as a named helper so the two
- * call sites can never drift apart.
- */
-function selectedFileName(input: SubmitDownloadInput): string {
-  return input.fileName ?? "";
+interface CandidateSnapshot {
+  indexerName: string | null;
+  origin: string | null;
+  magnetUrl: string | null;
 }
 
-/**
- * Identity is derived from the candidate's source, never from whether a file
- * name happens to be present. The Newznab shape is deliberately the 3-element
- * array earlier versions wrote, so rows already in deployed databases keep
- * matching: `source` is NOT NULL defaulting to 'newznab' and migration 0003
- * backfilled every pre-existing row, so a legacy row always selects the legacy
- * identity. A Newznab submission that carries an ignored file name therefore
- * still replays instead of conflicting.
- */
-function fingerprint(
+function parseCandidateSnapshot(value: string): CandidateSnapshot {
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (typeof parsed !== "object" || parsed === null) {
+      return { indexerName: null, origin: null, magnetUrl: null };
+    }
+    const record = parsed as Record<string, unknown>;
+    return {
+      indexerName: typeof record.indexerName === "string"
+        ? record.indexerName
+        : null,
+      origin: typeof record.origin === "string" ? record.origin : null,
+      // Candidates minted before Task 9 did not carry this field. Invalid or
+      // absent values intentionally fall back to the Prowlarr download proxy.
+      magnetUrl: typeof record.magnetUrl === "string"
+        ? record.magnetUrl
+        : null
+    };
+  } catch {
+    return { indexerName: null, origin: null, magnetUrl: null };
+  }
+}
+
+function selectedIndices(input: SubmitDownloadInput): number[] {
+  const indices = input.selectedFiles ?? [];
+  if (indices.some((index) => !Number.isInteger(index) || index < 0)) {
+    throw validationError("Invalid torrent file selection");
+  }
+  return [...indices].sort((left, right) => left - right);
+}
+
+function fingerprintParts(
+  source: AttemptSourceType,
   input: SubmitDownloadInput,
-  source: AttemptSourceType
+  legacy: { iaFileName: string | null }
+): Array<string | number> {
+  switch (source) {
+    case "prowlarr-usenet":
+      return [input.candidateId, input.gameId, input.platformId];
+    case "prowlarr-torrent":
+      return [
+        input.candidateId,
+        input.gameId,
+        input.platformId,
+        "torrent",
+        ...selectedIndices(input)
+      ];
+    case "newznab":
+      return [input.candidateId, input.gameId, input.platformId];
+    case "internet-archive":
+      return [
+        input.candidateId,
+        input.gameId,
+        input.platformId,
+        legacy.iaFileName ?? ""
+      ];
+    case "internet-archive-torrent":
+      return [input.candidateId, input.gameId, input.platformId, "torrent"];
+  }
+}
+
+function fingerprint(
+  source: AttemptSourceType,
+  input: SubmitDownloadInput,
+  legacy: { iaFileName: string | null }
 ): string {
-  const identity = source === "internet-archive"
-    ? [input.candidateId, input.gameId, input.platformId, selectedFileName(input)]
-    : source === "internet-archive-torrent"
-      ? [input.candidateId, input.gameId, input.platformId, "torrent"]
-      : [input.candidateId, input.gameId, input.platformId];
   return createHash("sha256")
-    .update(JSON.stringify(identity))
+    .update(JSON.stringify(fingerprintParts(source, input, legacy)))
     .digest("hex");
 }
 
 const historySuccess = ["completed", "completed/pp", "completed/unpack"];
 
-/**
- * SABnzbd moves a job into history as soon as downloading finishes and keeps it
- * there throughout post-processing (Extracting, Repairing, Moving, ...). Only
- * `Completed` and `Failed` are terminal, so anything else returns null meaning
- * "no verdict yet" — writing a terminal status there would be permanent, since
- * reconcile never revisits a Completed or Failed attempt.
- */
 function statusFromJob(
   source: "queue" | "history",
   status: string
@@ -124,13 +131,6 @@ function statusFromJob(
   return normalized.includes("download") ? "Downloading" : "Queued";
 }
 
-/**
- * qBittorrent states, mapped the same way SABnzbd history is: only
- * `Completed` and `Failed` are terminal, and an unrecognised state returns
- * null meaning "no verdict yet". Writing a terminal status on a state this
- * table does not know would be permanent, because reconcile never revisits a
- * Completed or Failed attempt.
- */
 const torrentStatuses: Readonly<Record<string, DownloadStatus>> = {
   uploading: "Completed",
   stalledUP: "Completed",
@@ -160,11 +160,6 @@ function torrentProgress(progress: number): number {
   return Math.min(100, Math.max(0, Math.round(progress)));
 }
 
-/**
- * True only when the upload provably never reached SABnzbd's queue. Anything
- * else — a timeout, an aborted connection, a 5xx, an unreadable acknowledgement
- * — may have been accepted, so it must stay Unknown rather than terminal.
- */
 function submittedNothing(error: unknown): boolean {
   if (error instanceof SabnzbdUploadError) return error.outcome === "rejected";
   return error instanceof AppError && error.code === "VALIDATION";
@@ -173,66 +168,53 @@ function submittedNothing(error: unknown): boolean {
 export class DownloadService {
   private readonly now: () => number;
   private readonly id: () => string;
-  private readonly scheduleHeartbeat: (
-    callback: () => void,
-    intervalMs: number
-  ) => () => void;
 
   constructor(private readonly dependencies: DownloadServiceDependencies) {
     this.now = dependencies.now ?? Date.now;
     this.id = dependencies.id ?? randomUUID;
-    this.scheduleHeartbeat = dependencies.scheduleHeartbeat
-      ?? ((callback, intervalMs) => {
-        const handle = setInterval(callback, intervalMs);
-        // A heartbeat must never be the reason the process stays alive.
-        handle.unref();
-        return () => clearInterval(handle);
-      });
   }
 
   async submit(input: SubmitDownloadInput): Promise<DownloadAttempt> {
     if (
-      !input.submissionKey.trim() ||
-      !Number.isInteger(input.gameId) ||
-      !Number.isInteger(input.platformId)
+      !input.submissionKey.trim()
+      || !Number.isInteger(input.gameId)
+      || !Number.isInteger(input.platformId)
     ) {
       throw validationError("Invalid download submission");
     }
-    // The replay short-circuit runs before anything is resolved: candidates
-    // expire after 30 minutes while attempt rows are permanent, so resolving
-    // one here would turn every later replay into a spurious 400. The stored
-    // attempt carries the source needed to recompute its own fingerprint.
+    selectedIndices(input);
+
+    // Replay before candidate lookup: candidates expire, attempts do not.
     const existing = this.dependencies.repository
       .findBySubmissionKey(input.submissionKey);
     if (existing) return this.assertSameRequest(existing, input);
 
     const candidate = this.dependencies.candidates.get(input.candidateId);
     if (!candidate) throw validationError("Release candidate has expired");
-    if (candidate.source === "internet-archive") {
-      return input.delivery === "torrent"
-        ? this.submitInternetArchiveTorrent(input, candidate)
-        : this.submitInternetArchive(input, candidate);
+    const prowlarr = this.dependencies.settings.getProwlarr();
+    if (!prowlarr?.apiKey) {
+      throw validationError("Prowlarr is not configured");
     }
-    const requestFingerprint = fingerprint(input, candidate.source);
-    const sabSettings = this.dependencies.settings.getSabnzbd();
-    if (!sabSettings?.apiKey) {
-      throw validationError("SABnzbd is not configured");
+    if (prowlarr.configRevision !== candidate.indexerConfigRevision) {
+      throw validationError("Prowlarr configuration changed; search again");
     }
-    const indexer = this.dependencies.settings.listIndexers()
-      .find((value) => value.id === candidate.indexerId);
-    if (
-      !indexer ||
-      indexer.deletedAt !== null ||
-      indexer.configRevision !== candidate.indexerConfigRevision
-    ) {
-      throw validationError("Indexer configuration changed; search again");
-    }
-    const snapshot = JSON.parse(candidate.sourceSnapshot) as {
-      indexerName?: string;
-      origin?: string;
-    };
+
+    return candidate.protocol === "usenet"
+      ? this.submitUsenet(input, candidate)
+      : this.submitTorrent(input, candidate);
+  }
+
+  private claim(
+    input: SubmitDownloadInput,
+    candidate: ReleaseCandidateRecord,
+    source: "prowlarr-usenet" | "prowlarr-torrent",
+    category: string | null,
+    sabnzbdConfigRevision: number
+  ) {
+    const snapshot = parseCandidateSnapshot(candidate.sourceSnapshot);
     const timestamp = this.now();
     const attemptId = this.id();
+    const marker = `gamarr-${attemptId}`;
     const claimed = this.dependencies.repository.claimSubmission({
       library: {
         id: `library-${input.gameId}-${input.platformId}`,
@@ -245,20 +227,22 @@ export class DownloadService {
         id: attemptId,
         libraryEntryId: `library-${input.gameId}-${input.platformId}`,
         submissionKey: input.submissionKey,
-        requestFingerprint,
+        requestFingerprint: fingerprint(source, input, { iaFileName: null }),
         status: "Pending",
-        source: "newznab",
+        source,
         releaseTitle: candidate.title,
-        indexerId: indexer.id,
-        indexerNameSnapshot: snapshot.indexerName ?? indexer.name,
-        indexerUrlSnapshot: snapshot.origin ?? new URL(indexer.baseUrl).origin,
+        indexerId: candidate.indexerId,
+        indexerNameSnapshot: snapshot.indexerName ?? "Prowlarr indexer",
+        indexerUrlSnapshot: snapshot.origin,
         newznabGuid: candidate.guid,
         iaFileName: null,
         torrentHash: null,
+        selectedFiles: source === "prowlarr-torrent" ? [] : null,
+        filesAppliedAt: null,
         size: candidate.size,
-        category: sabSettings.defaultCategory,
-        sabnzbdConfigRevision: sabSettings.configRevision,
-        sabMarker: `gamarr-${attemptId}`,
+        category,
+        sabnzbdConfigRevision,
+        marker,
         sabJobId: null,
         progress: 0,
         failureDetail: null,
@@ -268,53 +252,67 @@ export class DownloadService {
         completedAt: null
       }
     });
+    return { ...claimed, snapshot };
+  }
+
+  private async submitUsenet(
+    input: SubmitDownloadInput,
+    candidate: ReleaseCandidateRecord
+  ): Promise<DownloadAttempt> {
+    const sabSettings = this.dependencies.settings.getSabnzbd();
+    if (!sabSettings?.apiKey) {
+      throw validationError("SABnzbd is not configured");
+    }
+    const claimed = this.claim(
+      input,
+      candidate,
+      "prowlarr-usenet",
+      sabSettings.defaultCategory,
+      sabSettings.configRevision
+    );
     if (!claimed.created) {
       return this.assertSameRequest(claimed.attempt, input);
     }
 
-    let bytes: Uint8Array;
+    let fetched: Awaited<ReturnType<ReleaseFetcherPort["fetch"]>>;
     try {
-      bytes = await this.dependencies.nzbFetcher.fetch({
+      fetched = await this.dependencies.releaseFetcher.fetch({
         candidate,
-        indexer,
+        magnetUrl: claimed.snapshot.magnetUrl,
         maxBytes: sabSettings.maxNzbBytes
       });
     } catch (error) {
-      return this.dependencies.repository.update(attemptId, {
+      return this.failFetch(claimed.attempt.id, error);
+    }
+    if (fetched.kind !== "nzb") {
+      return this.dependencies.repository.update(claimed.attempt.id, {
         status: "Failed",
-        // AppError, not Error: `failureDetail` is persisted and rendered in
-        // Activity, and only AppError messages are written to be seen. The
-        // fetcher rethrows raw undici failures (newznab/download.ts), whose
-        // messages can carry the request URL — and that URL embeds the
-        // indexer's API key.
-        failureDetail: error instanceof AppError
-          ? error.message
-          : "NZB retrieval failed",
+        failureDetail: "Prowlarr returned an unexpected release payload",
         updatedAt: this.now()
       });
     }
 
     const submittingAt = this.now();
-    this.dependencies.repository.update(attemptId, {
+    this.dependencies.repository.update(claimed.attempt.id, {
       status: "Submitting",
       sabRequestStartedAt: submittingAt,
       updatedAt: submittingAt
     });
     try {
       const result = await this.dependencies.sabFactory(sabSettings).upload({
-        filename: `gamarr-${attemptId}.nzb`,
-        bytes,
+        filename: `gamarr-${claimed.attempt.id}.nzb`,
+        bytes: fetched.bytes,
         category: sabSettings.defaultCategory,
-        marker: `gamarr-${attemptId}`
+        marker: claimed.attempt.marker
       });
-      return this.dependencies.repository.update(attemptId, {
+      return this.dependencies.repository.update(claimed.attempt.id, {
         status: "Queued",
         sabJobId: result.jobId,
         updatedAt: this.now()
       });
     } catch (error) {
       const rejected = submittedNothing(error);
-      return this.dependencies.repository.update(attemptId, {
+      return this.dependencies.repository.update(claimed.attempt.id, {
         status: rejected ? "Failed" : "Unknown",
         failureDetail: rejected && error instanceof Error
           ? error.message
@@ -324,123 +322,104 @@ export class DownloadService {
     }
   }
 
-  /**
-   * Internet Archive torrent path: claim a durable attempt, fetch bounded
-   * metainfo, and hand it to qBittorrent. qBittorrent owns the payload after
-   * submission, so this path deliberately has no direct-download heartbeat.
-   */
-  private async submitInternetArchiveTorrent(
+  private async submitTorrent(
     input: SubmitDownloadInput,
     candidate: ReleaseCandidateRecord
   ): Promise<DownloadAttempt> {
-    if (input.fileName !== undefined) {
-      throw validationError(
-        "A torrent covers the whole item; do not select a file"
-      );
+    const qbitSettings = this.dependencies.settings.getQbittorrent();
+    const client = this.dependencies.torrentClient();
+    if (!qbitSettings?.password || !client) {
+      throw validationError("qBittorrent is not configured");
     }
-    const config = this.dependencies.internetArchiveTorrent;
-    if (!config) {
-      throw validationError("Internet Archive torrents are not configured");
-    }
-    const client = config.client();
-    if (!client) throw validationError("qBittorrent is not configured");
-
-    const identifier = candidate.guid;
-    if (!isValidInternetArchiveIdentifier(identifier)) {
-      throw validationError("Release candidate is not usable; search again");
-    }
-    const torrent = await config.findTorrent(identifier);
-    if (!torrent) {
-      throw validationError("This item has no torrent; download a file instead");
-    }
-
-    const snapshot = JSON.parse(candidate.sourceSnapshot) as {
-      indexerName?: string;
-      origin?: string;
-    };
-    const timestamp = this.now();
-    const attemptId = this.id();
-    const sabMarker = `gamarr-${attemptId}`;
-    const claimed = this.dependencies.repository.claimSubmission({
-      library: {
-        id: `library-${input.gameId}-${input.platformId}`,
-        gameId: input.gameId,
-        platformId: input.platformId,
-        createdAt: timestamp,
-        updatedAt: timestamp
-      },
-      attempt: {
-        id: attemptId,
-        libraryEntryId: `library-${input.gameId}-${input.platformId}`,
-        submissionKey: input.submissionKey,
-        requestFingerprint: fingerprint(input, "internet-archive-torrent"),
-        status: "Pending",
-        source: "internet-archive-torrent",
-        releaseTitle: candidate.title,
-        indexerId: null,
-        indexerNameSnapshot: snapshot.indexerName
-          ?? INTERNET_ARCHIVE_INDEXER_NAME,
-        indexerUrlSnapshot: snapshot.origin ?? null,
-        newznabGuid: null,
-        iaFileName: null,
-        torrentHash: null,
-        size: candidate.size,
-        category: config.defaultCategory(),
-        sabnzbdConfigRevision: 0,
-        sabMarker,
-        sabJobId: null,
-        progress: 0,
-        failureDetail: null,
-        sabRequestStartedAt: null,
-        createdAt: timestamp,
-        updatedAt: timestamp,
-        completedAt: null
-      }
-    });
+    const claimed = this.claim(
+      input,
+      candidate,
+      "prowlarr-torrent",
+      qbitSettings.defaultCategory,
+      0
+    );
     if (!claimed.created) {
       return this.assertSameRequest(claimed.attempt, input);
     }
 
-    let bytes: Uint8Array;
+    let fetched: Awaited<ReturnType<ReleaseFetcherPort["fetch"]>>;
     try {
-      bytes = await config.fetchTorrent(identifier, torrent.name);
+      fetched = await this.dependencies.releaseFetcher.fetch({
+        candidate,
+        magnetUrl: claimed.snapshot.magnetUrl,
+        maxBytes: this.dependencies.maxTorrentBytes
+      });
     } catch (error) {
-      return this.dependencies.repository.update(attemptId, {
+      return this.failFetch(claimed.attempt.id, error);
+    }
+
+    const indices = selectedIndices(input);
+    let selectedFiles: SelectedFile[] = [];
+    let payload: { torrent: Uint8Array; filename: string } | { magnet: string };
+    if (fetched.kind === "magnet") {
+      if (indices.length > 0) {
+        this.rejectClaim(
+          claimed.attempt.id,
+          "File selection is not available for a magnet release"
+        );
+      }
+      payload = { magnet: fetched.uri };
+    } else if (fetched.kind === "torrent") {
+      let files: ReturnType<typeof decodeTorrentFiles>;
+      try {
+        files = decodeTorrentFiles(fetched.bytes);
+      } catch (error) {
+        return this.failFetch(claimed.attempt.id, error);
+      }
+      selectedFiles = indices.map((index) => {
+        const file = files.find((value) => value.index === index);
+        if (!file) {
+          this.rejectClaim(
+            claimed.attempt.id,
+            "Selected torrent file is not available"
+          );
+        }
+        return { index, name: file.name };
+      });
+      payload = {
+        torrent: fetched.bytes,
+        filename: `gamarr-${claimed.attempt.id}.torrent`
+      };
+    } else {
+      return this.dependencies.repository.update(claimed.attempt.id, {
         status: "Failed",
-        failureDetail: error instanceof AppError
-          ? error.message
-          : "Torrent retrieval failed",
+        failureDetail: "Prowlarr returned an unexpected release payload",
         updatedAt: this.now()
       });
     }
 
     const submittingAt = this.now();
-    this.dependencies.repository.update(attemptId, {
+    this.dependencies.repository.update(claimed.attempt.id, {
       status: "Submitting",
+      selectedFiles,
       sabRequestStartedAt: submittingAt,
       updatedAt: submittingAt
     });
     try {
       const result = await client.add({
-        torrent: bytes,
-        filename: torrent.name,
-        category: config.defaultCategory(),
-        tag: sabMarker
+        payload,
+        category: qbitSettings.defaultCategory,
+        tag: claimed.attempt.marker
       });
-      return this.dependencies.repository.update(attemptId, {
+      return this.dependencies.repository.update(claimed.attempt.id, {
         status: "Queued",
         torrentHash: result.hash,
         updatedAt: this.now()
       });
     } catch (error) {
       if (error instanceof TorrentAddError) {
-        return this.dependencies.repository.update(attemptId, {
+        return this.dependencies.repository.update(claimed.attempt.id, {
           status: error.outcome === "rejected" ? "Failed" : "Unknown",
           failureDetail: error.message,
           updatedAt: this.now()
         });
       }
-      return this.dependencies.repository.update(attemptId, {
+      return this.dependencies.repository.update(claimed.attempt.id, {
         status: "Unknown",
         failureDetail: "qBittorrent acknowledgement was not confirmed",
         updatedAt: this.now()
@@ -448,166 +427,23 @@ export class DownloadService {
     }
   }
 
-  /**
-   * Internet Archive path: no NZB, no SABnzbd. The attempt is claimed first
-   * (idempotency rules identical to Newznab), then the file streams to disk
-   * outside the request — the response returns `Downloading` and progress is
-   * read back through reconcile like any other attempt.
-   */
-  private async submitInternetArchive(
-    input: SubmitDownloadInput,
-    candidate: ReleaseCandidateRecord
-  ): Promise<DownloadAttempt> {
-    const config = this.dependencies.internetArchive;
-    if (!config) {
-      throw validationError("Internet Archive downloads are not configured");
-    }
-    // Used verbatim: it must match Internet Archive metadata exactly (the
-    // lookup below is an equality match) and it becomes both a URL path
-    // segment and the file name on disk. Trimming would miss legitimate names
-    // carrying leading or trailing whitespace, and " Game.zip" is genuinely a
-    // different file from "Game.zip". trim() is only an emptiness guard here.
-    const fileName = selectedFileName(input);
-    if (!fileName.trim() || !isSafeInternetArchiveFileName(fileName)) {
-      throw validationError("A valid file must be selected");
-    }
-    const identifier = candidate.guid;
-    if (!isValidInternetArchiveIdentifier(identifier)) {
-      throw validationError("Release candidate is not usable; search again");
-    }
-    const fileInfo = await config.getFileInfo({ identifier, fileName });
-    if (!fileInfo) {
-      throw validationError(
-        "The selected file is no longer available; search again"
-      );
-    }
-    const snapshot = JSON.parse(candidate.sourceSnapshot) as {
-      indexerName?: string;
-      origin?: string;
-    };
-    const requestFingerprint = fingerprint(input, candidate.source);
-    const timestamp = this.now();
-    const attemptId = this.id();
-    const claimed = this.dependencies.repository.claimSubmission({
-      library: {
-        id: `library-${input.gameId}-${input.platformId}`,
-        gameId: input.gameId,
-        platformId: input.platformId,
-        createdAt: timestamp,
-        updatedAt: timestamp
-      },
-      attempt: {
-        id: attemptId,
-        libraryEntryId: `library-${input.gameId}-${input.platformId}`,
-        submissionKey: input.submissionKey,
-        requestFingerprint,
-        status: "Pending",
-        source: "internet-archive",
-        releaseTitle: candidate.title,
-        indexerId: null,
-        indexerNameSnapshot: snapshot.indexerName ?? INTERNET_ARCHIVE_INDEXER_NAME,
-        indexerUrlSnapshot: snapshot.origin ?? null,
-        newznabGuid: null,
-        iaFileName: fileName,
-        torrentHash: null,
-        size: fileInfo.size,
-        category: null,
-        // No SABnzbd configuration participates in this path; revision 0 is
-        // the "unbound" marker and can never collide with a real revision
-        // because real revisions start at 1.
-        sabnzbdConfigRevision: 0,
-        sabMarker: `gamarr-${attemptId}`,
-        sabJobId: null,
-        progress: 0,
-        failureDetail: null,
-        sabRequestStartedAt: null,
-        createdAt: timestamp,
-        updatedAt: timestamp,
-        completedAt: null
-      }
-    });
-    if (!claimed.created) {
-      return this.assertSameRequest(claimed.attempt, input);
-    }
-
-    const attempt = this.dependencies.repository.update(attemptId, {
-      status: "Downloading",
+  private failFetch(id: string, error: unknown): DownloadAttempt {
+    return this.dependencies.repository.update(id, {
+      status: "Failed",
+      failureDetail: error instanceof AppError
+        ? error.message
+        : "Release payload retrieval failed",
       updatedAt: this.now()
     });
-    void this.runInternetArchiveDownload(config, attemptId, identifier, fileName);
-    return attempt;
   }
 
-  private async runInternetArchiveDownload(
-    config: InternetArchiveDownloadConfig,
-    attemptId: string,
-    identifier: string,
-    fileName: string
-  ): Promise<void> {
-    let lastPercent = -1;
-    let lastWrite = 0;
-    // Progress callbacks fire per received chunk, so a stalled archive node
-    // produces none at all. This timer stamps `updatedAt` regardless, which is
-    // what lets recovery tell a live stream from an orphaned row. It patches
-    // only `updatedAt` — never status, never progress — so it can never
-    // resurrect a row that legitimately failed.
-    const stopHeartbeat = this.scheduleHeartbeat(() => {
-      this.tryUpdate(attemptId, { updatedAt: this.now() });
-    }, IA_HEARTBEAT_MS);
-    try {
-      const result = await config.download({
-        identifier,
-        fileName,
-        destinationDir: config.downloadDir,
-        attemptId,
-        maxBytes: config.maxBytes,
-        onProgress: (received, total) => {
-          const percent = total && total > 0
-            ? Math.min(99, Math.floor((received / total) * 100))
-            : 0;
-          const now = this.now();
-          // Throttled: the attempt row exists so the UI can poll progress,
-          // not to record every chunk.
-          if (percent >= lastPercent + 5 || now - lastWrite >= 1_000) {
-            lastPercent = percent;
-            lastWrite = now;
-            this.tryUpdate(attemptId, { progress: percent, updatedAt: now });
-          }
-        }
-      });
-      const completedAt = this.now();
-      this.tryUpdate(attemptId, {
-        status: "Completed",
-        progress: 100,
-        size: result.bytes,
-        completedAt,
-        updatedAt: completedAt
-      });
-    } catch (error) {
-      this.tryUpdate(attemptId, {
-        status: "Failed",
-        // AppError, not Error: see the NZB path above. The downloader wraps
-        // everything it throws, but gating on the type rather than trusting
-        // that discipline keeps a node:fs path (which carries the download
-        // directory) out of a client-visible field if a future adapter slips.
-        failureDetail: error instanceof AppError
-          ? error.message
-          : "Internet Archive download failed",
-        updatedAt: this.now()
-      });
-    } finally {
-      stopHeartbeat();
-    }
-  }
-
-  /** The library entry can be deleted — cascading the attempt — while a
-   * direct download is still streaming; losing that race is not an error. */
-  private tryUpdate(id: string, patch: Partial<DownloadAttempt>): void {
-    try {
-      this.dependencies.repository.update(id, patch);
-    } catch {
-      // Attempt row is gone; nothing to record progress against.
-    }
+  private rejectClaim(id: string, message: string): never {
+    this.dependencies.repository.update(id, {
+      status: "Failed",
+      failureDetail: message,
+      updatedAt: this.now()
+    });
+    throw validationError(message);
   }
 
   async reconcile(ids?: string[]): Promise<DownloadAttempt[]> {
@@ -633,18 +469,17 @@ export class DownloadService {
     ]);
     for (const attempt of attempts) {
       if (isTerminalDownloadStatus(attempt.status)) continue;
-      // Direct downloads own their status already; there is no SABnzbd job
-      // to reconcile them against.
-      if (attempt.source !== "newznab") continue;
+      if (
+        attempt.source !== "prowlarr-usenet"
+        && attempt.source !== "newznab"
+      ) continue;
       const historyJob = history.find((job) =>
-        job.jobId === attempt.sabJobId || job.marker === attempt.sabMarker);
+        job.jobId === attempt.sabJobId || job.marker === attempt.marker);
       const queueJob = queue.find((job) =>
-        job.jobId === attempt.sabJobId || job.marker === attempt.sabMarker);
+        job.jobId === attempt.sabJobId || job.marker === attempt.marker);
       const job = historyJob ?? queueJob;
       if (!job) continue;
       const status = statusFromJob(historyJob ? "history" : "queue", job.status);
-      // Post-processing in progress: leave the attempt untouched so a later
-      // poll can still resolve it.
       if (status === null) continue;
       this.dependencies.repository.update(attempt.id, {
         status,
@@ -661,28 +496,70 @@ export class DownloadService {
     attempts: DownloadAttempt[],
     timestamp: number
   ): Promise<void> {
-    const client = this.dependencies.internetArchiveTorrent?.client();
+    const client = this.dependencies.torrentClient();
     if (!client) return;
     const torrents = await client.list();
     for (const attempt of attempts) {
       if (isTerminalDownloadStatus(attempt.status)) continue;
-      if (attempt.source !== "internet-archive-torrent") continue;
+      if (
+        attempt.source !== "prowlarr-torrent"
+        && attempt.source !== "internet-archive-torrent"
+      ) continue;
       const torrent = attempt.torrentHash === null
-        ? torrents.find((job) => job.tags.includes(attempt.sabMarker))
+        ? torrents.find((job) => job.tags.includes(attempt.marker))
         : torrents.find((job) => job.hash === attempt.torrentHash);
-      if (!torrent) continue;
-      const status = statusFromTorrent(torrent.state);
-      if (status === null) continue;
+      let reconciled = attempt;
+      if (torrent) {
+        const status = statusFromTorrent(torrent.state);
+        if (status !== null) {
+          reconciled = this.dependencies.repository.update(attempt.id, {
+            status,
+            progress: status === "Completed"
+              ? 100
+              : torrentProgress(torrent.progress),
+            ...(attempt.torrentHash === null
+              ? { torrentHash: torrent.hash }
+              : {}),
+            failureDetail: status === "Failed" ? torrent.state : null,
+            completedAt: status === "Completed" ? timestamp : null,
+            updatedAt: timestamp
+          });
+        }
+      }
+
+      if (isTerminalDownloadStatus(reconciled.status)) continue;
+      if (
+        !reconciled.selectedFiles?.length
+        || reconciled.filesAppliedAt !== null
+      ) continue;
+      const hash = reconciled.torrentHash ?? torrent?.hash;
+      if (!hash) continue;
+
+      const files = await client.listFiles(hash);
+      if (files.length === 0) continue;
+
+      const namesMatch = reconciled.selectedFiles.every((selected) =>
+        files.find((file) => file.index === selected.index)?.name
+          === selected.name);
+      if (!namesMatch) {
+        this.dependencies.repository.update(attempt.id, {
+          failureDetail: "Torrent file list did not match the selection",
+          updatedAt: timestamp
+        });
+        continue;
+      }
+
+      const selected = new Set(
+        reconciled.selectedFiles.map((file) => file.index)
+      );
+      const unselectedIndices = files
+        .filter((file) => !selected.has(file.index))
+        .map((file) => file.index);
+      if (unselectedIndices.length > 0) {
+        await client.setFilePriorities(hash, unselectedIndices, 0);
+      }
       this.dependencies.repository.update(attempt.id, {
-        status,
-        progress: status === "Completed"
-          ? 100
-          : torrentProgress(torrent.progress),
-        ...(attempt.torrentHash === null
-          ? { torrentHash: torrent.hash }
-          : {}),
-        failureDetail: status === "Failed" ? torrent.state : null,
-        completedAt: status === "Completed" ? timestamp : null,
+        filesAppliedAt: timestamp,
         updatedAt: timestamp
       });
     }
@@ -694,17 +571,7 @@ export class DownloadService {
       timestamp - maxAgeMs,
       timestamp
     );
-    // A direct download cannot outlive the process, so an Internet Archive
-    // attempt whose heartbeat stopped died with the last run. The age cutoff
-    // is what distinguishes that from a stream running right now, and it is
-    // load-bearing: recovery is re-entrant by design, because a startup pass
-    // that finds an unmigrated database defers to a later request (see
-    // `recoverOnce` in the downloads composition root). Remove the cutoff and
-    // that deferred pass will fail a download that is streaming.
-    this.dependencies.repository.recoverStaleInternetArchiveDownloads(
-      timestamp - IA_STALE_AFTER_MS,
-      timestamp
-    );
+    this.dependencies.repository.recoverStaleInternetArchiveDownloads(timestamp);
   }
 
   private selected(ids?: string[]): DownloadAttempt[] {
@@ -713,23 +580,16 @@ export class DownloadService {
       .filter((attempt) => !selected || selected.has(attempt.id));
   }
 
-  /**
-   * Recomputes the fingerprint from the stored attempt's own source, which is
-   * the only reliable record of how the original hash was built — the
-   * candidate that produced it may already have expired.
-   */
   private assertSameRequest(
     attempt: DownloadAttempt,
     input: SubmitDownloadInput
   ): DownloadAttempt {
-    const changedInternetArchiveDelivery =
-      (attempt.source === "internet-archive-torrent"
-        && input.delivery !== "torrent")
-      || (attempt.source === "internet-archive"
-        && input.delivery === "torrent");
     if (
-      changedInternetArchiveDelivery
-      || attempt.requestFingerprint !== fingerprint(input, attempt.source)
+      attempt.requestFingerprint !== fingerprint(
+        attempt.source,
+        input,
+        { iaFileName: attempt.iaFileName }
+      )
     ) {
       throw new AppError(
         "CONFLICT",
