@@ -1,9 +1,10 @@
 # Gamarr
 
-Gamarr is a LAN-hosted game catalog and manual Usenet download manager. It
-searches IGDB by platform, searches Newznab-compatible indexers for a selected
-game, explains match evidence, sends a chosen NZB to SABnzbd, and retains a
-library of game/platform records and download attempts.
+Gamarr is a LAN-hosted game catalog and manual download manager. It searches
+IGDB by platform, searches every enabled indexer in Prowlarr for a selected
+game, explains match evidence, routes usenet releases to SABnzbd and torrents
+to qBittorrent, and retains a library of game/platform records and download
+attempts.
 
 Gamarr does not monitor wanted games or choose downloads automatically. Use it
 only for content you are authorized to download.
@@ -14,8 +15,8 @@ Requirements:
 
 - Docker Engine with Compose
 - A free Twitch developer application for IGDB
-- One or more Newznab-compatible indexers
-- SABnzbd
+- Prowlarr with one or more enabled indexers
+- SABnzbd and/or qBittorrent for the protocols you use
 
 Clone the repository, then edit `GAMARR_ALLOWED_ORIGINS` in
 `docker-compose.yml`. Add the exact URL used by browsers on your LAN, including
@@ -44,10 +45,11 @@ other secret-bearing application data.
    and client secret into **Settings → IGDB catalog**. Select **Save and test**.
 2. Select **Refresh platforms**, then enable every console you want shown in
    Discover. Gamarr supports the complete IGDB platform catalog.
-3. Add a Newznab indexer URL and API key. Category IDs are optional; multiple
-   values are comma-separated. Gamarr reads the indexer's capabilities when
-   testing the connection.
-4. Add the SABnzbd base URL and API key. The default category is optional.
+3. Add the Prowlarr base URL and API key, then select **Save and test**. Gamarr
+   discovers enabled indexers from Prowlarr; manage the indexer list there.
+   Platform category IDs are optional and comma-separated.
+4. Configure SABnzbd for usenet releases and qBittorrent for torrent releases.
+   Each client's default category is optional.
 
 The Twitch button opens the official developer portal; credentials stay on the
 Gamarr server and are never returned by its settings API.
@@ -58,13 +60,13 @@ Gamarr server and are never returned by its settings API.
 2. Search for a game and open its catalog record.
 3. Select **Search releases**. Strong, possible, and conflicting releases all
    remain visible with the evidence Gamarr used.
-4. Choose an indexer source and confirm **Send to SABnzbd**.
+4. Choose an indexer source and submit it to the matching download client.
 5. Use **Library** for saved game/platform records and **Activity** for the
    chronological submission log.
 
-If SABnzbd may have accepted a request but the acknowledgement was lost, Gamarr
-marks the attempt **Unknown** and never resubmits it automatically. Use
-**Refresh status** to reconcile its durable marker, or deliberately search
+If a download client may have accepted a request but the acknowledgement was
+lost, Gamarr marks the attempt **Unknown** and never resubmits it automatically.
+Use **Refresh status** to reconcile its durable marker, or deliberately search
 again.
 
 ## Configuration
@@ -76,7 +78,8 @@ again.
 | `GAMARR_ALLOWED_ORIGINS` | none | Comma-separated exact browser origins allowed to mutate state |
 | `GAMARR_API_TOKEN` | none | Optional bearer token for trusted automation |
 | `GAMARR_TRUST_PROXY` | `false` | Honor forwarded host/protocol only behind a trusted reverse proxy |
-| `GAMARR_IA_TORRENT_MAX_BYTES` | `8388608` (8 MiB) | Ceiling for an Internet Archive item's `.torrent` metainfo |
+| `GAMARR_PROWLARR_MAX_TORRENT_BYTES` | `8388608` (8 MiB) | Ceiling for a `.torrent` metainfo fetch |
+| `GAMARR_PROWLARR_BASE_URL` | none | Test-only override of the configured Prowlarr origin |
 
 Gamarr intentionally has no user login in this LAN-oriented release. Do not
 publish it directly to the internet. When using a reverse proxy, terminate
