@@ -328,4 +328,33 @@ describe("SqliteDownloadRepository", () => {
     expect(after.torrentHash).toBeNull();
     database.$client.close();
   });
+
+  it("refuses a filesAppliedAt stamp on a terminal attempt", () => {
+    const { database, repository } = setup();
+    repository.claimSubmission({
+      library,
+      attempt: attempt({
+        source: "prowlarr-torrent",
+        status: "Completed",
+        selectedFiles: [{ index: 0, name: "Game.NSW" }],
+        filesAppliedAt: null,
+        progress: 100,
+        completedAt: 3,
+        updatedAt: 3
+      })
+    });
+
+    const returned = repository.update("attempt", {
+      filesAppliedAt: 4,
+      updatedAt: 4
+    });
+
+    expect(returned).toMatchObject({
+      status: "Completed",
+      filesAppliedAt: null,
+      updatedAt: 3
+    });
+    expect(repository.get("attempt")).toEqual(returned);
+    database.$client.close();
+  });
 });

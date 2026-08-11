@@ -212,6 +212,8 @@ interface BuildOptions {
   uploadError?: unknown;
   events?: string[];
   torrents?: TorrentJob[];
+  fileLists?: Array<Array<{ index: number; name: string }>>;
+  now?: () => number;
 }
 
 function build(options: BuildOptions = {}) {
@@ -274,10 +276,13 @@ function build(options: BuildOptions = {}) {
       hash: options.torrentHash === undefined ? "torrent-hash" : options.torrentHash
     };
   });
+  const fileLists = [...(options.fileLists ?? [[]])];
+  const listFiles = vi.fn(async () => fileLists.shift() ?? []);
+  const setFilePriorities = vi.fn(async () => undefined);
   const torrentClient: TorrentClientPort = {
     add,
-    listFiles: async () => [],
-    setFilePriorities: async () => undefined,
+    listFiles,
+    setFilePriorities,
     list: async () => options.torrents ?? [],
     testConnection: async () => undefined
   };
@@ -303,9 +308,17 @@ function build(options: BuildOptions = {}) {
       : torrentClient,
     maxTorrentBytes: 8 * 1024 * 1024,
     id: () => "attempt-1",
-    now: () => 1_000
+    now: options.now ?? (() => 1_000)
   });
-  return { service, repository, fetch, add, upload };
+  return {
+    service,
+    repository,
+    fetch,
+    add,
+    upload,
+    listFiles,
+    setFilePriorities
+  };
 }
 
 describe("DownloadService submission by protocol", () => {
@@ -703,6 +716,236 @@ describe("DownloadService torrent reconciliation and recovery", () => {
       progress: 100,
       completedAt: 1_000,
       torrentHash: "legacy-hash"
+    });
+  });
+
+  it("skips file application until metadata arrives", async () => {
+    const repository = new MemoryDownloads();
+    const attempt = storedAttempt({
+      id: "metadata-pending",
+      submissionKey: "metadata-pending-key",
+      source: "prowlarr-torrent",
+      torrentHash: "metadata-hash",
+      selectedFiles: [{ index: 1, name: "Collection/b.xci" }],
+      marker: "gamarr-metadata-pending"
+    });
+    repository.attempts.set(attempt.id, attempt);
+    const { service, listFiles, setFilePriorities } = build({
+      repository,
+      torrents: [{
+        hash: "metadata-hash",
+        tags: ["gamarr-metadata-pending"],
+        state: "downloading",
+        progress: 10
+      }],
+      fileLists: [
+        [],
+        [
+          { index: 0, name: "Collection/a.xci" },
+          { index: 1, name: "Collection/b.xci" }
+        ]
+      ]
+    });
+
+    await service.reconcile([attempt.id]);
+
+    expect(repository.get(attempt.id)?.filesAppliedAt).toBeNull();
+    expect(setFilePriorities).not.toHaveBeenCalled();
+
+    await service.reconcile([attempt.id]);
+
+    expect(listFiles).toHaveBeenCalledTimes(2);
+    expect(setFilePriorities).toHaveBeenCalledWith(
+      "metadata-hash",
+      [0],
+      0
+    );
+    expect(repository.get(attempt.id)?.filesAppliedAt).toBe(1_000);
+  });
+
+  it("deprioritises every unselected file", async () => {
+    const repository = new MemoryDownloads();
+    const attempt = storedAttempt({
+      id: "subset-selection",
+      submissionKey: "subset-selection-key",
+      source: "prowlarr-torrent",
+      torrentHash: "subset-hash",
+      selectedFiles: [{ index: 1, name: "Collection/b.xci" }],
+      marker: "gamarr-subset-selection"
+    });
+    repository.attempts.set(attempt.id, attempt);
+    const { service, setFilePriorities } = build({
+      repository,
+      torrents: [{
+        hash: "subset-hash",
+        tags: ["gamarr-subset-selection"],
+        state: "downloading",
+        progress: 10
+      }],
+      fileLists: [[
+        { index: 0, name: "Collection/a.xci" },
+        { index: 1, name: "Collection/b.xci" },
+        { index: 2, name: "Collection/c.xci" }
+      ]]
+    });
+
+    await service.reconcile([attempt.id]);
+
+    expect(setFilePriorities).toHaveBeenCalledOnce();
+    expect(setFilePriorities).toHaveBeenCalledWith(
+      "subset-hash",
+      [0, 2],
+      0
+    );
+  });
+
+  it("makes no priority call when every file is selected", async () => {
+    const repository = new MemoryDownloads();
+    const attempt = storedAttempt({
+      id: "all-selected",
+      submissionKey: "all-selected-key",
+      source: "prowlarr-torrent",
+      torrentHash: "all-selected-hash",
+      selectedFiles: [
+        { index: 0, name: "Collection/a.xci" },
+        { index: 1, name: "Collection/b.xci" }
+      ],
+      marker: "gamarr-all-selected"
+    });
+    repository.attempts.set(attempt.id, attempt);
+    const { service, setFilePriorities } = build({
+      repository,
+      torrents: [{
+        hash: "all-selected-hash",
+        tags: ["gamarr-all-selected"],
+        state: "downloading",
+        progress: 10
+      }],
+      fileLists: [[
+        { index: 0, name: "Collection/a.xci" },
+        { index: 1, name: "Collection/b.xci" }
+      ]]
+    });
+
+    await service.reconcile([attempt.id]);
+
+    expect(setFilePriorities).not.toHaveBeenCalled();
+    expect(repository.get(attempt.id)?.filesAppliedAt).toBe(1_000);
+  });
+
+  it("stamps filesAppliedAt exactly once", async () => {
+    const repository = new MemoryDownloads();
+    let timestamp = 1_000;
+    const attempt = storedAttempt({
+      id: "stamp-once",
+      submissionKey: "stamp-once-key",
+      source: "prowlarr-torrent",
+      torrentHash: "stamp-once-hash",
+      selectedFiles: [{ index: 0, name: "Collection/a.xci" }],
+      marker: "gamarr-stamp-once"
+    });
+    repository.attempts.set(attempt.id, attempt);
+    const { service, listFiles, setFilePriorities } = build({
+      repository,
+      torrents: [{
+        hash: "stamp-once-hash",
+        tags: ["gamarr-stamp-once"],
+        state: "downloading",
+        progress: 10
+      }],
+      fileLists: [[
+        { index: 0, name: "Collection/a.xci" },
+        { index: 1, name: "Collection/b.xci" }
+      ]],
+      now: () => timestamp
+    });
+
+    await service.reconcile([attempt.id]);
+    timestamp = 2_000;
+    await service.reconcile([attempt.id]);
+
+    expect(listFiles).toHaveBeenCalledOnce();
+    expect(setFilePriorities).toHaveBeenCalledOnce();
+    expect(repository.get(attempt.id)?.filesAppliedAt).toBe(1_000);
+  });
+
+  it("resumes file application after a restart", async () => {
+    const repository = new MemoryDownloads();
+    const attempt = storedAttempt({
+      id: "restart-selection",
+      submissionKey: "restart-selection-key",
+      source: "prowlarr-torrent",
+      torrentHash: "restart-hash",
+      selectedFiles: [{ index: 1, name: "Collection/b.xci" }],
+      marker: "gamarr-restart-selection"
+    });
+    repository.attempts.set(attempt.id, attempt);
+    const torrent: TorrentJob = {
+      hash: "restart-hash",
+      tags: ["gamarr-restart-selection"],
+      state: "downloading",
+      progress: 10
+    };
+    const beforeRestart = build({
+      repository,
+      torrents: [torrent],
+      fileLists: [[]]
+    });
+
+    await beforeRestart.service.reconcile([attempt.id]);
+    expect(repository.get(attempt.id)?.filesAppliedAt).toBeNull();
+
+    const afterRestart = build({
+      repository,
+      torrents: [torrent],
+      fileLists: [[
+        { index: 0, name: "Collection/a.xci" },
+        { index: 1, name: "Collection/b.xci" }
+      ]]
+    });
+
+    await afterRestart.service.reconcile([attempt.id]);
+
+    expect(afterRestart.setFilePriorities).toHaveBeenCalledWith(
+      "restart-hash",
+      [0],
+      0
+    );
+    expect(repository.get(attempt.id)?.filesAppliedAt).toBe(1_000);
+  });
+
+  it("aborts application when a name no longer matches its index", async () => {
+    const repository = new MemoryDownloads();
+    const attempt = storedAttempt({
+      id: "name-mismatch",
+      submissionKey: "name-mismatch-key",
+      source: "prowlarr-torrent",
+      torrentHash: "mismatch-hash",
+      selectedFiles: [{ index: 1, name: "Collection/b.xci" }],
+      marker: "gamarr-name-mismatch"
+    });
+    repository.attempts.set(attempt.id, attempt);
+    const { service, setFilePriorities } = build({
+      repository,
+      torrents: [{
+        hash: "mismatch-hash",
+        tags: ["gamarr-name-mismatch"],
+        state: "downloading",
+        progress: 10
+      }],
+      fileLists: [[
+        { index: 0, name: "Collection/a.xci" },
+        { index: 1, name: "Collection/renamed.xci" }
+      ]]
+    });
+
+    await service.reconcile([attempt.id]);
+
+    expect(setFilePriorities).not.toHaveBeenCalled();
+    expect(repository.get(attempt.id)).toMatchObject({
+      status: "Downloading",
+      filesAppliedAt: null,
+      failureDetail: "Torrent file list did not match the selection"
     });
   });
 

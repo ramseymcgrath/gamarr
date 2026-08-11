@@ -508,19 +508,58 @@ export class DownloadService {
       const torrent = attempt.torrentHash === null
         ? torrents.find((job) => job.tags.includes(attempt.marker))
         : torrents.find((job) => job.hash === attempt.torrentHash);
-      if (!torrent) continue;
-      const status = statusFromTorrent(torrent.state);
-      if (status === null) continue;
+      let reconciled = attempt;
+      if (torrent) {
+        const status = statusFromTorrent(torrent.state);
+        if (status !== null) {
+          reconciled = this.dependencies.repository.update(attempt.id, {
+            status,
+            progress: status === "Completed"
+              ? 100
+              : torrentProgress(torrent.progress),
+            ...(attempt.torrentHash === null
+              ? { torrentHash: torrent.hash }
+              : {}),
+            failureDetail: status === "Failed" ? torrent.state : null,
+            completedAt: status === "Completed" ? timestamp : null,
+            updatedAt: timestamp
+          });
+        }
+      }
+
+      if (isTerminalDownloadStatus(reconciled.status)) continue;
+      if (
+        !reconciled.selectedFiles?.length
+        || reconciled.filesAppliedAt !== null
+      ) continue;
+      const hash = reconciled.torrentHash ?? torrent?.hash;
+      if (!hash) continue;
+
+      const files = await client.listFiles(hash);
+      if (files.length === 0) continue;
+
+      const namesMatch = reconciled.selectedFiles.every((selected) =>
+        files.find((file) => file.index === selected.index)?.name
+          === selected.name);
+      if (!namesMatch) {
+        this.dependencies.repository.update(attempt.id, {
+          failureDetail: "Torrent file list did not match the selection",
+          updatedAt: timestamp
+        });
+        continue;
+      }
+
+      const selected = new Set(
+        reconciled.selectedFiles.map((file) => file.index)
+      );
+      const unselectedIndices = files
+        .filter((file) => !selected.has(file.index))
+        .map((file) => file.index);
+      if (unselectedIndices.length > 0) {
+        await client.setFilePriorities(hash, unselectedIndices, 0);
+      }
       this.dependencies.repository.update(attempt.id, {
-        status,
-        progress: status === "Completed"
-          ? 100
-          : torrentProgress(torrent.progress),
-        ...(attempt.torrentHash === null
-          ? { torrentHash: torrent.hash }
-          : {}),
-        failureDetail: status === "Failed" ? torrent.state : null,
-        completedAt: status === "Completed" ? timestamp : null,
+        filesAppliedAt: timestamp,
         updatedAt: timestamp
       });
     }
