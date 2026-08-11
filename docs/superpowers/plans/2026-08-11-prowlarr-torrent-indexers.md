@@ -14,7 +14,7 @@
 
 Every task's requirements implicitly include this section.
 
-- **Node 24, pnpm.** `corepack enable`. Never use `npm` or `yarn`.
+- **Node 24 or newer, pnpm.** `corepack enable`. 24 is a floor, not a pin — a newer runtime is fine. Never use `npm` or `yarn`.
 - **Verification commands:** `pnpm lint`, `pnpm typecheck`, `pnpm test`. A single file: `pnpm test path/to/file.test.ts`. A single case: `pnpm test -t "case name"`.
 - **Tests are colocated** next to the source as `*.test.ts` / `*.test.tsx`. Vitest environment is `node` by default; component tests need a first-line `/** @vitest-environment jsdom */` docblock.
 - **Path aliases:** `@/*` → `src/*`, `@tests/*` → `tests/*`.
