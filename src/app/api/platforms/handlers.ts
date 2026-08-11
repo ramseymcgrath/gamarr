@@ -34,8 +34,20 @@ export async function handleSetPlatform(
       || typeof body.visible !== "boolean"
       || !Array.isArray(body.aliases)
       || !body.aliases.every((alias) => typeof alias === "string")
-      || !Array.isArray(body.categoryIds)
-      || !body.categoryIds.every((categoryId) => typeof categoryId === "string")
+    ) {
+      throw validationError("Invalid platform settings");
+    }
+    // Optional, and absence is not the same as an empty list. The visibility
+    // checkbox sends only id/visible/aliases; requiring the field 400s every
+    // toggle, and coercing it to [] would silently wipe a platform's
+    // categories as a side effect of showing or hiding it. A malformed value
+    // is still rejected.
+    if (
+      body.categoryIds !== undefined
+      && (
+        !Array.isArray(body.categoryIds)
+        || !body.categoryIds.every((categoryId) => typeof categoryId === "string")
+      )
     ) {
       throw validationError("Invalid platform settings");
     }
@@ -46,10 +58,12 @@ export async function handleSetPlatform(
       body.visible,
       body.aliases
     );
-    dependencies.settings.savePlatformCategories(
-      platformId,
-      body.categoryIds
-    );
+    if (body.categoryIds !== undefined) {
+      dependencies.settings.savePlatformCategories(
+        platformId,
+        body.categoryIds as string[]
+      );
+    }
     return Response.json({ status: "ok" });
   } catch (error) {
     return errorResponse(error);

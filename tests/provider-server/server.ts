@@ -1,9 +1,12 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 
+import {
+  handleProwlarrFixture,
+  prowlarrTorrentPayload
+} from "@tests/provider-server/prowlarr-fixtures";
 import { fixtureState } from "@tests/provider-server/state";
 
 const port = Number(process.env.GAMARR_FIXTURE_PORT ?? 4100);
-const torrentPayload = Buffer.from("gamarr-fixture-torrent-bytes");
 
 function body(request: IncomingMessage): Promise<Buffer> {
   return new Promise((resolve, reject) => {
@@ -17,11 +20,6 @@ function body(request: IncomingMessage): Promise<Buffer> {
 function json(response: ServerResponse, value: unknown, status = 200) {
   response.writeHead(status, { "content-type": "application/json" });
   response.end(JSON.stringify(value));
-}
-
-function xml(response: ServerResponse, value: string) {
-  response.writeHead(200, { "content-type": "application/xml" });
-  response.end(value);
 }
 
 /**
@@ -45,6 +43,17 @@ const server = createServer(async (request, response) => {
   if (url.pathname === "/reset") {
     fixtureState.reset();
     return json(response, { status: "ok" });
+  }
+  const prowlarr = handleProwlarrFixture({
+    method: request.method,
+    url,
+    apiKey: Array.isArray(request.headers["x-api-key"])
+      ? request.headers["x-api-key"][0]
+      : request.headers["x-api-key"]
+  });
+  if (prowlarr !== null) {
+    response.writeHead(prowlarr.status, prowlarr.headers);
+    return response.end(prowlarr.body);
   }
   if (url.pathname === "/oauth2/token") {
     return json(response, {
@@ -103,38 +112,6 @@ const server = createServer(async (request, response) => {
       alternative_names: [{ name: "Metroid Prime 4" }],
       release_dates: [{ platform: 130, y: 2026 }]
     }]);
-  }
-  if (url.pathname === "/newznab/api") {
-    const mode = url.searchParams.get("t");
-    if (mode === "caps") {
-      return xml(response, `<?xml version="1.0"?>
-        <caps>
-          <server version="1" title="Fixture Newznab" />
-          <searching><search available="yes" /></searching>
-          <categories>
-            <category id="4000" name="PC">
-              <subcat id="4050" name="Games" />
-            </category>
-          </categories>
-        </caps>`);
-    }
-    if (mode === "get") {
-      response.writeHead(200, { "content-type": "application/x-nzb" });
-      return response.end(`<?xml version="1.0"?><nzb xmlns="http://www.newzbin.com/DTD/2003/nzb"><head /></nzb>`);
-    }
-    return xml(response, `<?xml version="1.0"?>
-      <rss xmlns:newznab="http://www.newznab.com/DTD/2010/feeds/attributes/" version="2.0">
-        <channel>
-          <item>
-            <title>Metroid.Prime.4.Beyond.NSW-GAMARR</title>
-            <guid isPermaLink="false">fixture-guid</guid>
-            <pubDate>Thu, 31 Jul 2026 00:00:00 GMT</pubDate>
-            <enclosure url="http://127.0.0.1:${port}/newznab/api?t=get&amp;id=fixture-guid&amp;apikey=indexer-secret" length="2147483648" type="application/x-nzb" />
-            <newznab:attr name="category" value="4050" />
-            <newznab:attr name="size" value="2147483648" />
-          </item>
-        </channel>
-      </rss>`);
   }
   if (url.pathname === "/sab/api") {
     const mode = url.searchParams.get("mode");
@@ -199,7 +176,7 @@ const server = createServer(async (request, response) => {
     if (
       tag.length === 0 ||
       !payload.includes('name="torrents"; filename="') ||
-      !payload.includes(torrentPayload.toString("utf8"))
+      !payload.includes(prowlarrTorrentPayload.toString("utf8"))
     ) {
       return json(response, { error: "invalid torrent" }, 415);
     }
@@ -229,68 +206,6 @@ const server = createServer(async (request, response) => {
       name: "metroid-prime-4-beyond-usa",
       size: 2048
     }]);
-  }
-  if (url.pathname === "/advancedsearch.php") {
-    return json(response, {
-      response: {
-        docs: [{
-          identifier: "metroid-prime-4-beyond-usa",
-          title: "Metroid Prime 4: Beyond (USA)",
-          date: "2026-07-31T00:00:00Z",
-          downloads: 1234,
-          item_size: 2048
-        }]
-      }
-    });
-  }
-  if (url.pathname.startsWith("/metadata/")) {
-    const identifier = url.pathname.slice("/metadata/".length);
-    return json(response, {
-      files: [
-        {
-          name: "Metroid.Prime.4.Beyond.(USA).zip",
-          size: "512",
-          format: "ZIP",
-          source: "original"
-        },
-        {
-          name: "Metroid.Prime.4.Beyond.(USA).chd",
-          size: "2048",
-          format: "CHD",
-          source: "original"
-        },
-        {
-          name: `${identifier}_archive.torrent`,
-          size: String(torrentPayload.length),
-          format: "Archive BitTorrent",
-          source: "metadata"
-        },
-        {
-          name: "metroid-prime-4-beyond-usa_files.xml",
-          size: "128",
-          format: "Metadata",
-          source: "metadata"
-        }
-      ]
-    });
-  }
-  if (url.pathname.startsWith("/download/")) {
-    const segments = url.pathname.split("/").filter(Boolean);
-    const identifier = segments[1];
-    const fileName = segments[2];
-    if (fileName === `${identifier}_archive.torrent`) {
-      response.writeHead(200, {
-        "content-type": "application/x-bittorrent",
-        "content-length": String(torrentPayload.length)
-      });
-      return response.end(torrentPayload);
-    }
-    const payload = Buffer.from("gamarr-fixture-rom-bytes");
-    response.writeHead(200, {
-      "content-type": "application/octet-stream",
-      "content-length": String(payload.length)
-    });
-    return response.end(payload);
   }
   json(response, { error: "not found" }, 404);
 });
