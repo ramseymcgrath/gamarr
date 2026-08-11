@@ -1,15 +1,16 @@
-import { eq } from "drizzle-orm";
+import { asc, eq } from "drizzle-orm";
 
 import type { Database } from "@/db/client";
 import {
   igdbSettings,
-  indexers,
+  platformCategories,
+  prowlarrSettings,
   qbittorrentSettings,
   sabnzbdSettings
 } from "@/db/schema";
 import type {
   IgdbSettingsRecord,
-  IndexerRecord,
+  ProwlarrSettingsRecord,
   QbittorrentSettingsRecord,
   SabnzbdSettingsRecord
 } from "@/features/settings/models";
@@ -127,58 +128,67 @@ export class SqliteSettingsRepository implements SettingsRepository {
       .run();
   }
 
-  listIndexers(): IndexerRecord[] {
-    return this.database.select().from(indexers).all().map((row) => ({
-      id: row.id,
-      name: row.name,
+  getProwlarr(): ProwlarrSettingsRecord | null {
+    const row = this.database
+      .select()
+      .from(prowlarrSettings)
+      .where(eq(prowlarrSettings.id, 1))
+      .get();
+    if (!row) return null;
+    return {
       baseUrl: row.baseUrl,
       apiKey: row.apiKey,
-      enabled: row.enabled,
-      categoryIds: row.categoryIds,
       timeoutMs: row.timeoutMs,
-      configRevision: row.configRevision,
       lastTestStatus: row.lastTestStatus,
       lastTestedAt: row.lastTestedAt,
-      deletedAt: row.deletedAt,
-      createdAt: row.createdAt,
+      configRevision: row.configRevision,
       updatedAt: row.updatedAt
-    }));
+    };
   }
 
-  saveIndexer(value: IndexerRecord): void {
+  saveProwlarr(value: ProwlarrSettingsRecord): void {
     this.database
-      .insert(indexers)
-      .values(value)
+      .insert(prowlarrSettings)
+      .values({ id: 1, ...value })
       .onConflictDoUpdate({
-        target: indexers.id,
+        target: prowlarrSettings.id,
         set: value
       })
       .run();
   }
 
-  deleteIndexer(id: string, deletedAt: number): void {
-    const existing = this.database
-      .select()
-      .from(indexers)
-      .where(eq(indexers.id, id))
-      .get();
-    if (!existing) return;
-    this.database
-      .update(indexers)
-      .set({
-        enabled: false,
-        deletedAt,
-        updatedAt: deletedAt,
-        configRevision: existing.configRevision + 1
-      })
-      .where(eq(indexers.id, id))
+  recordProwlarrTest(status: string, testedAt: number): void {
+    this.database.update(prowlarrSettings)
+      .set({ lastTestStatus: status, lastTestedAt: testedAt })
+      .where(eq(prowlarrSettings.id, 1))
       .run();
   }
 
-  recordIndexerTest(id: string, status: string, testedAt: number): void {
-    this.database.update(indexers)
-      .set({ lastTestStatus: status, lastTestedAt: testedAt })
-      .where(eq(indexers.id, id))
-      .run();
+  listPlatformCategories(platformId: number): string[] {
+    return this.database
+      .select({ categoryId: platformCategories.categoryId })
+      .from(platformCategories)
+      .where(eq(platformCategories.platformId, platformId))
+      .orderBy(asc(platformCategories.categoryId))
+      .all()
+      .map((row) => row.categoryId);
+  }
+
+  savePlatformCategories(platformId: number, categoryIds: string[]): void {
+    this.database.transaction((transaction) => {
+      transaction
+        .delete(platformCategories)
+        .where(eq(platformCategories.platformId, platformId))
+        .run();
+      const uniqueCategoryIds = [...new Set(categoryIds)];
+      if (uniqueCategoryIds.length === 0) return;
+      transaction
+        .insert(platformCategories)
+        .values(uniqueCategoryIds.map((categoryId) => ({
+          platformId,
+          categoryId
+        })))
+        .run();
+    });
   }
 }

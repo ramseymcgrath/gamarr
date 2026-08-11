@@ -3,6 +3,7 @@ import { asc, eq, inArray } from "drizzle-orm";
 import type { Database } from "@/db/client";
 import {
   games,
+  platformCategories,
   platformPopularGames,
   platformSettings,
   platforms
@@ -41,13 +42,23 @@ export class SqliteCatalogRepository implements CatalogRepository {
         checksum: platform.providerChecksum ?? undefined,
         visible: settings?.visible ?? false,
         aliases: settings?.aliases ?? [],
-        categoryIds: settings?.categoryIds ?? [],
+        categoryIds: this.listPlatformCategories(platform.id),
         lastSyncedAt: platform.lastSyncedAt
       }));
   }
 
   getPlatform(id: number): PlatformView | null {
     return this.listPlatforms().find((platform) => platform.id === id) ?? null;
+  }
+
+  private listPlatformCategories(platformId: number): string[] {
+    return this.database
+      .select({ categoryId: platformCategories.categoryId })
+      .from(platformCategories)
+      .where(eq(platformCategories.platformId, platformId))
+      .orderBy(asc(platformCategories.categoryId))
+      .all()
+      .map((row) => row.categoryId);
   }
 
   upsertPlatforms(values: Platform[], now: number): void {

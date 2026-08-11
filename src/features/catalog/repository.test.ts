@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createDatabase } from "@/db/client";
 import { migrateDatabase } from "@/db/migrate";
 import { SqliteCatalogRepository } from "@/features/catalog/repository";
+import { SqliteSettingsRepository } from "@/features/settings/repository";
 
 const temporaryDirectories: string[] = [];
 
@@ -42,6 +43,19 @@ describe("SqliteCatalogRepository", () => {
       aliases: ["switch", "nsw"],
       lastSyncedAt: 200
     });
+    database.$client.close();
+  });
+
+  it("reads platform categories from the dedicated category table", () => {
+    const { database, repository: catalog } = repository();
+    const settings = new SqliteSettingsRepository(database);
+    catalog.upsertPlatforms([
+      { id: 130, name: "Switch", abbreviation: "NSW" }
+    ], 100);
+    settings.savePlatformCategories(130, ["1080", "4050"]);
+
+    expect(catalog.getPlatform(130)?.categoryIds).toEqual(["1080", "4050"]);
+
     database.$client.close();
   });
 

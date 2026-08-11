@@ -37,17 +37,18 @@ export const qbittorrentSettingsInputSchema = z.object({
 export type QbittorrentSettingsInput =
   z.infer<typeof qbittorrentSettingsInputSchema>;
 
-export const indexerInputSchema = z.object({
-  id: z.string().min(1).optional(),
-  name: z.string().trim().min(1).max(255),
+export const prowlarrSettingsInputSchema: z.ZodType<{
+  baseUrl: string;
+  apiKey: SecretUpdate;
+  timeoutMs: number;
+}> = z.object({
   baseUrl: z.url(),
   apiKey: secretUpdateSchema,
-  enabled: z.boolean(),
-  categoryIds: z.array(z.string().trim().min(1).max(32)).max(100),
   timeoutMs: z.number().int().min(1_000).max(30_000)
 });
 
-export type IndexerInput = z.infer<typeof indexerInputSchema>;
+export type ProwlarrSettingsInput =
+  z.infer<typeof prowlarrSettingsInputSchema>;
 
 export interface IgdbSettingsRecord {
   clientId: string;
@@ -80,19 +81,13 @@ export interface QbittorrentSettingsRecord {
   updatedAt: number;
 }
 
-export interface IndexerRecord {
-  id: string;
-  name: string;
+export interface ProwlarrSettingsRecord {
   baseUrl: string;
   apiKey: string;
-  enabled: boolean;
-  categoryIds: string[];
   timeoutMs: number;
-  configRevision: number;
   lastTestStatus: string | null;
   lastTestedAt: number | null;
-  deletedAt: number | null;
-  createdAt: number;
+  configRevision: number;
   updatedAt: number;
 }
 
@@ -124,22 +119,18 @@ export interface PublicQbittorrentSettings {
   configRevision: number;
 }
 
-export interface PublicIndexer {
-  id: string;
-  name: string;
+export interface PublicProwlarrSettings {
   baseUrl: string;
   hasApiKey: boolean;
-  enabled: boolean;
-  categoryIds: string[];
   timeoutMs: number;
-  configRevision: number;
   lastTestStatus: string | null;
   lastTestedAt: number | null;
+  configRevision: number;
 }
 
 export interface PublicSettings {
   igdb: PublicIgdbSettings | null;
   sabnzbd: PublicSabnzbdSettings | null;
   qbittorrent: PublicQbittorrentSettings | null;
-  indexers: PublicIndexer[];
+  prowlarr: PublicProwlarrSettings | null;
 }

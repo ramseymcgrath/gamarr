@@ -7,7 +7,7 @@ import {
 } from "@/features/settings/service";
 import type {
   IgdbSettingsRecord,
-  IndexerRecord,
+  ProwlarrSettingsRecord,
   SabnzbdSettingsRecord
 } from "@/features/settings/models";
 
@@ -24,7 +24,7 @@ class MemorySettingsRepository implements SettingsRepository {
     configRevision: number;
     updatedAt: number;
   } | null = null;
-  indexers: IndexerRecord[] = [];
+  prowlarr: ProwlarrSettingsRecord | null = null;
 
   getIgdb() {
     return this.igdb;
@@ -57,27 +57,12 @@ class MemorySettingsRepository implements SettingsRepository {
     }
   }
 
-  listIndexers() {
-    return this.indexers;
+  getProwlarr() {
+    return this.prowlarr;
   }
 
-  saveIndexer(value: IndexerRecord) {
-    const index = this.indexers.findIndex((item) => item.id === value.id);
-    if (index === -1) {
-      this.indexers.push(value);
-    } else {
-      this.indexers[index] = value;
-    }
-  }
-
-  deleteIndexer(id: string, deletedAt: number) {
-    const indexer = this.indexers.find((item) => item.id === id);
-    if (indexer) {
-      indexer.enabled = false;
-      indexer.deletedAt = deletedAt;
-      indexer.updatedAt = deletedAt;
-      indexer.configRevision += 1;
-    }
+  saveProwlarr(value: ProwlarrSettingsRecord) {
+    this.prowlarr = value;
   }
 }
 
@@ -196,98 +181,95 @@ describe("SettingsService", () => {
     expect(repository.igdb?.clientSecret).toBe("");
   });
 
-  it("normalizes indexer URLs and validates timeout bounds", () => {
+  it("redacts the prowlarr api key", () => {
     const repository = new MemorySettingsRepository();
-    const service = new SettingsService(repository, () => 1_000, () => "indexer-1");
-
-    expect(() => service.saveIndexer({
-      name: "Indexer",
-      baseUrl: "https://indexer.test/api/",
-      apiKey: { action: "replace", value: "key" },
-      enabled: true,
-      categoryIds: ["4050"],
-      timeoutMs: 999
-    })).toThrowError(AppError);
-
-    const saved = service.saveIndexer({
-      name: "Indexer",
-      baseUrl: "https://indexer.test/api/",
-      apiKey: { action: "replace", value: "key" },
-      enabled: true,
-      categoryIds: ["4050"],
-      timeoutMs: 10_000
+    const service = new SettingsService(repository);
+    repository.saveProwlarr({
+      baseUrl: "https://prowlarr.test/api",
+      apiKey: "prowlarr-secret-key",
+      timeoutMs: 10_000,
+      lastTestStatus: "ok",
+      lastTestedAt: 900,
+      configRevision: 4,
+      updatedAt: 1_000
     });
 
-    expect(saved.baseUrl).toBe("https://indexer.test/api");
-    expect(saved.hasApiKey).toBe(true);
-    expect(JSON.stringify(saved)).not.toContain("\"key\"");
+    const redacted = service.getRedacted();
+
+    expect(redacted.prowlarr).toEqual({
+      baseUrl: "https://prowlarr.test/api",
+      hasApiKey: true,
+      timeoutMs: 10_000,
+      lastTestStatus: "ok",
+      lastTestedAt: 900,
+      configRevision: 4
+    });
+    expect(JSON.stringify(redacted)).not.toContain("prowlarr-secret-key");
   });
 
-  it("soft-deletes indexers so historical download records remain valid", () => {
+  it("retains the stored api key on a retain action", () => {
     const repository = new MemorySettingsRepository();
-    const service = new SettingsService(repository, () => 2_000, () => "indexer-1");
-    service.saveIndexer({
-      name: "Indexer",
-      baseUrl: "https://indexer.test/api",
-      apiKey: { action: "replace", value: "key" },
-      enabled: true,
-      categoryIds: ["4050"],
+    const service = new SettingsService(repository, () => 2_000);
+    service.saveProwlarr({
+      baseUrl: "https://prowlarr.test/api",
+      apiKey: { action: "replace", value: "prowlarr-secret-key" },
       timeoutMs: 10_000
     });
+    service.saveProwlarr({
+      baseUrl: "https://prowlarr.test/v1",
+      apiKey: { action: "retain" },
+      timeoutMs: 12_000
+    });
 
-    service.deleteIndexer("indexer-1");
-
-    expect(repository.indexers[0]).toMatchObject({
-      enabled: false,
-      deletedAt: 2_000,
+    expect(repository.getProwlarr()).toMatchObject({
+      baseUrl: "https://prowlarr.test/v1",
+      apiKey: "prowlarr-secret-key",
+      timeoutMs: 12_000,
       configRevision: 2
     });
-    expect(service.getRedacted().indexers).toEqual([]);
   });
 
-  it("refuses to resurrect a soft-deleted indexer through an update", () => {
+  it("clears the api key on a clear action", () => {
     const repository = new MemorySettingsRepository();
-    const service = new SettingsService(repository, () => 2_000, () => "indexer-1");
-    service.saveIndexer({
-      name: "Indexer",
-      baseUrl: "https://indexer.test/api",
-      apiKey: { action: "replace", value: "key" },
-      enabled: true,
-      categoryIds: ["4050"],
+    const service = new SettingsService(repository);
+    service.saveProwlarr({
+      baseUrl: "https://prowlarr.test/api",
+      apiKey: { action: "replace", value: "prowlarr-secret-key" },
       timeoutMs: 10_000
     });
-    service.deleteIndexer("indexer-1");
-
-    expect(() => service.saveIndexer({
-      id: "indexer-1",
-      name: "Revived",
-      baseUrl: "https://indexer.test/api",
-      apiKey: { action: "retain" },
-      enabled: true,
-      categoryIds: ["4050"],
+    service.saveProwlarr({
+      baseUrl: "https://prowlarr.test/api",
+      apiKey: { action: "clear" },
       timeoutMs: 10_000
-    })).toThrow(expect.objectContaining({ code: "NOT_FOUND", status: 404 }));
-
-    expect(repository.indexers[0]).toMatchObject({
-      name: "Indexer",
-      enabled: false,
-      deletedAt: 2_000
     });
-    expect(service.getRedacted().indexers).toEqual([]);
+
+    expect(repository.getProwlarr()?.apiKey).toBe("");
+    expect(service.getRedacted().prowlarr?.hasApiKey).toBe(false);
   });
 
-  it("reports an unknown indexer id as not found", () => {
+  it("rejects a non-URL base url", () => {
     const repository = new MemorySettingsRepository();
-    const service = new SettingsService(repository, () => 2_000, () => "indexer-1");
+    const service = new SettingsService(repository);
 
-    expect(() => service.saveIndexer({
-      id: "missing",
-      name: "Indexer",
-      baseUrl: "https://indexer.test/api",
-      apiKey: { action: "replace", value: "key" },
-      enabled: true,
-      categoryIds: ["4050"],
+    expect(() => service.saveProwlarr({
+      baseUrl: "not a url",
+      apiKey: { action: "replace", value: "prowlarr-secret-key" },
       timeoutMs: 10_000
-    })).toThrow(expect.objectContaining({ code: "NOT_FOUND", status: 404 }));
+    })).toThrowError(AppError);
+    expect(repository.getProwlarr()).toBeNull();
+  });
+
+  it("rejects a timeout outside 1000..30000", () => {
+    const repository = new MemorySettingsRepository();
+    const service = new SettingsService(repository);
+
+    for (const timeoutMs of [999, 30_001]) {
+      expect(() => service.saveProwlarr({
+        baseUrl: "https://prowlarr.test/api",
+        apiKey: { action: "replace", value: "prowlarr-secret-key" },
+        timeoutMs
+      })).toThrowError(AppError);
+    }
+    expect(repository.getProwlarr()).toBeNull();
   });
 });
