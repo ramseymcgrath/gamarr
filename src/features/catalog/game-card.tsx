@@ -1,19 +1,40 @@
+"use client";
+
 import { Check, Gamepad2 } from "lucide-react";
 import Image from "next/image";
 import Link from "next/link";
 import type { Route } from "next";
 
 import type { CatalogGameView } from "@/features/catalog/models";
+import { isModifiedClick } from "@/lib/url-state";
 
+/**
+ * A real link (so new-tab and copy-link work) that, on a plain click, opens
+ * the game in the Discover sheet instead of leaving the results.
+ */
 export function GameCard({
   game,
-  href
+  href,
+  selected = false,
+  onSelect
 }: {
   game: CatalogGameView;
   href: string;
+  selected?: boolean;
+  onSelect?: () => void;
 }) {
   return (
-    <Link className="game-card" href={href as Route}>
+    <Link
+      className="game-card"
+      href={href as Route}
+      scroll={false}
+      aria-current={selected ? "true" : undefined}
+      onClick={(event) => {
+        if (!onSelect || isModifiedClick(event)) return;
+        event.preventDefault();
+        onSelect();
+      }}
+    >
       <div className="game-cover">
         {game.coverUrl ? (
           <Image
@@ -36,7 +57,7 @@ export function GameCard({
       </div>
       <div>
         <h3>{game.name}</h3>
-        <p>{game.releaseYear ?? "YEAR UNKNOWN"}</p>
+        <p>{game.releaseYear ?? "Year unknown"}</p>
       </div>
     </Link>
   );

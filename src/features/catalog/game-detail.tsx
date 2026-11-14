@@ -1,13 +1,7 @@
 "use client";
 
-import {
-  ArrowLeft,
-  Gamepad2,
-  Search
-} from "lucide-react";
+import { Gamepad2, Search } from "lucide-react";
 import Image from "next/image";
-import Link from "next/link";
-import type { Route } from "next";
 import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -15,18 +9,18 @@ import type { GameSearchResult } from "@/features/catalog/models";
 import type { ReleaseSearchResponse } from "@/features/release-search/service";
 import { ReleaseResults } from "@/features/release-search/release-results";
 
+/**
+ * A game's details and release search, shown in the Discover side sheet.
+ * Keyed by game id by its parent, so stepping to another game starts clean.
+ */
 export function GameDetail({
   game,
   platformId,
-  platformName,
-  query,
-  returnTo
+  platformName
 }: {
   game: GameSearchResult;
   platformId: number;
   platformName: string;
-  query: string;
-  returnTo: string;
 }) {
   const [response, setResponse] = useState<ReleaseSearchResponse | null>(null);
   const [state, setState] = useState<"idle" | "searching" | "error">("idle");
@@ -46,36 +40,40 @@ export function GameDetail({
     }
   };
   return (
-    <div className="page">
-      <Link className="back-link" href={returnTo as Route}>
-        <ArrowLeft aria-hidden="true" /> Back to results
-      </Link>
-      <section className="game-hero">
+    <div className="game-panel">
+      <section className="game-panel-hero">
         <div className="detail-cover">
           {game.coverUrl ? (
-            <Image src={game.coverUrl} alt="" fill sizes="280px" priority />
+            <Image src={game.coverUrl} alt="" fill sizes="160px" priority />
           ) : <Gamepad2 aria-hidden="true" />}
         </div>
         <div className="game-hero-copy">
-          <p className="eyebrow">{platformName} · {game.releaseYear ?? "YEAR UNKNOWN"}</p>
-          <h1>{game.name}</h1>
-          <div className="genre-row">
-            {game.genres.map((genre) => <span key={genre}>{genre}</span>)}
-          </div>
-          <p className="game-summary">{game.summary ?? "No catalog summary is available."}</p>
+          <p className="game-panel-meta">
+            {platformName}
+            {game.releaseYear ? `, ${game.releaseYear}` : ""}
+          </p>
+          {game.genres.length > 0 && (
+            <div className="genre-row">
+              {game.genres.map((genre) => <span key={genre}>{genre}</span>)}
+            </div>
+          )}
           <Button
             onClick={() => void search()}
             disabled={state === "searching"}
           >
             <Search aria-hidden="true" />
-            {state === "searching" ? "Searching indexers…" : "Search releases"}
+            {state === "searching"
+              ? "Searching releases…"
+              : response ? "Search releases again" : "Search releases"}
           </Button>
-          {query && <p className="return-context mono">CATALOG QUERY: {query}</p>}
-          {state === "error" && (
-            <p className="error-banner">Release search failed. Check your indexers.</p>
-          )}
         </div>
       </section>
+      <p className="game-summary">{game.summary ?? "No catalog summary is available."}</p>
+      {state === "error" && (
+        <p className="error-banner">
+          Release search failed. Check Prowlarr in Settings, then try again.
+        </p>
+      )}
       {response && (
         <ReleaseResults
           gameId={game.id}

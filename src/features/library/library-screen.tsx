@@ -1,3 +1,5 @@
+"use client";
+
 import {
   Disc3,
   Gamepad2,
@@ -10,9 +12,23 @@ import type { Route } from "next";
 import { EmptyState } from "@/components/empty-state";
 import { StatusPill } from "@/components/status-pill";
 import { Button } from "@/components/ui/button";
-import type { LibraryCard } from "@/features/library/models";
+import {
+  LibraryEntrySheet,
+  useLibraryEntrySheet
+} from "@/features/library/library-entry-sheet";
+import type { LibraryCard, LibraryDetail } from "@/features/library/models";
+import { isModifiedClick } from "@/lib/url-state";
+import { useState } from "react";
 
-export function LibraryScreen({ entries }: { entries: LibraryCard[] }) {
+export function LibraryScreen({
+  entries: initialEntries,
+  initialDetail = null
+}: {
+  entries: LibraryCard[];
+  initialDetail?: LibraryDetail | null;
+}) {
+  const [entries, setEntries] = useState(initialEntries);
+  const sheet = useLibraryEntrySheet();
   return (
     <div className="page">
       <header className="page-header">
@@ -20,7 +36,7 @@ export function LibraryScreen({ entries }: { entries: LibraryCard[] }) {
           <p className="eyebrow">SAVED GAME / PLATFORM RECORDS</p>
           <h1>Your library.</h1>
           <p>
-            Every game you send to SABnzbd stays here with its selected
+            Every game you send to a download client stays here with its selected
             platform and complete attempt history.
           </p>
         </div>
@@ -35,12 +51,23 @@ export function LibraryScreen({ entries }: { entries: LibraryCard[] }) {
           action={<Button asChild><Link href={"/discover" as Route}>Open Discover</Link></Button>}
         >
           Search the catalog, choose a release, and it will appear here before
-          Gamarr sends it to SABnzbd.
+          Gamarr sends it to your download client.
         </EmptyState>
       ) : (
         <div className="library-grid">
           {entries.map((entry, index) => (
-            <Link className="library-card" href={`/library/${entry.id}` as Route} key={entry.id}>
+            <Link
+              className="library-card"
+              href={`/?entry=${entry.id}` as Route}
+              scroll={false}
+              aria-current={sheet.value === entry.id ? "true" : undefined}
+              onClick={(event) => {
+                if (isModifiedClick(event)) return;
+                event.preventDefault();
+                sheet.open(entry.id);
+              }}
+              key={entry.id}
+            >
               <div className="library-card-index mono">
                 {String(index + 1).padStart(2, "0")}
               </div>
@@ -69,6 +96,12 @@ export function LibraryScreen({ entries }: { entries: LibraryCard[] }) {
           ))}
         </div>
       )}
+      <LibraryEntrySheet
+        sheet={sheet}
+        order={entries.map((entry) => entry.id)}
+        initialDetail={initialDetail}
+        onRemoved={(id) => setEntries((values) => values.filter((value) => value.id !== id))}
+      />
     </div>
   );
 }

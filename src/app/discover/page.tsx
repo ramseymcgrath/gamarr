@@ -7,17 +7,19 @@ export const dynamic = "force-dynamic";
 export default async function DiscoverPage({
   searchParams
 }: {
-  searchParams: Promise<{ platformId?: string; q?: string }>;
+  searchParams: Promise<{ game?: string }>;
 }) {
-  const parameters = await searchParams;
-  const parsedPlatform = Number(parameters.platformId);
+  const { game } = await searchParams;
+  const repository = new SqliteCatalogRepository(getDatabase());
+  const gameId = Number(game);
+  // A shared `?game=` link renders with its sheet already filled in.
+  const initialGame = Number.isInteger(gameId) && gameId > 0
+    ? repository.getGame(gameId)
+    : null;
   return (
     <DiscoverScreen
-      platforms={new SqliteCatalogRepository(getDatabase()).listPlatforms()}
-      initialQuery={parameters.q ?? ""}
-      initialPlatformId={Number.isInteger(parsedPlatform) && parsedPlatform > 0
-        ? parsedPlatform
-        : null}
+      platforms={repository.listPlatforms()}
+      initialGame={initialGame}
     />
   );
 }

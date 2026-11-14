@@ -1,7 +1,6 @@
 "use client";
 
 import {
-  ArrowLeft,
   RefreshCw,
   Search,
   Trash2
@@ -9,18 +8,32 @@ import {
 import Image from "next/image";
 import Link from "next/link";
 import type { Route } from "next";
-import { useState } from "react";
+import { useId, useState, type FormEvent } from "react";
 
 import { StatusPill } from "@/components/status-pill";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import type {
   LibraryAttempt,
   LibraryDetail
 } from "@/features/library/models";
 
-export function LibraryDetailScreen({ detail }: { detail: LibraryDetail }) {
+/**
+ * A saved game's record and attempt history, shown in the library sheet.
+ * `onRemoved` lets the host close the sheet and drop the card.
+ */
+export function LibraryDetailScreen({
+  detail,
+  onRemoved
+}: {
+  detail: LibraryDetail;
+  onRemoved?: () => void;
+}) {
   const [attempts, setAttempts] = useState(detail.attempts);
   const [message, setMessage] = useState<string | null>(null);
+  const [confirming, setConfirming] = useState(false);
+  const [confirmation, setConfirmation] = useState("");
+  const confirmId = useId();
   const active = attempts.filter((attempt) =>
     ["Pending", "Submitting", "Queued", "Downloading", "Unknown"]
       .includes(attempt.status));
@@ -48,23 +61,23 @@ export function LibraryDetailScreen({ detail }: { detail: LibraryDetail }) {
     setMessage("Status refreshed");
   };
 
-  const remove = async () => {
-    const confirmation = prompt(`Type "${detail.gameTitle}" to remove this Gamarr record.`);
-    if (confirmation === null) return;
+  const remove = async (event: FormEvent) => {
+    event.preventDefault();
     const response = await fetch(`/api/library/${detail.id}`, {
       method: "DELETE",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ confirmation })
     });
-    if (response.ok) location.href = "/";
-    else setMessage("The title confirmation did not match.");
+    if (!response.ok) {
+      setMessage("That isn't the exact title, so nothing was removed.");
+      return;
+    }
+    if (onRemoved) onRemoved();
+    else location.href = "/";
   };
 
   return (
-    <div className="page">
-      <Link className="back-link" href="/">
-        <ArrowLeft aria-hidden="true" /> Back to library
-      </Link>
+    <div className="library-panel">
       <header className="library-detail-header">
         <div className="library-detail-cover">
           {detail.coverUrl
@@ -72,14 +85,13 @@ export function LibraryDetailScreen({ detail }: { detail: LibraryDetail }) {
             : <span aria-hidden="true">{detail.gameTitle.slice(0, 1)}</span>}
         </div>
         <div>
-          <p className="eyebrow">{detail.platformName}</p>
-          <h1>{detail.gameTitle}</h1>
+          <p className="game-panel-meta">{detail.platformName}</p>
           <p className="muted">
-            Saved record · {attempts.length} {attempts.length === 1 ? "attempt" : "attempts"}
+            {attempts.length} download {attempts.length === 1 ? "attempt" : "attempts"}
           </p>
           <div className="button-row detail-actions">
             <Button asChild>
-              <Link href={`/discover/${detail.gameId}?platformId=${detail.platformId}` as Route}>
+              <Link href={`/discover?platformId=${detail.platformId}&game=${detail.gameId}` as Route}>
                 <Search aria-hidden="true" /> Search again
               </Link>
             </Button>
@@ -88,10 +100,38 @@ export function LibraryDetailScreen({ detail }: { detail: LibraryDetail }) {
                 <RefreshCw aria-hidden="true" /> Refresh status
               </Button>
             )}
-            <Button variant="ghost" onClick={() => void remove()}>
-              <Trash2 aria-hidden="true" /> Remove record
+            <Button
+              variant="ghost"
+              aria-expanded={confirming}
+              aria-controls={confirmId}
+              onClick={() => setConfirming((value) => !value)}
+            >
+              <Trash2 aria-hidden="true" /> Remove from library
             </Button>
           </div>
+          {confirming && (
+            <form id={confirmId} className="remove-confirm" onSubmit={(event) => void remove(event)}>
+              <label htmlFor={`${confirmId}-title`}>
+                Type <strong>{detail.gameTitle}</strong> to remove it from
+                Gamarr. Downloaded files are not touched.
+              </label>
+              <div>
+                <Input
+                  id={`${confirmId}-title`}
+                  value={confirmation}
+                  autoComplete="off"
+                  onChange={(event) => setConfirmation(event.target.value)}
+                />
+                <Button
+                  type="submit"
+                  variant="secondary"
+                  disabled={confirmation !== detail.gameTitle}
+                >
+                  Remove
+                </Button>
+              </div>
+            </form>
+          )}
           {message && <p role="status" className="notice">{message}</p>}
         </div>
       </header>
@@ -107,7 +147,7 @@ export function LibraryDetailScreen({ detail }: { detail: LibraryDetail }) {
           <AttemptSection title="Latest completed download" attempt={completed} />
         )}
         <section className="attempt-history">
-          <h2>Previous attempts</h2>
+          <h3>Previous attempts</h3>
           {previous.length === 0 ? (
             <p className="muted">No older attempts.</p>
           ) : (

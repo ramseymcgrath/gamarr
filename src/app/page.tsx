@@ -5,9 +5,15 @@ import { LibraryScreen } from "@/features/library/library-screen";
 
 export const dynamic = "force-dynamic";
 
-export default function HomePage() {
-  const entries = new LibraryService(
-    new SqliteLibraryRepository(getDatabase())
-  ).list();
-  return <LibraryScreen entries={entries} />;
+export default async function HomePage({
+  searchParams
+}: {
+  searchParams: Promise<{ entry?: string }>;
+}) {
+  const { entry } = await searchParams;
+  const repository = new SqliteLibraryRepository(getDatabase());
+  const entries = new LibraryService(repository).list();
+  // A shared `/?entry=` link renders with its sheet already filled in.
+  const initialDetail = entry ? repository.get(entry) : null;
+  return <LibraryScreen entries={entries} initialDetail={initialDetail ?? null} />;
 }

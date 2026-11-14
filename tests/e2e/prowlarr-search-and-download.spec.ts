@@ -67,6 +67,20 @@ test("searches Prowlarr and sends a torrent release to qBittorrent", async ({
     .toBeVisible();
   await expectNoAccessibilityViolations(page);
 
+  // The game opens in a sheet over the results; Back closes it and keeps
+  // the search, and a reload restores both.
+  await page.getByRole("link", { name: /Metroid Prime 4: Beyond/ }).click();
+  await expect(page.getByRole("dialog")
+    .getByRole("heading", { name: "Metroid Prime 4: Beyond" })).toBeVisible();
+  await expect(page).toHaveURL(/[?&]game=\d+/);
+  await expectNoAccessibilityViolations(page);
+  await page.goBack();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(page.getByRole("searchbox")).toHaveValue("Metroid");
+  await expect(page.getByRole("link", { name: /Metroid Prime 4: Beyond/ }))
+    .toBeVisible();
+  await page.reload();
+  await expect(page.getByRole("searchbox")).toHaveValue("Metroid");
   await page.getByRole("link", { name: /Metroid Prime 4: Beyond/ }).click();
   await page.getByRole("button", { name: "Search releases" }).click();
   await expect(page.getByRole("button", { name: "Fixture Torrent torrent" }))

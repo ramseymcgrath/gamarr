@@ -84,7 +84,7 @@ export function ReleaseResults({
       <div className="result-heading">
         <div>
           <p className="eyebrow">INDEXER RESULTS</p>
-          <h2 id="release-heading">{releases.length} releases found</h2>
+          <h2 id="release-heading">{releases.length} {releases.length === 1 ? "release" : "releases"} found</h2>
         </div>
         <label className="sort-control">
           <ArrowDownUp aria-hidden="true" />

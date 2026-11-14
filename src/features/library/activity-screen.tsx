@@ -12,6 +12,11 @@ import { useEffect, useState } from "react";
 import { EmptyState } from "@/components/empty-state";
 import { StatusPill } from "@/components/status-pill";
 import { Button } from "@/components/ui/button";
+import {
+  LibraryEntrySheet,
+  useLibraryEntrySheet
+} from "@/features/library/library-entry-sheet";
+import { isModifiedClick, updateParams, useUrlParams } from "@/lib/url-state";
 
 export interface ActivityVerification {
   status:
@@ -113,9 +118,17 @@ function VerificationBar({
   );
 }
 
+const ACTIVITY_FILTERS = ["All", "Downloading", "Completed", "Failed", "Unknown"];
+
 export function ActivityScreen({ initial }: { initial: ActivityItem[] }) {
   const [items, setItems] = useState(initial);
-  const [filter, setFilter] = useState("All");
+  // The filter lives in the URL so a reload or Back keeps it.
+  const params = useUrlParams();
+  const requested = params.get("status") ?? "All";
+  const filter = ACTIVITY_FILTERS.includes(requested) ? requested : "All";
+  const setFilter = (status: string) =>
+    updateParams({ status: status === "All" ? null : status }, "replace");
+  const sheet = useLibraryEntrySheet();
   const [message, setMessage] = useState<string | null>(null);
   const filtered = filter === "All"
     ? items
@@ -174,7 +187,7 @@ export function ActivityScreen({ initial }: { initial: ActivityItem[] }) {
       setItems((values) => values.map((value) => byId.get(value.id) ?? value));
       setMessage("Saved status refreshed");
     } else {
-      setMessage("SABnzbd is unavailable; saved status is still shown.");
+      setMessage("Couldn't reach the download clients. Showing the last saved status.");
     }
   };
 
@@ -182,9 +195,8 @@ export function ActivityScreen({ initial }: { initial: ActivityItem[] }) {
     <div className="page">
       <header className="page-header">
         <div>
-          <p className="eyebrow">CHRONOLOGICAL ATTEMPT LOG</p>
           <h1>Activity.</h1>
-          <p>Every retrieval and SABnzbd submission, newest first.</p>
+          <p>Every download sent to SABnzbd or qBittorrent, newest first.</p>
         </div>
         {active.length > 0 && (
           <Button variant="secondary" onClick={() => void refresh()}>
@@ -193,7 +205,7 @@ export function ActivityScreen({ initial }: { initial: ActivityItem[] }) {
         )}
       </header>
       <div className="activity-toolbar">
-        {["All", "Downloading", "Completed", "Failed", "Unknown"].map((status) => (
+        {ACTIVITY_FILTERS.map((status) => (
           <button
             type="button"
             aria-pressed={filter === status}
@@ -220,7 +232,16 @@ export function ActivityScreen({ initial }: { initial: ActivityItem[] }) {
         <div className="activity-list">
           {filtered.map((item) => (
             <div className="activity-entry" key={item.id}>
-            <Link href={`/library/${item.libraryEntryId}` as Route} className="activity-row">
+            <Link
+              href={`/activity?entry=${item.libraryEntryId}` as Route}
+              className="activity-row"
+              scroll={false}
+              onClick={(event) => {
+                if (isModifiedClick(event)) return;
+                event.preventDefault();
+                sheet.open(item.libraryEntryId);
+              }}
+            >
               <time className="mono" dateTime={new Date(item.createdAt).toISOString()}>
                 {new Date(item.createdAt).toLocaleString()}
               </time>
@@ -243,6 +264,10 @@ export function ActivityScreen({ initial }: { initial: ActivityItem[] }) {
           ))}
         </div>
       )}
+      <LibraryEntrySheet
+        sheet={sheet}
+        order={[...new Set(filtered.map((item) => item.libraryEntryId))]}
+      />
     </div>
   );
 }

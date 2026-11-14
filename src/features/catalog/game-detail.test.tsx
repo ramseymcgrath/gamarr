@@ -6,7 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 import { GameDetail } from "@/features/catalog/game-detail";
 
 describe("GameDetail", () => {
-  it("restores platform, query, and return context on direct load", () => {
+  it("shows the game's platform and offers a release search", () => {
     render(<GameDetail
       game={{
         id: 1,
@@ -21,13 +21,11 @@ describe("GameDetail", () => {
       }}
       platformId={130}
       platformName="Nintendo Switch"
-      query="Metroid"
-      returnTo="/discover?platformId=130&q=Metroid"
     />);
 
+    expect(screen.getByText("Nintendo Switch, 2026")).toBeVisible();
+    expect(screen.getByText("A new mission.")).toBeVisible();
     expect(screen.getByRole("button", { name: "Search releases" })).toBeEnabled();
-    expect(screen.getByRole("link", { name: "Back to results" }))
-      .toHaveAttribute("href", "/discover?platformId=130&q=Metroid");
   });
 
   it("threads client configuration from search results into release actions", async () => {
@@ -76,8 +74,6 @@ describe("GameDetail", () => {
       }}
       platformId={130}
       platformName="Nintendo Switch"
-      query=""
-      returnTo="/discover"
     />);
 
     fireEvent.click(screen.getByRole("button", { name: "Search releases" }));
