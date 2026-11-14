@@ -1,5 +1,9 @@
 import "server-only";
 
+import {
+  verificationRepository,
+  verificationService
+} from "@/app/api/verification/dependencies";
 import { getDatabase } from "@/db/client";
 import { SqliteDownloadRepository } from "@/features/downloads/repository";
 import { DownloadService } from "@/features/downloads/service";
@@ -67,7 +71,17 @@ function buildDownloadService() {
         password: qbit.password
       });
     },
-    maxTorrentBytes: maxTorrentBytes()
+    maxTorrentBytes: maxTorrentBytes(),
+    // Queue Redump checks for downloads this reconcile just completed. The
+    // verifier swallows its own failures: verification must never break
+    // download status reporting.
+    onCompleted: (attemptIds) => {
+      try {
+        verificationService().requestForCompleted(attemptIds);
+      } catch (error) {
+        console.error("Could not queue download verification", error);
+      }
+    }
   });
   return { service, repository };
 }
@@ -136,6 +150,7 @@ export function downloadDependencies() {
   return {
     service,
     repository,
+    verifications: verificationRepository(),
     policy: parseOriginPolicy(process.env.GAMARR_ALLOWED_ORIGINS ?? "", {
       trustedProxy: process.env.GAMARR_TRUST_PROXY === "true",
       automationToken: process.env.GAMARR_API_TOKEN

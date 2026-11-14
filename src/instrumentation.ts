@@ -26,4 +26,17 @@ export async function register(): Promise<void> {
     // throwing here would take the whole server down instead.
     console.error("Startup download recovery failed", error);
   }
+
+  try {
+    const { resumeVerificationAtStartup } = await import(
+      "@/app/api/verification/dependencies"
+    );
+    resumeVerificationAtStartup();
+  } catch (error) {
+    // Before migrations run the table doesn't exist yet; the queue resumes on
+    // the next completed download instead.
+    if (!(error instanceof Error && /no such table/i.test(error.message))) {
+      console.error("Startup verification resume failed", error);
+    }
+  }
 }

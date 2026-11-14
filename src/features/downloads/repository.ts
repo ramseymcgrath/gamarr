@@ -30,7 +30,7 @@ export interface DownloadRepository {
   recoverStaleInternetArchiveDownloads(updatedAt: number): void;
 }
 
-function mapAttempt(
+export function mapAttempt(
   row: typeof downloadAttempts.$inferSelect
 ): DownloadAttempt {
   return {

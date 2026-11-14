@@ -50,6 +50,13 @@
       "when": 1786424343811,
       "tag": "0006_lush_azazel",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1794681039751,
+      "tag": "0007_download_verifications",
+      "breakpoints": true
     }
   ]
 }

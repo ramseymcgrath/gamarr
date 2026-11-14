@@ -3,6 +3,7 @@ import type {
   DownloadAttempt,
   SubmitDownloadInput
 } from "@/features/downloads/models";
+import type { DownloadVerification } from "@/features/verification/models";
 import { validationError } from "@/lib/errors";
 import {
   assertTrustedMutation,
@@ -14,7 +15,22 @@ interface DownloadHandlerService {
   reconcile(ids?: string[]): Promise<DownloadAttempt[]>;
 }
 
-export function toPublicAttempt(attempt: DownloadAttempt) {
+export function toPublicVerification(verification: DownloadVerification) {
+  return {
+    status: verification.status,
+    fileName: verification.fileName,
+    serial: verification.serial,
+    redumpName: verification.redumpName,
+    sha1: verification.sha1,
+    detail: verification.detail,
+    checkedAt: verification.checkedAt
+  };
+}
+
+export function toPublicAttempt(
+  attempt: DownloadAttempt,
+  verification?: DownloadVerification | null
+) {
   return {
     id: attempt.id,
     libraryEntryId: attempt.libraryEntryId,
@@ -29,8 +45,31 @@ export function toPublicAttempt(attempt: DownloadAttempt) {
     failureDetail: attempt.failureDetail,
     createdAt: attempt.createdAt,
     updatedAt: attempt.updatedAt,
-    completedAt: attempt.completedAt
+    completedAt: attempt.completedAt,
+    verification: verification ? toPublicVerification(verification) : null
   };
+}
+
+export async function handleVerifyDownload(
+  request: Request,
+  attemptId: string,
+  dependencies: {
+    service: { request(attemptId: string): DownloadVerification };
+    policy: OriginPolicy;
+  }
+): Promise<Response> {
+  try {
+    assertTrustedMutation(request, dependencies.policy);
+    if (!attemptId || attemptId.length > 200) {
+      throw validationError("Invalid download id");
+    }
+    return Response.json(
+      toPublicVerification(dependencies.service.request(attemptId)),
+      { status: 202 }
+    );
+  } catch (error) {
+    return errorResponse(error);
+  }
 }
 
 export async function handleSubmitDownload(
@@ -70,6 +109,7 @@ export async function handleReconcileDownloads(
   dependencies: {
     service: DownloadHandlerService;
     policy: OriginPolicy;
+    verifications?: { get(attemptId: string): DownloadVerification | null };
   }
 ): Promise<Response> {
   try {
@@ -85,7 +125,10 @@ export async function handleReconcileDownloads(
     const results = await dependencies.service.reconcile(
       body.ids as string[] | undefined
     );
-    return Response.json(results.map(toPublicAttempt), {
+    return Response.json(results.map((attempt) => toPublicAttempt(
+      attempt,
+      dependencies.verifications?.get(attempt.id)
+    )), {
       headers: { "cache-control": "no-store" }
     });
   } catch (error) {

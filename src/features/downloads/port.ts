@@ -46,6 +46,8 @@ export interface TorrentJob {
   state: string;
   /** Already scaled to 0..100 from qBittorrent's 0..1 fraction. */
   progress: number;
+  /** Where the content lives inside the qBittorrent container. */
+  contentPath?: string;
 }
 
 export interface TorrentClientPort {

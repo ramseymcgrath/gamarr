@@ -43,7 +43,8 @@ const jobSchema = z.object({
   filename: z.string().optional(),
   name: z.string().optional(),
   status: z.string().default("Unknown"),
-  percentage: z.union([z.string(), z.number()]).optional()
+  percentage: z.union([z.string(), z.number()]).optional(),
+  storage: z.string().nullable().optional()
 });
 
 export class SabnzbdClient implements SabnzbdPort {
@@ -167,7 +168,8 @@ export class SabnzbdClient implements SabnzbdPort {
       progress: Math.max(
         0,
         Math.min(100, Math.round(Number(job.percentage ?? 0) || 0))
-      )
+      ),
+      ...(job.storage ? { storage: job.storage } : {})
     }));
   }
 }

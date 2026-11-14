@@ -230,6 +230,7 @@ interface BuildOptions {
   torrents?: TorrentJob[];
   fileLists?: Array<Array<{ index: number; name: string }>>;
   now?: () => number;
+  onCompleted?: (attemptIds: string[]) => void;
 }
 
 function build(options: BuildOptions = {}) {
@@ -324,7 +325,8 @@ function build(options: BuildOptions = {}) {
       : torrentClient,
     maxTorrentBytes: 8 * 1024 * 1024,
     id: () => "attempt-1",
-    now: options.now ?? (() => 1_000)
+    now: options.now ?? (() => 1_000),
+    onCompleted: options.onCompleted
   });
   return {
     service,
@@ -752,6 +754,48 @@ describe("DownloadService torrent reconciliation and recovery", () => {
       torrentHash: "hash-found-by-tag",
       failureDetail: null
     });
+  });
+
+  it("reports only attempts this reconcile moved to Completed", async () => {
+    const repository = new MemoryDownloads();
+    const finishing = storedAttempt({
+      id: "finishing",
+      submissionKey: "finishing-key",
+      status: "Downloading",
+      source: "prowlarr-torrent",
+      torrentHash: "finishing-hash",
+      selectedFiles: [],
+      marker: "gamarr-finishing",
+      sabJobId: null
+    });
+    const still = storedAttempt({
+      id: "still",
+      submissionKey: "still-key",
+      status: "Downloading",
+      source: "prowlarr-torrent",
+      torrentHash: "still-hash",
+      selectedFiles: [],
+      marker: "gamarr-still",
+      sabJobId: null
+    });
+    repository.attempts.set(finishing.id, finishing);
+    repository.attempts.set(still.id, still);
+    const onCompleted = vi.fn();
+    const { service } = build({
+      repository,
+      onCompleted,
+      torrents: [
+        { hash: "finishing-hash", tags: [], state: "stalledUP", progress: 100 },
+        { hash: "still-hash", tags: [], state: "downloading", progress: 40 }
+      ]
+    });
+
+    await service.reconcile();
+    expect(onCompleted).toHaveBeenCalledWith(["finishing"]);
+
+    onCompleted.mockClear();
+    await service.reconcile();
+    expect(onCompleted).not.toHaveBeenCalled();
   });
 
   it("still reconciles a legacy internet-archive-torrent attempt", async () => {

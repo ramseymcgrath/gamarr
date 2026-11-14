@@ -225,3 +225,33 @@ export const downloadAttempts = sqliteTable(
     )
   ]
 );
+
+/**
+ * One row per download attempt that has been (or is queued to be) checked
+ * against Redump. `Running` rows left by a crash are reset to `Pending` at
+ * startup; the verifier never holds more than one `Running` row.
+ */
+export const downloadVerifications = sqliteTable(
+  "download_verifications",
+  {
+    attemptId: text("attempt_id")
+      .primaryKey()
+      .references(() => downloadAttempts.id, { onDelete: "cascade" }),
+    status: text("status").notNull(),
+    fileName: text("file_name"),
+    sha1: text("sha1"),
+    serial: text("serial"),
+    redumpName: text("redump_name"),
+    detail: text("detail"),
+    requestedAt: integer("requested_at").notNull(),
+    checkedAt: integer("checked_at"),
+    updatedAt: integer("updated_at").notNull()
+  },
+  (table) => [
+    index("download_verifications_status_idx").on(table.status),
+    check(
+      "download_verifications_status_valid",
+      sql`${table.status} in ('Pending', 'Running', 'Verified', 'Mismatch', 'Unknown', 'Unsupported', 'Failed')`
+    )
+  ]
+);

@@ -33,7 +33,9 @@ export default defineConfig({
       GAMARR_E2E: "true",
       GAMARR_TWITCH_TOKEN_URL: "http://127.0.0.1:4100/oauth2/token",
       GAMARR_IGDB_BASE_URL: "http://127.0.0.1:4100/v4",
-      GAMARR_PROWLARR_BASE_URL: "http://127.0.0.1:4100"
+      GAMARR_PROWLARR_BASE_URL: "http://127.0.0.1:4100",
+      // e2e must never reach real third-party services.
+      GAMARR_INTERNET_ARCHIVE: "false"
     }
   }]
 });

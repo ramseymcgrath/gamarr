@@ -45,6 +45,8 @@ export interface SabJob {
   marker: string;
   status: string;
   progress: number;
+  /** History only: the completed folder inside the SABnzbd container. */
+  storage?: string;
 }
 
 export interface SelectedFile {

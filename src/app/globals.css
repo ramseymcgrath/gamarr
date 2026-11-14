@@ -1389,6 +1389,27 @@ progress {
   gap: 4px;
 }
 
+.activity-entry {
+  display: grid;
+  gap: 4px;
+}
+
+.verification-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 15px 6px 180px;
+  font-size: 0.7rem;
+  color: var(--muted);
+}
+
+.verification-summary {
+  min-width: 0;
+  flex: 1 1 240px;
+  overflow-wrap: anywhere;
+}
+
 @keyframes fade-in {
   from { opacity: 0; }
 }
@@ -1419,6 +1440,10 @@ progress {
 
   .responsive-nav {
     width: 170px;
+  }
+
+  .verification-bar {
+    padding-left: 15px;
   }
 
   .activity-row {

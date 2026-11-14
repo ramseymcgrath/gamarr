@@ -2,8 +2,12 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   handleReconcileDownloads,
-  handleSubmitDownload
+  handleSubmitDownload,
+  handleVerifyDownload,
+  toPublicAttempt
 } from "@/app/api/downloads/handlers";
+import type { DownloadVerification } from "@/features/verification/models";
+import { AppError } from "@/lib/errors";
 import { parseOriginPolicy } from "@/lib/trusted-mutation";
 
 const attempt = {
@@ -161,5 +165,78 @@ describe("download HTTP handlers", () => {
 
     expect(response.status).toBe(200);
     expect(reconcile).toHaveBeenCalledWith(["attempt"]);
+  });
+});
+
+describe("download verification HTTP", () => {
+  const policy = parseOriginPolicy("http://gamarr.local");
+  const verification: DownloadVerification = {
+    attemptId: "attempt",
+    status: "Verified",
+    fileName: "Guitar Hero II (USA).iso",
+    sha1: "abc",
+    serial: "SLUS-21447",
+    redumpName: "Guitar Hero II (USA)",
+    detail: "Matches Redump",
+    requestedAt: 1,
+    checkedAt: 2,
+    updatedAt: 2
+  };
+
+  it("queues a check and returns its public state", async () => {
+    const service = { request: vi.fn(() => ({ ...verification, status: "Pending" as const })) };
+    const response = await handleVerifyDownload(
+      request("/api/downloads/attempt/verify", {}),
+      "attempt",
+      { service, policy }
+    );
+    expect(response.status).toBe(202);
+    expect(service.request).toHaveBeenCalledWith("attempt");
+    const body = await response.json();
+    expect(body.status).toBe("Pending");
+    expect(body).not.toHaveProperty("attemptId");
+  });
+
+  it("rejects an untrusted origin before queuing", async () => {
+    const service = { request: vi.fn() };
+    const response = await handleVerifyDownload(
+      new Request("http://gamarr.local/api/downloads/attempt/verify", {
+        method: "POST",
+        headers: { host: "gamarr.local", origin: "https://evil.example" }
+      }),
+      "attempt",
+      { service, policy }
+    );
+    expect(response.status).toBe(403);
+    expect(service.request).not.toHaveBeenCalled();
+  });
+
+  it("maps service errors to their status", async () => {
+    const service = {
+      request: vi.fn(() => {
+        throw new AppError("VALIDATION", 400, "Only completed downloads can be verified");
+      })
+    };
+    const response = await handleVerifyDownload(
+      request("/api/downloads/attempt/verify", {}),
+      "attempt",
+      { service, policy }
+    );
+    expect(response.status).toBe(400);
+    expect((await response.json()).error.message)
+      .toBe("Only completed downloads can be verified");
+  });
+
+  it("includes verification in the public attempt, or null", () => {
+    expect(toPublicAttempt(attempt).verification).toBeNull();
+    expect(toPublicAttempt(attempt, verification).verification).toEqual({
+      status: "Verified",
+      fileName: "Guitar Hero II (USA).iso",
+      serial: "SLUS-21447",
+      redumpName: "Guitar Hero II (USA)",
+      sha1: "abc",
+      detail: "Matches Redump",
+      checkedAt: 2
+    });
   });
 });

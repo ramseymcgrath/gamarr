@@ -28,7 +28,8 @@ const torrentJobSchema = z.object({
   hash: z.string().min(1),
   tags: z.string().optional().default(""),
   state: z.string(),
-  progress: z.number()
+  progress: z.number(),
+  content_path: z.string().optional()
 });
 
 async function discardBody(response: Response): Promise<void> {
@@ -193,7 +194,8 @@ export class QbittorrentClient implements TorrentClientPort {
       hash: job.hash,
       tags: job.tags.split(",").map((tag) => tag.trim()).filter(Boolean),
       state: job.state,
-      progress: Math.max(0, Math.min(100, Math.round(job.progress * 100)))
+      progress: Math.max(0, Math.min(100, Math.round(job.progress * 100))),
+      ...(job.content_path ? { contentPath: job.content_path } : {})
     }));
   }
 

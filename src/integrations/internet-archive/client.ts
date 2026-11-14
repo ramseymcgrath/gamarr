@@ -1,6 +1,5 @@
 import { z } from "zod";
 
-import packageJson from "../../../package.json";
 import { isValidInternetArchiveIdentifier } from "@/integrations/internet-archive/path-policy";
 import { assertAllowedArchiveTarget } from "@/integrations/internet-archive/redirect-policy";
 import {
@@ -8,15 +7,16 @@ import {
   readBoundedResponse
 } from "@/integrations/read-bounded-response";
 import { AppError, validationError } from "@/lib/errors";
+import { GAMARR_USER_AGENT } from "@/lib/user-agent";
 
 const DEFAULT_BASE_URL = "https://archive.org";
 
 /**
  * archive.org requires every automated request to carry a User-Agent naming
- * the tool and its version (https://archive.org/developers/bots.html). Sent on
- * every request this client makes, including redirect hops to data nodes.
+ * the tool and its version. Sent on every request this client makes, including
+ * redirect hops to data nodes.
  */
-export const GAMARR_USER_AGENT = `gamarr/${packageJson.version}`;
+export { GAMARR_USER_AGENT };
 
 /**
  * `/advancedsearch.php` returns at most `maxItems` documents of six short

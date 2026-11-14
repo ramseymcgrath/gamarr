@@ -37,6 +37,11 @@ interface DownloadServiceDependencies {
   torrentClient: () => TorrentClientPort | null;
   maxTorrentBytes: number;
   now?: () => number;
+  /**
+   * Told which attempts this reconcile moved to `Completed`, after the pass
+   * finishes. Used to queue Redump verification; must not throw.
+   */
+  onCompleted?: (attemptIds: string[]) => void;
   id?: () => string;
 }
 
@@ -464,7 +469,18 @@ export class DownloadService {
       this.reconcileSabnzbd(attempts, timestamp),
       this.reconcileTorrents(attempts, timestamp)
     ]);
-    return this.selected(ids);
+    const reconciled = this.selected(ids);
+    if (this.dependencies.onCompleted) {
+      const wasCompleted = new Set(attempts
+        .filter((attempt) => attempt.status === "Completed")
+        .map((attempt) => attempt.id));
+      const completed = reconciled
+        .filter((attempt) =>
+          attempt.status === "Completed" && !wasCompleted.has(attempt.id))
+        .map((attempt) => attempt.id);
+      if (completed.length > 0) this.dependencies.onCompleted(completed);
+    }
+    return reconciled;
   }
 
   private async reconcileSabnzbd(
