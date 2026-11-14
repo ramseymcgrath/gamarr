@@ -5,6 +5,11 @@ import { SqliteDownloadRepository } from "@/features/downloads/repository";
 import { DownloadService } from "@/features/downloads/service";
 import { SqliteCandidateRepository } from "@/features/release-search/repository";
 import { SqliteSettingsRepository } from "@/features/settings/repository";
+import {
+  InternetArchiveTorrentFetcher,
+  routeReleaseFetch
+} from "@/integrations/internet-archive/fetch";
+import { internetArchiveClientFromEnv } from "@/integrations/internet-archive/from-env";
 import { ProwlarrFetcher } from "@/integrations/prowlarr/fetch";
 import { QbittorrentClient } from "@/integrations/qbittorrent/client";
 import { SabnzbdClient } from "@/integrations/sabnzbd/client";
@@ -23,25 +28,31 @@ function buildDownloadService() {
   const database = getDatabase();
   const repository = new SqliteDownloadRepository(database);
   const settings = new SqliteSettingsRepository(database);
+  const internetArchive = internetArchiveClientFromEnv();
   const service = new DownloadService({
     repository,
     candidates: new SqliteCandidateRepository(database),
     settings,
     // Lazy so startup recovery still tolerates a database opened before its
     // migrations have created prowlarr_settings.
-    releaseFetcher: {
-      fetch: (input) => {
-        const prowlarr = settings.getProwlarr();
-        if (!prowlarr?.apiKey) {
-          throw validationError("Prowlarr is not configured");
+    releaseFetcher: routeReleaseFetch({
+      prowlarr: {
+        fetch: async (input) => {
+          const prowlarr = settings.getProwlarr();
+          if (!prowlarr?.apiKey) {
+            throw validationError("Prowlarr is not configured");
+          }
+          return new ProwlarrFetcher({
+            baseUrl: process.env.GAMARR_PROWLARR_BASE_URL ?? prowlarr.baseUrl,
+            apiKey: prowlarr.apiKey,
+            timeoutMs: prowlarr.timeoutMs
+          }).fetch(input);
         }
-        return new ProwlarrFetcher({
-          baseUrl: process.env.GAMARR_PROWLARR_BASE_URL ?? prowlarr.baseUrl,
-          apiKey: prowlarr.apiKey,
-          timeoutMs: prowlarr.timeoutMs
-        }).fetch(input);
-      }
-    },
+      },
+      internetArchive: internetArchive === null
+        ? null
+        : new InternetArchiveTorrentFetcher(internetArchive)
+    }),
     sabFactory: (settings) => new SabnzbdClient({
       baseUrl: settings.baseUrl,
       apiKey: settings.apiKey,

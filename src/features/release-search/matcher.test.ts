@@ -138,3 +138,42 @@ describe("deduplicateReleases", () => {
       .toEqual(["C", "B", "A", "D"]);
   });
 });
+
+describe("rankRelease preferred source", () => {
+  it("boosts a title match from a preferred source above an indexer strong match", () => {
+    const indexer = rankRelease({
+      ...baseInput,
+      release: release({})
+    });
+    const archive = rankRelease({
+      ...baseInput,
+      preferredSource: "Internet Archive",
+      release: release({ title: "Game Name (USA)", category: null })
+    });
+    expect(indexer.match).toBe("Strong");
+    expect(archive.match).toBe("Possible");
+    expect(archive.supportingReasons)
+      .toContain("Preferred source: Internet Archive");
+    expect(archive.score).toBeGreaterThan(indexer.score);
+  });
+
+  it("does not boost a preferred-source release whose title does not match", () => {
+    const ranked = rankRelease({
+      ...baseInput,
+      preferredSource: "Internet Archive",
+      release: release({ title: "Unrelated Thing", category: null })
+    });
+    expect(ranked.score).toBe(0);
+    expect(ranked.supportingReasons).toEqual([]);
+  });
+
+  it("still sinks a preferred-source release labelled for another platform", () => {
+    const ranked = rankRelease({
+      ...baseInput,
+      preferredSource: "Internet Archive",
+      release: release({ title: "Game Name (PS5)", category: null })
+    });
+    expect(ranked.match).toBe("Conflicting");
+    expect(ranked.score).toBeLessThan(50);
+  });
+});

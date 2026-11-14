@@ -11,7 +11,21 @@ export interface RankInput {
   conflictingAliases: string[];
   releaseYear: number | null;
   categoryIds: string[];
+  /**
+   * Names a source whose results are preferred over indexer releases (Internet
+   * Archive: verified dumps, no grab limits). Only boosts a release whose title
+   * already matched, so it reorders good results without promoting junk.
+   */
+  preferredSource?: string;
 }
+
+/**
+ * Sized so a title-only preferred match (50 + 50 = 100) outranks the best an
+ * indexer release can score (title 50 + platform 30 + category 10 + year 5 =
+ * 95). A preferred release labelled for another platform (50 - 80 + 50 = 20)
+ * still sinks below any clean title match.
+ */
+export const PREFERRED_SOURCE_BONUS = 50;
 
 export function normalizeReleaseTitle(value: string): string {
   return value
@@ -70,6 +84,11 @@ export function rankRelease(input: RankInput): RankedRelease {
   ) {
     supportingReasons.push(`Release year matches ${input.releaseYear}`);
     score += 5;
+  }
+
+  if (input.preferredSource && matchedTitle) {
+    supportingReasons.push(`Preferred source: ${input.preferredSource}`);
+    score += PREFERRED_SOURCE_BONUS;
   }
 
   const match = conflict

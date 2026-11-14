@@ -6,6 +6,11 @@ import { SqliteCandidateRepository } from "@/features/release-search/repository"
 import { ReleaseSearchService } from "@/features/release-search/service";
 import { SqliteSettingsRepository } from "@/features/settings/repository";
 import { ProwlarrClient } from "@/integrations/prowlarr/client";
+import {
+  InternetArchiveTorrentFetcher,
+  routeReleaseFetch
+} from "@/integrations/internet-archive/fetch";
+import { internetArchiveClientFromEnv } from "@/integrations/internet-archive/from-env";
 import { ProwlarrFetcher } from "@/integrations/prowlarr/fetch";
 import { byteLimitFromEnv } from "@/lib/env";
 import { AppError } from "@/lib/errors";
@@ -21,6 +26,7 @@ export function releaseSearchDependencies() {
   const maxTorrentBytes = byteLimitFromEnv(
     process.env.GAMARR_PROWLARR_MAX_TORRENT_BYTES
   ) ?? 8 * 1024 * 1024;
+  const internetArchive = internetArchiveClientFromEnv();
   return {
     // Both release routes go through the service: candidate lookup and file
     // selection are domain policy, so no repository or integration client is
@@ -33,9 +39,11 @@ export function releaseSearchDependencies() {
         apiKey: prowlarr.apiKey,
         timeoutMs: Math.min(prowlarr.timeoutMs, 10_000)
       }),
+      internetArchive,
       prowlarrBaseUrl,
       prowlarrConfigRevision: prowlarr?.configRevision ?? 0,
-      fetcher: prowlarr === null
+      fetcher: routeReleaseFetch({
+        prowlarr: prowlarr === null
         ? {
             fetch: async () => {
               throw new AppError(
@@ -50,6 +58,10 @@ export function releaseSearchDependencies() {
             apiKey: prowlarr.apiKey,
             timeoutMs: prowlarr.timeoutMs
           }),
+        internetArchive: internetArchive === null
+          ? null
+          : new InternetArchiveTorrentFetcher(internetArchive)
+      }),
       maxTorrentBytes,
       usenetClientConfigured: () => Boolean(settings.getSabnzbd()?.apiKey),
       torrentClientConfigured: () => Boolean(settings.getQbittorrent()?.password)

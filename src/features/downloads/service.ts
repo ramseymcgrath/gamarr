@@ -16,6 +16,7 @@ import {
   type TorrentClientPort
 } from "@/features/downloads/port";
 import type { DownloadRepository } from "@/features/downloads/repository";
+import { INTERNET_ARCHIVE_INDEXER_ID } from "@/features/release-search/models";
 import type {
   CandidateRepository,
   ReleaseCandidateRecord
@@ -102,7 +103,15 @@ function fingerprintParts(
         legacy.iaFileName ?? ""
       ];
     case "internet-archive-torrent":
-      return [input.candidateId, input.gameId, input.platformId, "torrent"];
+      // Selected indices are appended like `prowlarr-torrent`; a request with
+      // no selection (every legacy attempt) hashes exactly as it always has.
+      return [
+        input.candidateId,
+        input.gameId,
+        input.platformId,
+        "torrent",
+        ...selectedIndices(input)
+      ];
   }
 }
 
@@ -207,7 +216,7 @@ export class DownloadService {
   private claim(
     input: SubmitDownloadInput,
     candidate: ReleaseCandidateRecord,
-    source: "prowlarr-usenet" | "prowlarr-torrent",
+    source: "prowlarr-usenet" | "prowlarr-torrent" | "internet-archive-torrent",
     category: string | null,
     sabnzbdConfigRevision: number
   ) {
@@ -237,7 +246,7 @@ export class DownloadService {
         newznabGuid: candidate.guid,
         iaFileName: null,
         torrentHash: null,
-        selectedFiles: source === "prowlarr-torrent" ? [] : null,
+        selectedFiles: source === "prowlarr-usenet" ? null : [],
         filesAppliedAt: null,
         size: candidate.size,
         category,
@@ -334,7 +343,9 @@ export class DownloadService {
     const claimed = this.claim(
       input,
       candidate,
-      "prowlarr-torrent",
+      candidate.indexerId === INTERNET_ARCHIVE_INDEXER_ID
+        ? "internet-archive-torrent"
+        : "prowlarr-torrent",
       qbitSettings.defaultCategory,
       0
     );

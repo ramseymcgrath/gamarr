@@ -5,12 +5,17 @@ import {
   deduplicateReleases,
   rankRelease
 } from "@/features/release-search/matcher";
-import type {
-  RankedRelease
+import {
+  INTERNET_ARCHIVE_INDEXER_ID,
+  INTERNET_ARCHIVE_INDEXER_NAME,
+  type RankedRelease,
+  type Release
 } from "@/features/release-search/models";
 import { planPrimaryQuery } from "@/features/release-search/query-planner";
 import type {
   CandidateRepository,
+  InternetArchivePort,
+  ProwlarrIndexerSummary,
   ProwlarrPort,
   ReleaseCandidateRecord
 } from "@/features/release-search/ports";
@@ -68,6 +73,8 @@ interface ReleaseSearchDependencies {
   catalog: CatalogRepository;
   candidates: CandidateRepository;
   prowlarr: ProwlarrPort | null;
+  /** Searched alongside the Prowlarr indexers; `null` when disabled. */
+  internetArchive?: InternetArchivePort | null;
   /** Effective base URL, including any test-only origin override. */
   prowlarrBaseUrl: string;
   prowlarrConfigRevision: number;
@@ -214,52 +221,86 @@ export class ReleaseSearchService {
         Math.max(0, overallTimeoutMs - (Date.now() - startedAt))
       );
 
-      await this.forEachConcurrent(
-        indexers,
-        this.dependencies.concurrency ?? 4,
-        async (indexer) => {
-          const categories = intersectCategories(
-            platform.categoryIds ?? [],
-            indexer.categoryIds
-          );
-          const query = planPrimaryQuery({
-            title: game.name,
-            releaseYear: game.releaseYear,
-            titleIsAmbiguous: false,
-            categoryIds: categories
-          });
-          try {
-            const result = await prowlarr.search(indexer, query, controller.signal);
-            warnings.push(...result.warnings.map((message) => ({
-              indexerId: indexer.id,
-              indexerName: indexer.name,
-              message
-            })));
-            ranked.push(...result.releases.map((release) => rankRelease({
-              release,
-              canonicalTitle: game.name,
-              alternativeNames: game.alternativeNames,
-              selectedAliases: platform.aliases,
-              conflictingAliases,
+      const rankInput = {
+        canonicalTitle: game.name,
+        alternativeNames: game.alternativeNames,
+        selectedAliases: platform.aliases,
+        conflictingAliases,
+        releaseYear: game.releaseYear,
+        categoryIds: platform.categoryIds ?? []
+      };
+      await Promise.all([
+        this.searchInternetArchive(
+          game.name,
+          controller.signal,
+          (release) => ranked.push(rankRelease({
+            ...rankInput,
+            release,
+            preferredSource: INTERNET_ARCHIVE_INDEXER_NAME
+          })),
+          (message) => warnings.push({
+            indexerId: INTERNET_ARCHIVE_INDEXER_ID,
+            indexerName: INTERNET_ARCHIVE_INDEXER_NAME,
+            message
+          })
+        ),
+        this.forEachConcurrent(
+          indexers,
+          this.dependencies.concurrency ?? 4,
+          async (indexer) => {
+            const categories = intersectCategories(
+              platform.categoryIds ?? [],
+              indexer.categoryIds
+            );
+            const query = planPrimaryQuery({
+              title: game.name,
               releaseYear: game.releaseYear,
-              categoryIds: platform.categoryIds ?? []
-            })));
-          } catch {
-            warnings.push({
-              indexerId: indexer.id,
-              indexerName: indexer.name,
-              message: controller.signal.aborted
-                ? "Indexer search timed out"
-                : "Indexer search failed"
+              titleIsAmbiguous: false,
+              categoryIds: categories
             });
+            try {
+              const result = await prowlarr.search(
+                indexer,
+                query,
+                controller.signal
+              );
+              warnings.push(...result.warnings.map((message) => ({
+                indexerId: indexer.id,
+                indexerName: indexer.name,
+                message
+              })));
+              ranked.push(...result.releases.map((release) =>
+                rankRelease({ ...rankInput, release })));
+            } catch {
+              warnings.push({
+                indexerId: indexer.id,
+                indexerName: indexer.name,
+                message: controller.signal.aborted
+                  ? "Indexer search timed out"
+                  : "Indexer search failed"
+              });
+            }
           }
-        }
-      );
+        )
+      ]);
     } finally {
       clearTimeout(timeout);
     }
 
-    const indexerById = new Map(indexers.map((indexer) => [indexer.id, indexer]));
+    const indexerById = new Map<string, ProwlarrIndexerSummary>(
+      indexers.map((indexer) => [indexer.id, indexer])
+    );
+    if (this.dependencies.internetArchive) {
+      // Priority 0 sorts it ahead of every Prowlarr indexer when one release
+      // title is offered by several sources.
+      indexerById.set(INTERNET_ARCHIVE_INDEXER_ID, {
+        id: INTERNET_ARCHIVE_INDEXER_ID,
+        name: INTERNET_ARCHIVE_INDEXER_NAME,
+        protocol: "torrent",
+        priority: 0,
+        categoryIds: []
+      });
+    }
     const timestamp = this.now();
     // Reasons are counted per indexer so one unusable enclosure costs only that
     // release, not every result from every indexer.
@@ -275,6 +316,9 @@ export class ReleaseSearchService {
         const indexer = indexerById.get(source.indexerId);
         if (!indexer) {
           throw validationError("Indexer changed during release search");
+        }
+        if (source.indexerId === INTERNET_ARCHIVE_INDEXER_ID) {
+          return [this.saveInternetArchiveCandidate(source, timestamp)];
         }
         let safe;
         try {
@@ -393,6 +437,93 @@ export class ReleaseSearchService {
     return {
       files: decodeTorrentFiles(fetched.bytes),
       metadataPending: false
+    };
+  }
+
+  /**
+   * One archive.org search per release search, run beside the indexer fan-out.
+   * Failure is isolated exactly like a single indexer failing: a warning, never
+   * a failed search. Messages are fixed strings from the adapter's `AppError`s,
+   * which never carry an upstream URL or body.
+   */
+  private async searchInternetArchive(
+    title: string,
+    signal: AbortSignal,
+    onRelease: (release: Release) => void,
+    onWarning: (message: string) => void
+  ): Promise<void> {
+    const internetArchive = this.dependencies.internetArchive;
+    if (!internetArchive) return;
+    let result;
+    try {
+      result = await internetArchive.search({ title }, signal);
+    } catch (error) {
+      onWarning(
+        signal.aborted
+          ? "Internet Archive search timed out"
+          : error instanceof AppError
+            ? error.message
+            : "Internet Archive search failed"
+      );
+      return;
+    }
+    for (const message of result.warnings) onWarning(message);
+    for (const item of result.items) {
+      onRelease({
+        guid: item.detailsUrl,
+        title: item.title,
+        protocol: "torrent",
+        indexerId: INTERNET_ARCHIVE_INDEXER_ID,
+        indexerName: INTERNET_ARCHIVE_INDEXER_NAME,
+        downloadUrl: item.torrentUrl,
+        magnetUrl: null,
+        seeders: null,
+        peers: null,
+        size: item.size,
+        category: null,
+        publishedAt: item.publishedAt
+      });
+    }
+  }
+
+  /**
+   * Internet Archive candidates bypass the Prowlarr URL policy: their URL is
+   * built by the adapter from a validated identifier on the canonical
+   * archive.org origin, never taken from a feed. The identifier is persisted so
+   * the fetch adapter can rebuild the request without trusting a stored URL.
+   */
+  private saveInternetArchiveCandidate(
+    source: Release,
+    timestamp: number
+  ): PublicReleaseSource {
+    const url = new URL(source.downloadUrl);
+    const identifier = decodeURIComponent(url.pathname.split("/")[2] ?? "");
+    const candidateId = this.id();
+    this.dependencies.candidates.save({
+      id: candidateId,
+      expiresAt: timestamp + 30 * 60 * 1000,
+      protocol: "torrent",
+      indexerId: INTERNET_ARCHIVE_INDEXER_ID,
+      indexerConfigRevision: this.dependencies.prowlarrConfigRevision,
+      guid: source.guid,
+      title: source.title,
+      size: source.size,
+      seeders: null,
+      downloadPath: url.pathname,
+      category: null,
+      sourceSnapshot: JSON.stringify({
+        indexerName: INTERNET_ARCHIVE_INDEXER_NAME,
+        origin: url.origin,
+        identifier,
+        magnetUrl: null
+      }),
+      createdAt: timestamp
+    });
+    return {
+      candidateId,
+      indexerName: INTERNET_ARCHIVE_INDEXER_NAME,
+      protocol: "torrent",
+      seeders: null
     };
   }
 

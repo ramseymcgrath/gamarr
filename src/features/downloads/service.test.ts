@@ -135,7 +135,23 @@ const magnetCandidate = candidate("torrent", {
   })
 });
 
+const archiveCandidate = candidate("torrent", {
+  id: "candidate-archive",
+  indexerId: "internet-archive",
+  guid: "https://archive.org/details/game-item",
+  seeders: null,
+  downloadPath: "/download/game-item/game-item_archive.torrent",
+  category: null,
+  sourceSnapshot: JSON.stringify({
+    indexerName: "Internet Archive",
+    origin: "https://archive.org",
+    identifier: "game-item",
+    magnetUrl: null
+  })
+});
+
 const candidateRecords = new Map([
+  [archiveCandidate.id, archiveCandidate],
   [usenetCandidate.id, usenetCandidate],
   [torrentCandidate.id, torrentCandidate],
   [magnetCandidate.id, magnetCandidate]
@@ -320,6 +336,58 @@ function build(options: BuildOptions = {}) {
     setFilePriorities
   };
 }
+
+describe("DownloadService Internet Archive submission", () => {
+  it("records an archive torrent grab under the internet-archive-torrent source", async () => {
+    const { service, fetch, add } = build();
+
+    const attempt = await service.submit(submission({
+      candidateId: "candidate-archive"
+    }));
+
+    expect(attempt).toMatchObject({
+      status: "Queued",
+      source: "internet-archive-torrent",
+      indexerId: "internet-archive",
+      indexerNameSnapshot: "Internet Archive",
+      indexerUrlSnapshot: "https://archive.org",
+      selectedFiles: []
+    });
+    expect(fetch).toHaveBeenCalledWith({
+      candidate: archiveCandidate,
+      magnetUrl: null,
+      maxBytes: 8 * 1024 * 1024
+    });
+    expect(add).toHaveBeenCalledWith(expect.objectContaining({
+      payload: {
+        torrent: torrentBytes,
+        filename: "gamarr-attempt-1.torrent"
+      }
+    }));
+  });
+
+  it("keeps the legacy fingerprint when no files are selected", async () => {
+    const { service } = build();
+    const attempt = await service.submit(submission({
+      candidateId: "candidate-archive"
+    }));
+    expect(attempt.requestFingerprint).toBe(
+      fingerprint(["candidate-archive", 1, 130, "torrent"])
+    );
+  });
+
+  it("includes selected file indices in the fingerprint and selection", async () => {
+    const { service } = build();
+    const attempt = await service.submit(submission({
+      candidateId: "candidate-archive",
+      selectedFiles: [1]
+    }));
+    expect(attempt.requestFingerprint).toBe(
+      fingerprint(["candidate-archive", 1, 130, "torrent", 1])
+    );
+    expect(attempt.selectedFiles).toEqual([{ index: 1, name: "Collection/sub/b.xci" }]);
+  });
+});
 
 describe("DownloadService submission by protocol", () => {
   it("submits a torrent release to qBittorrent", async () => {

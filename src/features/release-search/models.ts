@@ -1,3 +1,11 @@
+/**
+ * Internet Archive is searched directly (archive.org stalls Prowlarr's
+ * User-Agent), so its results carry this pseudo-indexer id in place of a
+ * Prowlarr indexer id. Prowlarr ids are numeric strings, so it cannot collide.
+ */
+export const INTERNET_ARCHIVE_INDEXER_ID = "internet-archive";
+export const INTERNET_ARCHIVE_INDEXER_NAME = "Internet Archive";
+
 export type QueryReason =
   | "canonical"
   | "canonical-platform"

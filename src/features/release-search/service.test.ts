@@ -8,6 +8,7 @@ import type { CatalogRepository } from "@/features/catalog/ports";
 import type { Release } from "@/features/release-search/models";
 import type {
   CandidateRepository,
+  InternetArchivePort,
   ProwlarrIndexerSummary,
   ProwlarrPort,
   ReleaseCandidateRecord
@@ -119,6 +120,7 @@ function serviceFor(input: {
   catalog?: CatalogRepository;
   candidates?: CandidateRepository;
   prowlarr?: ProwlarrPort;
+  internetArchive?: InternetArchivePort | null;
   fetch?: (input: {
     candidate: ReleaseCandidateRecord;
     magnetUrl: string | null;
@@ -137,6 +139,7 @@ function serviceFor(input: {
     catalog: input.catalog ?? catalogFor(),
     candidates: input.candidates ?? new MemoryCandidates(),
     prowlarr: input.prowlarr ?? prowlarrFor(),
+    internetArchive: input.internetArchive ?? null,
     prowlarrBaseUrl: "https://prowlarr.test/root",
     prowlarrConfigRevision: 7,
     fetcher: {
@@ -638,5 +641,150 @@ describe("ReleaseSearchService", () => {
         message: "Release candidate has expired"
       });
     });
+  });
+});
+
+describe("ReleaseSearchService Internet Archive source", () => {
+  const iaItem = {
+    identifier: "game-name-switch",
+    title: "Game Name",
+    detailsUrl: "https://archive.org/details/game-name-switch",
+    torrentUrl:
+      "https://archive.org/download/game-name-switch/game-name-switch_archive.torrent",
+    publishedAt: 5,
+    size: 400
+  };
+
+  function internetArchiveFor(
+    search: InternetArchivePort["search"]
+  ): InternetArchivePort {
+    return { search };
+  }
+
+  it("ranks a title-matched archive item above a strong indexer release", async () => {
+    const candidates = new MemoryCandidates();
+    let next = 0;
+    const result = await serviceFor({
+      candidates,
+      id: () => `candidate-${(next += 1)}`,
+      prowlarr: prowlarrFor({
+        indexers: [indexers[0]!],
+        search: async () => ({ releases: [release()], warnings: [] })
+      }),
+      internetArchive: internetArchiveFor(async () => ({
+        items: [iaItem],
+        warnings: []
+      }))
+    }).search({ gameId: 1, platformId: 130 });
+
+    expect(result.releases.map((entry) => entry.sources[0]?.indexerName))
+      .toEqual(["Internet Archive", "One"]);
+    expect(result.releases[0]).toMatchObject({
+      title: "Game Name",
+      match: "Possible",
+      supportingReasons: expect.arrayContaining([
+        "Preferred source: Internet Archive"
+      ])
+    });
+    expect(result.releases[0]!.score)
+      .toBeGreaterThan(result.releases[1]!.score);
+  });
+
+  it("persists the identifier and canonical path, never a data-node URL", async () => {
+    const candidates = new MemoryCandidates();
+    await serviceFor({
+      candidates,
+      id: () => "ia-candidate",
+      prowlarr: prowlarrFor({ indexers: [] }),
+      internetArchive: internetArchiveFor(async () => ({
+        items: [iaItem],
+        warnings: []
+      }))
+    }).search({ gameId: 1, platformId: 130 });
+
+    expect(candidates.saved).toHaveLength(1);
+    expect(candidates.saved[0]).toMatchObject({
+      id: "ia-candidate",
+      protocol: "torrent",
+      indexerId: "internet-archive",
+      indexerConfigRevision: 7,
+      guid: "https://archive.org/details/game-name-switch",
+      downloadPath: "/download/game-name-switch/game-name-switch_archive.torrent"
+    });
+    expect(JSON.parse(candidates.saved[0]!.sourceSnapshot)).toEqual({
+      indexerName: "Internet Archive",
+      origin: "https://archive.org",
+      identifier: "game-name-switch",
+      magnetUrl: null
+    });
+  });
+
+  it("isolates an archive failure as a warning beside indexer results", async () => {
+    const result = await serviceFor({
+      prowlarr: prowlarrFor({
+        indexers: [indexers[0]!],
+        search: async () => ({ releases: [release()], warnings: [] })
+      }),
+      internetArchive: internetArchiveFor(async () => {
+        throw new Error("upstream said https://secret.example/?key=1");
+      })
+    }).search({ gameId: 1, platformId: 130 });
+
+    expect(result.releases).toHaveLength(1);
+    expect(result.warnings).toEqual([{
+      indexerId: "internet-archive",
+      indexerName: "Internet Archive",
+      message: "Internet Archive search failed"
+    }]);
+  });
+
+  it("passes adapter AppError messages and item warnings through", async () => {
+    const { AppError } = await import("@/lib/errors");
+    const failing = await serviceFor({
+      prowlarr: prowlarrFor({ indexers: [] }),
+      internetArchive: internetArchiveFor(async () => {
+        throw new AppError(
+          "UNAVAILABLE",
+          503,
+          "Internet Archive is rate limiting requests; try again later"
+        );
+      })
+    }).search({ gameId: 1, platformId: 130 });
+    expect(failing.warnings[0]?.message)
+      .toBe("Internet Archive is rate limiting requests; try again later");
+
+    const partial = await serviceFor({
+      prowlarr: prowlarrFor({ indexers: [] }),
+      internetArchive: internetArchiveFor(async () => ({
+        items: [],
+        warnings: ["Ignored an Internet Archive result with missing or unsafe fields"]
+      }))
+    }).search({ gameId: 1, platformId: 130 });
+    expect(partial.warnings[0]?.indexerName).toBe("Internet Archive");
+  });
+
+  it("searches the archive with the catalog title and the shared abort signal", async () => {
+    const search = vi.fn<InternetArchivePort["search"]>(async () => ({
+      items: [],
+      warnings: []
+    }));
+    await serviceFor({
+      prowlarr: prowlarrFor({ indexers: [] }),
+      internetArchive: internetArchiveFor(search)
+    }).search({ gameId: 1, platformId: 130 });
+
+    expect(search).toHaveBeenCalledWith(
+      { title: "Game Name" },
+      expect.any(AbortSignal)
+    );
+  });
+
+  it("makes no archive request when the source is disabled", async () => {
+    const result = await serviceFor({
+      prowlarr: prowlarrFor({ indexers: [] }),
+      internetArchive: null
+    }).search({ gameId: 1, platformId: 130 });
+    expect(result.releases).toEqual([]);
+    expect(result.warnings).toEqual([]);
   });
 });

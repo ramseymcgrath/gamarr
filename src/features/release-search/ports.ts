@@ -20,6 +20,23 @@ export interface ProwlarrPort {
   ): Promise<{ releases: Release[]; warnings: string[] }>;
 }
 
+export interface InternetArchiveSearchItem {
+  identifier: string;
+  title: string;
+  /** Canonical archive.org URLs only — never a data-node host. */
+  detailsUrl: string;
+  torrentUrl: string;
+  publishedAt: number | null;
+  size: number | null;
+}
+
+export interface InternetArchivePort {
+  search(
+    input: { title: string },
+    signal: AbortSignal
+  ): Promise<{ items: InternetArchiveSearchItem[]; warnings: string[] }>;
+}
+
 export interface ReleaseCandidateRecord {
   id: string;
   expiresAt: number;
