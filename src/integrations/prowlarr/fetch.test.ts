@@ -129,7 +129,7 @@ describe("ProwlarrFetcher", () => {
     expect(new TextDecoder().decode(result.bytes)).toBe("<nzb />");
   });
 
-  it("removes credential-named parameters from a provider redirect", async () => {
+  it("removes credential-named parameters from a torrent provider redirect", async () => {
     const request = vi.fn(async () => new Response(null, {
       status: 302,
       headers: {
@@ -141,7 +141,7 @@ describe("ProwlarrFetcher", () => {
     }));
     const pinnedRequest = vi.fn(async (input: URL) => {
       expect([...input.searchParams]).toEqual([["token", "needed"]]);
-      return lease(new Response("<nzb />"));
+      return lease(new Response("d4:infod0:ee"));
     });
 
     await createFetcher({
@@ -150,7 +150,7 @@ describe("ProwlarrFetcher", () => {
       pinnedRequest: pinnedRequest as PinnedRequest
     }).fetch({
       candidate: {
-        ...candidate,
+        ...torrentCandidate,
         guid: "https://downloads.example/details/guid"
       },
       magnetUrl: null,
@@ -209,7 +209,7 @@ describe("ProwlarrFetcher", () => {
     expect((thrown as Error).message).not.toContain(apiKey);
   });
 
-  it("rejects redirects that do not match the candidate GUID origin", async () => {
+  it("rejects torrent redirects that do not match the candidate GUID origin", async () => {
     const request = vi.fn(async () => new Response(null, {
       status: 302,
       headers: { location: "https://other.example/get/guid" }
@@ -217,12 +217,122 @@ describe("ProwlarrFetcher", () => {
 
     await expect(createFetcher({ fetch: request as typeof fetch }).fetch({
       candidate: {
-        ...candidate,
+        ...torrentCandidate,
         guid: "https://downloads.example/details/guid"
       },
       magnetUrl: null,
       maxBytes: 100
-    })).rejects.toMatchObject({ code: "UNAVAILABLE" });
+    })).rejects.toThrow("redirected the release payload to another origin");
+  });
+
+  // Prowlarr cannot proxy Usenet grabs: it always 30x's to the indexer's API
+  // host with that indexer's key in the query (e.g. nzbgeek, NZBFinder).
+  it("follows a Usenet indexer redirect to a non-GUID origin and keeps its key", async () => {
+    const indexerUrl =
+      "https://api.nzbgeek.info/api?t=get&id=abc123&apikey=indexer-key";
+    const request = vi.fn(async () => new Response(null, {
+      status: 301,
+      headers: { location: indexerUrl }
+    }));
+    const pinnedRequest = vi.fn(async (input: URL, init: RequestInit) => {
+      expect(input.href).toBe(indexerUrl);
+      expect(new Headers(init.headers).has("x-api-key")).toBe(false);
+      return lease(new Response("<nzb />"));
+    });
+
+    const result = await createFetcher({
+      fetch: request as typeof fetch,
+      resolve: async () => [{ address: "93.184.216.34", family: 4 }],
+      pinnedRequest: pinnedRequest as PinnedRequest
+    }).fetch({
+      candidate: {
+        ...candidate,
+        guid: "https://nzbgeek.info/geekseek.php?guid=abc123"
+      },
+      magnetUrl: null,
+      maxBytes: 100
+    });
+
+    expect(pinnedRequest).toHaveBeenCalledTimes(1);
+    expect(result.kind).toBe("nzb");
+  });
+
+  it("keeps a Usenet indexer key on a GUID-origin redirect", async () => {
+    const indexerUrl =
+      "https://nzbfinder.ws/api/v1/getnzb?id=e607.nzb&apikey=indexer-key";
+    const request = vi.fn(async () => new Response(null, {
+      status: 302,
+      headers: { location: indexerUrl }
+    }));
+    const pinnedRequest = vi.fn(async (input: URL) => {
+      expect(input.searchParams.get("apikey")).toBe("indexer-key");
+      return lease(new Response("<nzb />"));
+    });
+
+    await createFetcher({
+      fetch: request as typeof fetch,
+      resolve: async () => [{ address: "93.184.216.34", family: 4 }],
+      pinnedRequest: pinnedRequest as PinnedRequest
+    }).fetch({
+      candidate: { ...candidate, guid: "https://nzbfinder.ws/details/e607" },
+      magnetUrl: null,
+      maxBytes: 100
+    });
+
+    expect(pinnedRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a plain-HTTP Usenet indexer redirect", async () => {
+    const request = vi.fn(async () => new Response(null, {
+      status: 302,
+      headers: { location: "http://api.indexer.example/api?t=get&id=1" }
+    }));
+
+    await expect(createFetcher({
+      fetch: request as typeof fetch,
+      resolve: async () => [{ address: "93.184.216.34", family: 4 }]
+    }).fetch({
+      candidate,
+      magnetUrl: null,
+      maxBytes: 100
+    })).rejects.toThrow("redirected the release payload to another origin");
+  });
+
+  it("rejects a Usenet redirect that hops to a second external origin", async () => {
+    const request = vi.fn(async () => new Response(null, {
+      status: 302,
+      headers: { location: "https://api.indexer.example/api?t=get&id=1" }
+    }));
+    const pinnedRequest = vi.fn(async () => lease(new Response(null, {
+      status: 302,
+      headers: { location: "https://elsewhere.example/nzb" }
+    })));
+
+    await expect(createFetcher({
+      fetch: request as typeof fetch,
+      resolve: async () => [{ address: "93.184.216.34", family: 4 }],
+      pinnedRequest: pinnedRequest as PinnedRequest
+    }).fetch({
+      candidate,
+      magnetUrl: null,
+      maxBytes: 100
+    })).rejects.toThrow("redirected the release payload to another origin");
+  });
+
+  it("rejects a Usenet indexer redirect to a non-public address", async () => {
+    const request = vi.fn(async () => new Response(null, {
+      status: 302,
+      headers: { location: "https://api.indexer.example/api?t=get&id=1" }
+    }));
+
+    await expect(createFetcher({
+      fetch: request as typeof fetch,
+      resolve: async () => [{ address: "10.0.0.5", family: 4 }]
+    }).fetch({
+      candidate,
+      magnetUrl: null,
+      maxBytes: 100
+    })).rejects.toThrow("non-public address");
   });
 
   it("rejects candidate-bound redirects that resolve to a non-public address", async () => {

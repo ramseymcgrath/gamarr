@@ -104,6 +104,14 @@ export class ProwlarrFetcher {
     const approvedRedirectOrigin = this.getApprovedRedirectOrigin(
       input.candidate.guid
     );
+    // Prowlarr refuses to proxy Usenet downloads ("Redirect must be enabled for
+    // Usenet indexers"), so every NZB grab is a redirect to the indexer's own
+    // API host carrying that indexer's key. That host often differs from the
+    // GUID's (api.nzbgeek.info vs nzbgeek.info), and the key is what authorizes
+    // the download, so for Usenet the first Prowlarr-issued hop may go to any
+    // HTTPS origin and keeps its query intact. DNS pinning, the public-address
+    // check and the configured-key leak check still apply.
+    const usenet = this.protocolOf(input.candidate) === "usenet";
     let target = new URL(safeTarget.downloadPath, configured);
     let externalOrigin: string | null = null;
     if (target.origin !== configured.origin) {
@@ -157,7 +165,8 @@ export class ProwlarrFetcher {
               "Prowlarr returned an unsafe redirect"
             );
           }
-          this.removeIndexerCredentials(redirected, this.options.apiKey);
+          this.assertConfiguredKeyAbsent(redirected, this.options.apiKey);
+          if (!usenet) this.removeIndexerCredentials(redirected);
           if (externalOrigin && redirected.origin !== externalOrigin) {
             throw new AppError(
               "UNAVAILABLE",
@@ -169,6 +178,7 @@ export class ProwlarrFetcher {
             !externalOrigin
             && redirected.origin !== configured.origin
             && redirected.origin !== approvedRedirectOrigin
+            && !(usenet && redirected.protocol === "https:")
           ) {
             throw new AppError(
               "UNAVAILABLE",
@@ -198,9 +208,9 @@ export class ProwlarrFetcher {
             "Prowlarr release payload exceeded the size limit"
           )
         );
-        return this.protocolOf(input.candidate) === "torrent"
-          ? { kind: "torrent", bytes }
-          : { kind: "nzb", bytes };
+        return usenet
+          ? { kind: "nzb", bytes }
+          : { kind: "torrent", bytes };
       } finally {
         if (response.body && !response.bodyUsed) {
           await response.body.cancel().catch(() => undefined);
@@ -308,7 +318,7 @@ export class ProwlarrFetcher {
     return addresses;
   }
 
-  private removeIndexerCredentials(target: URL, apiKey: string): void {
+  private assertConfiguredKeyAbsent(target: URL, apiKey: string): void {
     let decodedPath = target.pathname;
     try {
       decodedPath = decodeURIComponent(decodedPath);
@@ -332,7 +342,9 @@ export class ProwlarrFetcher {
         "Prowlarr redirect exposed the configured API credential"
       );
     }
+  }
 
+  private removeIndexerCredentials(target: URL): void {
     const credentialNames = new Set(["apikey", "api_key", "key"]);
     for (const name of [...target.searchParams.keys()]) {
       if (credentialNames.has(name.toLowerCase())) {
