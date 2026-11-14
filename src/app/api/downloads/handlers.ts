@@ -15,21 +15,29 @@ interface DownloadHandlerService {
   reconcile(ids?: string[]): Promise<DownloadAttempt[]>;
 }
 
-export function toPublicVerification(verification: DownloadVerification) {
+export function toPublicVerification(
+  verification: DownloadVerification,
+  exportable = false
+) {
   return {
+    exportable,
     status: verification.status,
     fileName: verification.fileName,
     serial: verification.serial,
     redumpName: verification.redumpName,
     sha1: verification.sha1,
     detail: verification.detail,
-    checkedAt: verification.checkedAt
+    checkedAt: verification.checkedAt,
+    exportStatus: verification.exportStatus,
+    exportPath: verification.exportPath,
+    exportDetail: verification.exportDetail
   };
 }
 
 export function toPublicAttempt(
   attempt: DownloadAttempt,
-  verification?: DownloadVerification | null
+  verification?: DownloadVerification | null,
+  exportable = false
 ) {
   return {
     id: attempt.id,
@@ -46,7 +54,7 @@ export function toPublicAttempt(
     createdAt: attempt.createdAt,
     updatedAt: attempt.updatedAt,
     completedAt: attempt.completedAt,
-    verification: verification ? toPublicVerification(verification) : null
+    verification: verification ? toPublicVerification(verification, exportable) : null
   };
 }
 
@@ -54,7 +62,10 @@ export async function handleVerifyDownload(
   request: Request,
   attemptId: string,
   dependencies: {
-    service: { request(attemptId: string): DownloadVerification };
+    service: {
+      request(attemptId: string): DownloadVerification;
+      canExport(attemptId: string): boolean;
+    };
     policy: OriginPolicy;
   }
 ): Promise<Response> {
@@ -64,7 +75,34 @@ export async function handleVerifyDownload(
       throw validationError("Invalid download id");
     }
     return Response.json(
-      toPublicVerification(dependencies.service.request(attemptId)),
+      toPublicVerification(
+        dependencies.service.request(attemptId),
+        dependencies.service.canExport(attemptId)
+      ),
+      { status: 202 }
+    );
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+
+/** Queues a copy of a verified PS2 download into the Open PS2 Loader share. */
+export async function handleExportDownload(
+  request: Request,
+  attemptId: string,
+  dependencies: {
+    service: { requestExport(attemptId: string): DownloadVerification };
+    // Reaching requestExport successfully means the download is exportable.
+    policy: OriginPolicy;
+  }
+): Promise<Response> {
+  try {
+    assertTrustedMutation(request, dependencies.policy);
+    if (!attemptId || attemptId.length > 200) {
+      throw validationError("Invalid download id");
+    }
+    return Response.json(
+      toPublicVerification(dependencies.service.requestExport(attemptId), true),
       { status: 202 }
     );
   } catch (error) {

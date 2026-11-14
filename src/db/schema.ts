@@ -245,10 +245,16 @@ export const downloadVerifications = sqliteTable(
     detail: text("detail"),
     requestedAt: integer("requested_at").notNull(),
     checkedAt: integer("checked_at"),
-    updatedAt: integer("updated_at").notNull()
+    updatedAt: integer("updated_at").notNull(),
+    // Copy into the Open PS2 Loader share: Pending | Running | Done | Failed.
+    exportStatus: text("export_status"),
+    exportPath: text("export_path"),
+    exportDetail: text("export_detail"),
+    exportedAt: integer("exported_at")
   },
   (table) => [
     index("download_verifications_status_idx").on(table.status),
+    index("download_verifications_export_status_idx").on(table.exportStatus),
     check(
       "download_verifications_status_valid",
       sql`${table.status} in ('Pending', 'Running', 'Verified', 'Mismatch', 'Unknown', 'Unsupported', 'Failed')`

@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   handleReconcileDownloads,
   handleSubmitDownload,
+  handleExportDownload,
   handleVerifyDownload,
   toPublicAttempt
 } from "@/app/api/downloads/handlers";
@@ -180,11 +181,18 @@ describe("download verification HTTP", () => {
     detail: "Matches Redump",
     requestedAt: 1,
     checkedAt: 2,
-    updatedAt: 2
+    updatedAt: 2,
+    exportStatus: null,
+    exportPath: null,
+    exportDetail: null,
+    exportedAt: null
   };
 
   it("queues a check and returns its public state", async () => {
-    const service = { request: vi.fn(() => ({ ...verification, status: "Pending" as const })) };
+    const service = {
+      request: vi.fn(() => ({ ...verification, status: "Pending" as const })),
+      canExport: vi.fn(() => false)
+    };
     const response = await handleVerifyDownload(
       request("/api/downloads/attempt/verify", {}),
       "attempt",
@@ -198,7 +206,7 @@ describe("download verification HTTP", () => {
   });
 
   it("rejects an untrusted origin before queuing", async () => {
-    const service = { request: vi.fn() };
+    const service = { request: vi.fn(), canExport: vi.fn(() => false) };
     const response = await handleVerifyDownload(
       new Request("http://gamarr.local/api/downloads/attempt/verify", {
         method: "POST",
@@ -215,7 +223,8 @@ describe("download verification HTTP", () => {
     const service = {
       request: vi.fn(() => {
         throw new AppError("VALIDATION", 400, "Only completed downloads can be verified");
-      })
+      }),
+      canExport: vi.fn(() => false)
     };
     const response = await handleVerifyDownload(
       request("/api/downloads/attempt/verify", {}),
@@ -230,13 +239,48 @@ describe("download verification HTTP", () => {
   it("includes verification in the public attempt, or null", () => {
     expect(toPublicAttempt(attempt).verification).toBeNull();
     expect(toPublicAttempt(attempt, verification).verification).toEqual({
+      exportable: false,
       status: "Verified",
       fileName: "Guitar Hero II (USA).iso",
       serial: "SLUS-21447",
       redumpName: "Guitar Hero II (USA)",
       sha1: "abc",
       detail: "Matches Redump",
-      checkedAt: 2
+      checkedAt: 2,
+      exportStatus: null,
+      exportPath: null,
+      exportDetail: null
     });
+    expect(toPublicAttempt(attempt, verification, true).verification?.exportable)
+      .toBe(true);
+  });
+
+  it("queues a PS2 library export for a trusted request", async () => {
+    const service = {
+      requestExport: vi.fn(() => ({ ...verification, exportStatus: "Pending" as const }))
+    };
+    const response = await handleExportDownload(
+      request("/api/downloads/attempt/ps2-library", {}),
+      "attempt",
+      { service, policy }
+    );
+    expect(response.status).toBe(202);
+    expect(await response.json()).toMatchObject({ exportable: true, exportStatus: "Pending" });
+    expect(service.requestExport).toHaveBeenCalledWith("attempt");
+  });
+
+  it("refuses a PS2 library export from an untrusted origin", async () => {
+    const service = { requestExport: vi.fn() };
+    const response = await handleExportDownload(
+      new Request("http://gamarr.local/api/downloads/attempt/ps2-library", {
+        method: "POST",
+        headers: { origin: "http://evil.example", "content-type": "application/json" },
+        body: "{}"
+      }),
+      "attempt",
+      { service, policy }
+    );
+    expect(response.status).toBe(403);
+    expect(service.requestExport).not.toHaveBeenCalled();
   });
 });

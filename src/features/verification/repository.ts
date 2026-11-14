@@ -1,4 +1,4 @@
-import { asc, eq } from "drizzle-orm";
+import { and, asc, eq } from "drizzle-orm";
 
 import type { Database } from "@/db/client";
 import {
@@ -9,6 +9,8 @@ import {
 import { mapAttempt } from "@/features/downloads/repository";
 import type {
   DownloadVerification,
+  ExportResult,
+  ExportStatus,
   VerificationResult,
   VerificationStatus
 } from "@/features/verification/models";
@@ -30,7 +32,11 @@ function mapVerification(
     detail: row.detail,
     requestedAt: row.requestedAt,
     checkedAt: row.checkedAt,
-    updatedAt: row.updatedAt
+    updatedAt: row.updatedAt,
+    exportStatus: row.exportStatus as ExportStatus | null,
+    exportPath: row.exportPath,
+    exportDetail: row.exportDetail,
+    exportedAt: row.exportedAt
   };
 }
 
@@ -108,10 +114,67 @@ export class SqliteVerificationRepository implements VerificationRepository {
   }
 
   resetRunning(timestamp: number): number {
-    return this.database.update(downloadVerifications)
+    const checks = this.database.update(downloadVerifications)
       .set({ status: "Pending", updatedAt: timestamp })
       .where(eq(downloadVerifications.status, "Running"))
       .run().changes;
+    const exports = this.database.update(downloadVerifications)
+      .set({ exportStatus: "Pending", updatedAt: timestamp })
+      .where(eq(downloadVerifications.exportStatus, "Running"))
+      .run().changes;
+    return checks + exports;
+  }
+
+  requestExport(attemptId: string, timestamp: number): DownloadVerification {
+    this.database.update(downloadVerifications)
+      .set({
+        exportStatus: "Pending",
+        exportPath: null,
+        exportDetail: null,
+        exportedAt: null,
+        updatedAt: timestamp
+      })
+      .where(eq(downloadVerifications.attemptId, attemptId))
+      .run();
+    return this.get(attemptId)!;
+  }
+
+  claimNextExport(timestamp: number): DownloadVerification | null {
+    return this.database.transaction((transaction) => {
+      const next = transaction.select().from(downloadVerifications)
+        .where(and(
+          eq(downloadVerifications.exportStatus, "Pending"),
+          // A re-check in flight decides whether the export may run at all.
+          eq(downloadVerifications.status, "Verified")
+        ))
+        .orderBy(asc(downloadVerifications.updatedAt))
+        .limit(1)
+        .get();
+      if (!next) return null;
+      transaction.update(downloadVerifications)
+        .set({ exportStatus: "Running", updatedAt: timestamp })
+        .where(eq(downloadVerifications.attemptId, next.attemptId))
+        .run();
+      return mapVerification({ ...next, exportStatus: "Running", updatedAt: timestamp });
+    });
+  }
+
+  completeExport(
+    attemptId: string,
+    result: ExportResult,
+    timestamp: number
+  ): DownloadVerification {
+    this.database.update(downloadVerifications)
+      .set({
+        exportStatus: result.status,
+        exportPath: result.path,
+        exportDetail: result.detail,
+        exportedAt: timestamp,
+        updatedAt: timestamp
+      })
+      .where(eq(downloadVerifications.attemptId, attemptId))
+      .run();
+    return this.get(attemptId)!;
   }
 
   target(attemptId: string): VerificationTarget | null {

@@ -1,17 +1,28 @@
 import type { DownloadAttempt } from "@/features/downloads/models";
 import type { SabnzbdPort, TorrentClientPort } from "@/features/downloads/port";
-import { readDiscIdentity, type DiscIdentity } from "@/features/verification/disc";
+import { createHash } from "node:crypto";
+
+import { readDiscIdentity, type DiscIdentity, type DiscRead } from "@/features/verification/disc";
 import {
   REDUMP_SYSTEMS,
   type DownloadVerification,
+  type ExportResult,
   type VerificationResult
 } from "@/features/verification/models";
+import {
+  isExtraTrack,
+  oplPath,
+  rawDataOffset,
+  rawToIso
+} from "@/features/verification/opl";
 import { mapClientPath, type PathMapping } from "@/features/verification/path-map";
 import type {
-  DiscFileEntry,
+  ArchivePort,
   DiscFilesPort,
   DownloadLocation,
   DownloadLocatorPort,
+  ImageSource,
+  Ps2LibraryPort,
   RedumpSourcePort,
   VerificationRepository
 } from "@/features/verification/ports";
@@ -19,9 +30,26 @@ import { normalizeSerial, type RedumpIndex, type RedumpRom } from "@/features/ve
 import { AppError } from "@/lib/errors";
 
 const IMAGE_EXTENSIONS = new Set([".iso", ".bin", ".img"]);
+/** Formats 7-Zip can stream an image out of. */
+const OPENABLE_ARCHIVES = new Set([".7z", ".zip", ".rar"]);
 const ARCHIVE_EXTENSIONS = new Set([
-  ".7z", ".zip", ".rar", ".chd", ".cso", ".zso", ".gz", ".xz", ".ecm"
+  ...OPENABLE_ARCHIVES, ".chd", ".cso", ".zso", ".gz", ".xz", ".ecm"
 ]);
+/**
+ * Bytes kept from the start of a streamed image: enough for the volume
+ * descriptor, root directory and `SYSTEM.CNF`, which mastering tools place in
+ * the first few hundred sectors.
+ */
+const HEAD_BYTES = 16 * 1024 * 1024;
+/** Headroom kept free on the share beyond the image itself. */
+const FREE_SPACE_MARGIN = 1024 * 1024 * 1024;
+
+/** `x.part1.rar`/`x.part01.rar` open a multi-volume set; later parts don't. */
+function opensArchive(name: string): boolean {
+  if (!OPENABLE_ARCHIVES.has(extensionOf(name))) return false;
+  const part = /\.part(\d+)\.rar$/i.exec(name);
+  return part === null || Number(part[1]) === 1;
+}
 
 function extensionOf(name: string): string {
   const dot = name.lastIndexOf(".");
@@ -29,7 +57,7 @@ function extensionOf(name: string): string {
 }
 
 interface ImageCheck {
-  file: DiscFileEntry;
+  file: ImageSource;
   sha1: string | null;
   matches: RedumpRom[];
   identity: DiscIdentity | null;
@@ -77,6 +105,12 @@ export interface VerificationServiceDependencies {
   files: DiscFilesPort;
   redump: RedumpSourcePort;
   pathMappings: PathMapping[];
+  /** 7-Zip; without it, archived downloads stay Unsupported. */
+  archives?: ArchivePort | null;
+  /** The Open PS2 Loader share; without it, exports are refused. */
+  ps2Library?: Ps2LibraryPort | null;
+  /** Export every newly Verified PS2 download without waiting for a click. */
+  autoExport?: boolean;
   now?: () => number;
   log?: (message: string, error: unknown) => void;
 }
@@ -138,7 +172,10 @@ export class VerificationService {
       try {
         for (;;) {
           const next = this.dependencies.repository.claimNextPending(this.now());
-          if (!next) return;
+          if (!next) {
+            if (await this.runNextExport()) continue;
+            return;
+          }
           let result: VerificationResult;
           try {
             result = await this.verify(next.attemptId);
@@ -155,7 +192,16 @@ export class VerificationService {
                 : "Verification could not read the download"
             };
           }
-          this.dependencies.repository.complete(next.attemptId, result, this.now());
+          const saved = this.dependencies.repository.complete(next.attemptId, result, this.now());
+          if (
+            result.status === "Verified"
+            && this.dependencies.autoExport
+            && this.dependencies.ps2Library
+            && saved.exportStatus !== "Done"
+            && this.isPs2(next.attemptId)
+          ) {
+            this.dependencies.repository.requestExport(next.attemptId, this.now());
+          }
         }
       } finally {
         this.draining = null;
@@ -182,42 +228,282 @@ export class VerificationService {
       );
     }
 
+    const found = await this.findImages(localPath);
+    if ("result" in found) return found.result;
+
+    const index = await this.dependencies.redump.load(system.datName);
+    const checks: ImageCheck[] = [];
+    for (const image of found.images) {
+      checks.push(await this.checkImage(image, index));
+    }
+    return judge(checks, index, system);
+  }
+
+  /**
+   * Disc images in a download: plain files first; failing that, images
+   * inside `.7z`/`.zip`/`.rar` archives, which are read without extracting.
+   */
+  private async findImages(
+    localPath: string
+  ): Promise<{ images: ImageSource[] } | { result: VerificationResult }> {
     const files = await this.dependencies.files.list(localPath);
-    const images = files.filter((file) => IMAGE_EXTENSIONS.has(extensionOf(file.name)));
-    if (images.length === 0) {
-      const archive = files.find((file) => ARCHIVE_EXTENSIONS.has(extensionOf(file.name)));
-      return archive
+    const images: ImageSource[] = files
+      .filter((file) => IMAGE_EXTENSIONS.has(extensionOf(file.name)))
+      .map((file) => ({ kind: "file", ...file }));
+    if (images.length > 0) return { images };
+
+    const archives = files.filter((file) => opensArchive(file.name));
+    const archivePort = this.dependencies.archives;
+    if (archives.length > 0 && archivePort) {
+      const inside: ImageSource[] = [];
+      for (const archive of archives) {
+        const entries = await archivePort.list(archive.path);
+        for (const entry of entries) {
+          if (!IMAGE_EXTENSIONS.has(extensionOf(entry.path))) continue;
+          inside.push({
+            kind: "archive",
+            archivePath: archive.path,
+            entry: entry.path,
+            name: `${archive.name} › ${entry.path}`,
+            size: entry.size
+          });
+        }
+      }
+      if (inside.length > 0) return { images: inside };
+      return {
+        result: outcome("Unknown", "No disc image (.iso/.bin) inside the archive", {
+          fileName: archives.map((archive) => archive.name).join(", ")
+        })
+      };
+    }
+
+    const archive = files.find((file) => ARCHIVE_EXTENSIONS.has(extensionOf(file.name)));
+    return {
+      result: archive
         ? outcome(
           "Unsupported",
           `Compressed (${extensionOf(archive.name)}); extract it to verify`,
           { fileName: archive.name }
         )
-        : outcome("Unknown", "No disc image (.iso/.bin) found in the download");
+        : outcome("Unknown", "No disc image (.iso/.bin) found in the download")
+    };
+  }
+
+  private open(image: ImageSource): AsyncIterable<Uint8Array> {
+    if (image.kind === "file") return this.dependencies.files.stream(image.path);
+    const archives = this.dependencies.archives;
+    if (!archives) throw new AppError("UNAVAILABLE", 502, "7-Zip isn't available");
+    return archives.open(image.archivePath, image.entry);
+  }
+
+  private async checkImage(image: ImageSource, index: RedumpIndex): Promise<ImageCheck> {
+    // Size first: no Redump rom has this exact size, so no hash can match and
+    // gigabytes of hashing (or decompressing) are skipped.
+    const hashable = index.sizes.has(image.size);
+    if (image.kind === "file") {
+      const sha1 = hashable ? await this.dependencies.files.sha1(image.path) : null;
+      const matches = sha1 === null ? [] : index.bySha1.get(sha1) ?? [];
+      return {
+        file: image,
+        sha1,
+        matches,
+        identity: await identityOf(this.dependencies.files.reader(image.path))
+      };
     }
+    // Inside an archive there is no random access: one streamed pass hashes
+    // the image and keeps its first sectors for SYSTEM.CNF. When the size
+    // already rules out a match, only the head is read.
+    const scan = await scanStream(this.open(image), { hash: hashable });
+    const matches = scan.sha1 === null ? [] : index.bySha1.get(scan.sha1) ?? [];
+    return {
+      file: image,
+      sha1: scan.sha1,
+      matches,
+      identity: await identityOf(headReader(scan.head))
+    };
+  }
+
+  /** Whether this download may be offered "Add to PS2 library". */
+  canExport(attemptId: string): boolean {
+    return Boolean(this.dependencies.ps2Library) && this.isPs2(attemptId);
+  }
+
+  private isPs2(attemptId: string): boolean {
+    const target = this.dependencies.repository.target(attemptId);
+    return target !== null && REDUMP_SYSTEMS.get(target.platformId)?.disc === "ps2";
+  }
+
+  /** Queues a copy of a Verified PS2 download into the OPL share. */
+  requestExport(attemptId: string): DownloadVerification {
+    if (!this.dependencies.ps2Library) {
+      throw new AppError("VALIDATION", 400, "No PS2 library folder is configured (GAMARR_PS2_LIBRARY_DIR)");
+    }
+    const current = this.dependencies.repository.get(attemptId);
+    if (!current) throw new AppError("NOT_FOUND", 404, "Download hasn't been verified");
+    if (current.status !== "Verified") {
+      throw new AppError("VALIDATION", 400, "Only downloads that match Redump can be added");
+    }
+    if (!this.isPs2(attemptId)) {
+      throw new AppError("VALIDATION", 400, "Only PS2 games go in the PS2 library");
+    }
+    if (current.exportStatus === "Pending" || current.exportStatus === "Running") {
+      this.drain();
+      return current;
+    }
+    const queued = this.dependencies.repository.requestExport(attemptId, this.now());
+    this.drain();
+    return queued;
+  }
+
+  /** One queued export, if any. `false` when the export queue is empty. */
+  private async runNextExport(): Promise<boolean> {
+    const next = this.dependencies.repository.claimNextExport(this.now());
+    if (!next) return false;
+    let result: ExportResult;
+    try {
+      result = await this.exportToPs2(next.attemptId);
+    } catch (error) {
+      this.dependencies.log?.("PS2 library export failed", error);
+      result = {
+        status: "Failed",
+        path: null,
+        detail: error instanceof AppError
+          ? error.message
+          : "Couldn't copy the game into the PS2 library"
+      };
+    }
+    this.dependencies.repository.completeExport(next.attemptId, result, this.now());
+    return true;
+  }
+
+  /**
+   * Streams each image into the share while hashing it again, and keeps the
+   * file only if the bytes still match Redump: what lands in `DVD/` or `CD/`
+   * is exactly what was verified, even if the download changed since.
+   */
+  async exportToPs2(attemptId: string): Promise<ExportResult> {
+    const library = this.dependencies.ps2Library;
+    if (!library) return failed("No PS2 library folder is configured");
+    const target = this.dependencies.repository.target(attemptId);
+    if (!target) return failed("Download no longer exists");
+    const system = REDUMP_SYSTEMS.get(target.platformId);
+    if (system?.disc !== "ps2") return failed("Only PS2 games go in the PS2 library");
+
+    const location = await this.dependencies.locator.locate(target.attempt);
+    if (location.kind === "missing") return failed(location.detail);
+    const localPath = mapClientPath(location.clientPath, this.dependencies.pathMappings);
+    if (!localPath) return failed("The download folder isn't visible to gamarr");
+    const found = await this.findImages(localPath);
+    if ("result" in found) return failed(found.result.detail ?? "No disc image found");
 
     const index = await this.dependencies.redump.load(system.datName);
-    const checks: ImageCheck[] = [];
-    for (const file of images) {
-      checks.push(await this.checkImage(file, index));
+    const written: string[] = [];
+    let existing = 0;
+    for (const image of found.images) {
+      if (isExtraTrack(image.name)) continue;
+      if (await library.freeBytes() < image.size + FREE_SPACE_MARGIN) {
+        return failed("Not enough free space in the PS2 library", written);
+      }
+      const write = await library.begin();
+      let sha1: string;
+      try {
+        sha1 = await copyAsIso(this.open(image), write);
+      } catch (error) {
+        await write.discard();
+        throw error;
+      }
+      const rom = index.bySha1.get(sha1)?.[0];
+      if (!rom) {
+        await write.discard();
+        return failed(`${image.name} no longer matches Redump, so it wasn't copied`, written);
+      }
+      const relative = oplPath(rom);
+      const outcome = await write.commit(relative);
+      if (outcome === "exists") existing += 1;
+      written.push(relative);
     }
-    return judge(checks, index, system);
+    if (written.length === 0) return failed("No exportable disc image in the download");
+    return {
+      status: "Done",
+      path: written.join("\n"),
+      detail: existing === written.length
+        ? "Already in the PS2 library"
+        : `Added to the PS2 library${existing > 0 ? " (some were already there)" : ""}`
+    };
   }
+}
 
-  private async checkImage(file: DiscFileEntry, index: RedumpIndex): Promise<ImageCheck> {
-    // Size first: no Redump rom has this exact size, so no hash can match and
-    // gigabytes of hashing are skipped.
-    const sha1 = index.sizes.has(file.size)
-      ? await this.dependencies.files.sha1(file.path)
-      : null;
-    const matches = sha1 === null ? [] : index.bySha1.get(sha1) ?? [];
-    let identity: DiscIdentity | null = null;
-    try {
-      identity = await readDiscIdentity(this.dependencies.files.reader(file.path));
-    } catch {
-      identity = null;
-    }
-    return { file, sha1, matches, identity };
+function failed(detail: string, written: string[] = []): ExportResult {
+  return {
+    status: "Failed",
+    path: written.length > 0 ? written.join("\n") : null,
+    detail
+  };
+}
+
+async function identityOf(read: DiscRead): Promise<DiscIdentity | null> {
+  try {
+    return await readDiscIdentity(read);
+  } catch {
+    return null;
   }
+}
+
+function headReader(head: Uint8Array): DiscRead {
+  return async (offset, length) => head.subarray(offset, offset + length);
+}
+
+/**
+ * One pass over a stream: SHA-1 of every byte (when `hash`) and a copy of the
+ * first `HEAD_BYTES`. Without `hash` it stops once the head is full.
+ */
+export async function scanStream(
+  chunks: AsyncIterable<Uint8Array>,
+  options: { hash: boolean }
+): Promise<{ sha1: string | null; head: Uint8Array }> {
+  const hash = options.hash ? createHash("sha1") : null;
+  const head = new Uint8Array(HEAD_BYTES);
+  let filled = 0;
+  for await (const chunk of chunks) {
+    hash?.update(chunk);
+    if (filled < HEAD_BYTES) {
+      const take = Math.min(chunk.length, HEAD_BYTES - filled);
+      head.set(chunk.subarray(0, take), filled);
+      filled += take;
+    }
+    if (!hash && filled >= HEAD_BYTES) break;
+  }
+  return { sha1: hash ? hash.digest("hex") : null, head: head.subarray(0, filled) };
+}
+
+/**
+ * Copies an image into `write` as a 2048-byte-sector `.iso` (raw `.bin` CD
+ * sectors are unwrapped) and returns the SHA-1 of the source bytes, which is
+ * what Redump lists.
+ */
+export async function copyAsIso(
+  chunks: AsyncIterable<Uint8Array>,
+  write: { write(chunk: Uint8Array): Promise<void> }
+): Promise<string> {
+  const hash = createHash("sha1");
+  async function* hashed(): AsyncGenerator<Uint8Array> {
+    for await (const chunk of chunks) {
+      hash.update(chunk);
+      yield chunk;
+    }
+  }
+  const source = hashed();
+  // The first chunk decides the sector layout.
+  const first = await source.next();
+  if (first.done) throw new AppError("UNAVAILABLE", 502, "The disc image is empty");
+  const offset = rawDataOffset(first.value);
+  async function* rest(): AsyncGenerator<Uint8Array> {
+    yield first.value as Uint8Array;
+    for await (const chunk of source) yield chunk;
+  }
+  const output = offset === null ? rest() : rawToIso(rest(), offset);
+  for await (const chunk of output) await write.write(chunk);
+  return hash.digest("hex");
 }
 
 function outcome(

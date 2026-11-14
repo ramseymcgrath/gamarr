@@ -63,6 +63,16 @@ export class NodeDiscFiles implements DiscFilesPort {
     });
   }
 
+  async *stream(path: string): AsyncGenerator<Uint8Array> {
+    try {
+      for await (const chunk of createReadStream(path, { highWaterMark: HASH_CHUNK_BYTES })) {
+        yield chunk as Uint8Array;
+      }
+    } catch {
+      throw new AppError("UNAVAILABLE", 502, "Couldn't read the disc image");
+    }
+  }
+
   reader(path: string): DiscRead {
     return async (offset, length) => {
       const handle = await open(path, "r");

@@ -10,7 +10,9 @@ import {
   ClientDownloadLocator,
   VerificationService
 } from "@/features/verification/service";
+import { SevenZipArchives } from "@/integrations/files/archive-files";
 import { NodeDiscFiles } from "@/integrations/files/disc-files";
+import { NodePs2Library } from "@/integrations/files/ps2-library";
 import { QbittorrentClient } from "@/integrations/qbittorrent/client";
 import { RedumpDatSource } from "@/integrations/redump/source";
 import { SabnzbdClient } from "@/integrations/sabnzbd/client";
@@ -53,8 +55,17 @@ function build(): VerificationService {
       baseUrl: process.env.GAMARR_REDUMP_BASE_URL || undefined
     }),
     pathMappings: parsePathMap(process.env.GAMARR_DOWNLOAD_PATH_MAP),
+    archives: process.env.GAMARR_ARCHIVES === "false" ? null : new SevenZipArchives(),
+    ps2Library: ps2LibraryDir() ? new NodePs2Library(ps2LibraryDir()!) : null,
+    // Verified PS2 games go straight to the share unless turned off.
+    autoExport: process.env.GAMARR_PS2_AUTO_EXPORT !== "false",
     log: (message, error) => console.error(message, error)
   });
+}
+
+/** The Open PS2 Loader share inside the container, e.g. `/ps2`. */
+export function ps2LibraryDir(): string | null {
+  return process.env.GAMARR_PS2_LIBRARY_DIR?.trim() || null;
 }
 
 export function verificationRepository(): SqliteVerificationRepository {

@@ -122,4 +122,47 @@ describe("SqliteVerificationRepository", () => {
     database.delete(downloadAttempts).run();
     expect(repository.list()).toEqual([]);
   });
+
+  it("queues exports only for Verified rows and keeps them across a re-check", () => {
+    const { repository } = setup();
+    const verified = {
+      status: "Verified" as const,
+      fileName: "a.iso",
+      sha1: "abc",
+      serial: null,
+      redumpName: "A",
+      detail: null
+    };
+    repository.requestPending("attempt-a", 10);
+    repository.requestExport("attempt-a", 11);
+    // Still Pending verification: nothing to export yet.
+    expect(repository.claimNextExport(12)).toBeNull();
+
+    repository.claimNextPending(13);
+    repository.complete("attempt-a", verified, 14);
+    expect(repository.claimNextExport(15)?.exportStatus).toBe("Running");
+    expect(repository.claimNextExport(16)).toBeNull();
+    expect(repository.resetRunning(17)).toBe(1);
+    expect(repository.get("attempt-a")?.exportStatus).toBe("Pending");
+
+    repository.claimNextExport(18);
+    repository.completeExport("attempt-a", {
+      status: "Done",
+      path: "DVD/A.iso",
+      detail: "Added to the PS2 library"
+    }, 19);
+    expect(repository.get("attempt-a")).toMatchObject({
+      exportStatus: "Done",
+      exportPath: "DVD/A.iso",
+      exportedAt: 19
+    });
+
+    // A re-check doesn't forget the file is already in the share.
+    repository.requestPending("attempt-a", 20);
+    expect(repository.get("attempt-a")).toMatchObject({
+      status: "Pending",
+      exportStatus: "Done",
+      exportPath: "DVD/A.iso"
+    });
+  });
 });

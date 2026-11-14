@@ -19,6 +19,15 @@ RUN pnpm build \
     /runtime-migrator/node_modules/drizzle-orm
 
 FROM node:24-trixie-slim AS runner
+# 7-Zip streams disc images out of .7z/.zip/.rar downloads for Redump checks
+# and PS2 library exports; RAR decoding is the separately licensed unRAR code
+# Debian ships in non-free (extract-only, free to redistribute).
+RUN sed -i 's/^Components: main$/Components: main non-free/' \
+    /etc/apt/sources.list.d/debian.sources \
+  && apt-get update \
+  && apt-get install --yes --no-install-recommends 7zip 7zip-rar \
+  && rm -rf /var/lib/apt/lists/* \
+  && 7z i | grep -q Rar5
 ENV NODE_ENV=production
 ENV HOSTNAME=0.0.0.0
 ENV PORT=8989

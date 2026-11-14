@@ -15,6 +15,12 @@ export type VerificationStatus =
   /** The check itself failed (client unreachable, read error). */
   | "Failed";
 
+/**
+ * Copying a verified PS2 image into the Open PS2 Loader share. Separate from
+ * the check: a download can be Verified and not (yet) exported.
+ */
+export type ExportStatus = "Pending" | "Running" | "Done" | "Failed";
+
 export interface DownloadVerification {
   attemptId: string;
   status: VerificationStatus;
@@ -27,7 +33,18 @@ export interface DownloadVerification {
   requestedAt: number;
   checkedAt: number | null;
   updatedAt: number;
+  exportStatus: ExportStatus | null;
+  /** Share-relative path(s) written, e.g. `DVD/Burnout 3 - Takedown (USA).iso`. */
+  exportPath: string | null;
+  exportDetail: string | null;
+  exportedAt: number | null;
 }
+
+export type ExportResult = {
+  status: "Done" | "Failed";
+  path: string | null;
+  detail: string;
+};
 
 export type VerificationResult = Pick<
   DownloadVerification,
