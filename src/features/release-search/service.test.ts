@@ -11,7 +11,8 @@ import type {
   InternetArchivePort,
   ProwlarrIndexerSummary,
   ProwlarrPort,
-  ReleaseCandidateRecord
+  ReleaseCandidateRecord,
+  SerialCatalogPort
 } from "@/features/release-search/ports";
 import {
   intersectCategories,
@@ -121,6 +122,8 @@ function serviceFor(input: {
   candidates?: CandidateRepository;
   prowlarr?: ProwlarrPort;
   internetArchive?: InternetArchivePort | null;
+  serialCatalog?: SerialCatalogPort | null;
+  serialLookupTimeoutMs?: number;
   fetch?: (input: {
     candidate: ReleaseCandidateRecord;
     magnetUrl: string | null;
@@ -140,6 +143,8 @@ function serviceFor(input: {
     candidates: input.candidates ?? new MemoryCandidates(),
     prowlarr: input.prowlarr ?? prowlarrFor(),
     internetArchive: input.internetArchive ?? null,
+    serialCatalog: input.serialCatalog ?? null,
+    serialLookupTimeoutMs: input.serialLookupTimeoutMs,
     prowlarrBaseUrl: "https://prowlarr.test/root",
     prowlarrConfigRevision: 7,
     fetcher: {
@@ -786,5 +791,90 @@ describe("ReleaseSearchService Internet Archive source", () => {
     }).search({ gameId: 1, platformId: 130 });
     expect(result.releases).toEqual([]);
     expect(result.warnings).toEqual([]);
+  });
+});
+
+describe("ReleaseSearchService serial search", () => {
+  const serialCatalog: SerialCatalogPort = {
+    lookup: async (platformId, titles) => {
+      expect(platformId).toBe(130);
+      expect(titles).toEqual(["Game Name", "Game"]);
+      return {
+        serials: ["SLUS-21447", "SLES-54442"],
+        gameFor: (serial) => serial.replace(/\W/g, "") === "SLUS21672"
+          ? "Other Game (USA)"
+          : null
+      };
+    }
+  };
+
+  it("also searches each indexer by the preferred serial and ranks by it", async () => {
+    const terms: string[] = [];
+    const service = serviceFor({
+      serialCatalog,
+      prowlarr: prowlarrFor({
+        indexers: [indexers[0]!],
+        search: async (_indexer, query) => {
+          terms.push(`${query.reason}:${query.term}`);
+          return {
+            releases: query.reason === "serial"
+              ? [release({ guid: "serial", title: "SLUS-21447 dump", size: 300 })]
+              : [
+                  release({ guid: "plain", title: "Game.Name-GROUP", size: 200, category: null }),
+                  release({ guid: "other", title: "Game Name SLUS-21672", size: 400 })
+                ],
+            warnings: []
+          };
+        }
+      })
+    });
+
+    const response = await service.search({ gameId: 1, platformId: 130 });
+    expect(terms.sort()).toEqual(["canonical:Game Name", "serial:SLUS-21447"]);
+    expect(response.searchedSerial).toBe("SLUS-21447");
+    expect(response.releases.map((entry) => [entry.title, entry.match])).toEqual([
+      ["SLUS-21447 dump", "Strong"],
+      ["Game.Name-GROUP", "Possible"],
+      ["Game Name SLUS-21672", "Conflicting"]
+    ]);
+  });
+
+  it("searches by title alone when the lookup fails or stalls", async () => {
+    const terms: string[] = [];
+    const prowlarr = prowlarrFor({
+      indexers: [indexers[0]!],
+      search: async (_indexer, query) => {
+        terms.push(query.term);
+        return { releases: [], warnings: [] };
+      }
+    });
+    const failing = await serviceFor({
+      prowlarr,
+      serialCatalog: { lookup: async () => { throw new Error("offline"); } }
+    }).search({ gameId: 1, platformId: 130 });
+    const stalled = await serviceFor({
+      prowlarr,
+      serialLookupTimeoutMs: 10,
+      serialCatalog: { lookup: () => new Promise(() => undefined) }
+    }).search({ gameId: 1, platformId: 130 });
+    expect(terms).toEqual(["Game Name", "Game Name"]);
+    expect(failing.searchedSerial).toBeNull();
+    expect(stalled.searchedSerial).toBeNull();
+    expect(failing.warnings).toEqual([]);
+  });
+
+  it("keeps title results when only the serial query fails", async () => {
+    const response = await serviceFor({
+      serialCatalog,
+      prowlarr: prowlarrFor({
+        indexers: [indexers[0]!],
+        search: async (_indexer, query) => {
+          if (query.reason === "serial") throw new Error("rate limited");
+          return { releases: [release()], warnings: [] };
+        }
+      })
+    }).search({ gameId: 1, platformId: 130 });
+    expect(response.releases).toHaveLength(1);
+    expect(response.warnings).toEqual([]);
   });
 });

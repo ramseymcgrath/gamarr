@@ -12,6 +12,8 @@ import {
 } from "@/integrations/internet-archive/fetch";
 import { internetArchiveClientFromEnv } from "@/integrations/internet-archive/from-env";
 import { ProwlarrFetcher } from "@/integrations/prowlarr/fetch";
+import { RedumpSerialCatalog } from "@/integrations/redump/serial-catalog";
+import { redumpSource } from "@/app/api/verification/dependencies";
 import { byteLimitFromEnv } from "@/lib/env";
 import { AppError } from "@/lib/errors";
 import { parseOriginPolicy } from "@/lib/trusted-mutation";
@@ -40,6 +42,9 @@ export function releaseSearchDependencies() {
         timeoutMs: Math.min(prowlarr.timeoutMs, 10_000)
       }),
       internetArchive,
+      serialCatalog: process.env.GAMARR_SERIAL_SEARCH === "false"
+        ? null
+        : new RedumpSerialCatalog(redumpSource()),
       prowlarrBaseUrl,
       prowlarrConfigRevision: prowlarr?.configRevision ?? 0,
       fetcher: routeReleaseFetch({

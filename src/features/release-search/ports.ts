@@ -57,3 +57,16 @@ export interface CandidateRepository {
   save(value: ReleaseCandidateRecord): void;
   get(id: string): ReleaseCandidateRecord | null;
 }
+
+/** A game's disc serials, from the platform's Redump list. */
+export interface DiscSerials {
+  /** This game's retail serials in display form, the preferred region first. */
+  serials: string[];
+  /** The Redump game a serial belongs to, or `null` for an unknown serial. */
+  gameFor(serial: string): string | null;
+}
+
+export interface SerialCatalogPort {
+  /** `null` when the platform has no Redump list. */
+  lookup(platformId: number, titles: string[]): Promise<DiscSerials | null>;
+}

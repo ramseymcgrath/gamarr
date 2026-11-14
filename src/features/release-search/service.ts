@@ -8,16 +8,19 @@ import {
 import {
   INTERNET_ARCHIVE_INDEXER_ID,
   INTERNET_ARCHIVE_INDEXER_NAME,
+  type PlannedQuery,
   type RankedRelease,
   type Release
 } from "@/features/release-search/models";
 import { planPrimaryQuery } from "@/features/release-search/query-planner";
 import type {
   CandidateRepository,
+  DiscSerials,
   InternetArchivePort,
   ProwlarrIndexerSummary,
   ProwlarrPort,
-  ReleaseCandidateRecord
+  ReleaseCandidateRecord,
+  SerialCatalogPort
 } from "@/features/release-search/ports";
 // Pure validation/decoding modules are the deliberate no-I/O exception to the
 // feature/integration boundary documented in CLAUDE.md.
@@ -75,6 +78,10 @@ interface ReleaseSearchDependencies {
   prowlarr: ProwlarrPort | null;
   /** Searched alongside the Prowlarr indexers; `null` when disabled. */
   internetArchive?: InternetArchivePort | null;
+  /** Disc serials from Redump, for platforms that have a list. */
+  serialCatalog?: SerialCatalogPort | null;
+  /** How long a search waits for the serial lookup before going without. */
+  serialLookupTimeoutMs?: number;
   /** Effective base URL, including any test-only origin override. */
   prowlarrBaseUrl: string;
   prowlarrConfigRevision: number;
@@ -121,6 +128,8 @@ export interface ReleaseSearchResponse {
   }>;
   usenetClientConfigured: boolean;
   torrentClientConfigured: boolean;
+  /** The serial indexers were also searched by, when the game has one. */
+  searchedSerial: string | null;
 }
 
 export interface CandidateFilesResponse {
@@ -206,6 +215,8 @@ export class ReleaseSearchService {
     );
 
     let indexers;
+    let serials: DiscSerials | null = null;
+    let searchedSerial: string | null = null;
     try {
       try {
         indexers = await prowlarr.listIndexers(controller.signal);
@@ -221,13 +232,22 @@ export class ReleaseSearchService {
         Math.max(0, overallTimeoutMs - (Date.now() - startedAt))
       );
 
+      serials = await this.lookupSerials(
+        input.platformId,
+        [game.name, ...game.alternativeNames]
+      );
+      // One extra query per indexer, by the preferred region's serial: enough
+      // to surface dumps named by serial without doubling indexer API use per
+      // region. Ranking still checks a title against every known serial.
+      searchedSerial = serials?.serials[0] ?? null;
       const rankInput = {
         canonicalTitle: game.name,
         alternativeNames: game.alternativeNames,
         selectedAliases: platform.aliases,
         conflictingAliases,
         releaseYear: game.releaseYear,
-        categoryIds: platform.categoryIds ?? []
+        categoryIds: platform.categoryIds ?? [],
+        serials
       };
       await Promise.all([
         this.searchInternetArchive(
@@ -258,12 +278,22 @@ export class ReleaseSearchService {
               titleIsAmbiguous: false,
               categoryIds: categories
             });
+            const serialQuery: PlannedQuery | null = searchedSerial
+              ? { term: searchedSerial, categories, reason: "serial" }
+              : null;
+            const bySerial = serialQuery
+              ? prowlarr.search(indexer, serialQuery, controller.signal)
+                .then((result) => result.releases)
+                // Supplementary: a failed serial query costs only its extras.
+                .catch(() => [])
+              : Promise.resolve([]);
             try {
-              const result = await prowlarr.search(
-                indexer,
-                query,
-                controller.signal
-              );
+              const [result, serialReleases] = await Promise.all([
+                prowlarr.search(indexer, query, controller.signal),
+                bySerial
+              ]);
+              ranked.push(...serialReleases.map((release) =>
+                rankRelease({ ...rankInput, release })));
               warnings.push(...result.warnings.map((message) => ({
                 indexerId: indexer.id,
                 indexerName: indexer.name,
@@ -400,8 +430,37 @@ export class ReleaseSearchService {
       releases,
       warnings,
       usenetClientConfigured: this.dependencies.usenetClientConfigured(),
-      torrentClientConfigured: this.dependencies.torrentClientConfigured()
+      torrentClientConfigured: this.dependencies.torrentClientConfigured(),
+      searchedSerial
     };
+  }
+
+  /**
+   * Serials sharpen a search but never block one: a missing or slow Redump
+   * list (first download) means searching by title alone.
+   */
+  private async lookupSerials(
+    platformId: number,
+    titles: string[]
+  ): Promise<DiscSerials | null> {
+    const catalog = this.dependencies.serialCatalog;
+    if (!catalog) return null;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        catalog.lookup(platformId, titles),
+        new Promise<null>((resolve) => {
+          timer = setTimeout(
+            () => resolve(null),
+            this.dependencies.serialLookupTimeoutMs ?? 5_000
+          );
+        })
+      ]);
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   async listCandidateFiles(

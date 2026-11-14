@@ -34,6 +34,19 @@ function renderResults(releases: PublicRelease[]) {
 }
 
 describe("ReleaseResults", () => {
+  it("says when indexers were also searched by disc serial", () => {
+    render(<ReleaseResults
+      gameId={1}
+      platformId={8}
+      releases={[]}
+      usenetClientConfigured
+      torrentClientConfigured
+      searchedSerial="SLUS-21447"
+    />);
+    expect(screen.getByText("SLUS-21447")).toBeVisible();
+    expect(screen.getByText(/searched by title and by disc serial/i)).toBeVisible();
+  });
+
   it("renders a protocol label as text, not colour alone", () => {
     renderResults([release("torrent", 12)]);
 

@@ -26,7 +26,6 @@ let instance: VerificationService | null = null;
 function build(): VerificationService {
   const database = getDatabase();
   const settings = new SqliteSettingsRepository(database);
-  const databasePath = process.env.GAMARR_DATABASE_PATH ?? "/config/gamarr.db";
   return new VerificationService({
     repository: new SqliteVerificationRepository(database),
     locator: new ClientDownloadLocator({
@@ -50,10 +49,7 @@ function build(): VerificationService {
       }
     }),
     files: new NodeDiscFiles(),
-    redump: new RedumpDatSource({
-      cacheDir: path.join(path.dirname(databasePath), "redump"),
-      baseUrl: process.env.GAMARR_REDUMP_BASE_URL || undefined
-    }),
+    redump: redumpSource(),
     pathMappings: parsePathMap(process.env.GAMARR_DOWNLOAD_PATH_MAP),
     archives: process.env.GAMARR_ARCHIVES === "false" ? null : new SevenZipArchives(),
     ps2Library: ps2LibraryDir() ? new NodePs2Library(ps2LibraryDir()!) : null,
@@ -61,6 +57,21 @@ function build(): VerificationService {
     autoExport: process.env.GAMARR_PS2_AUTO_EXPORT !== "false",
     log: (message, error) => console.error(message, error)
   });
+}
+
+let sharedRedump: RedumpDatSource | null = null;
+
+/**
+ * One Redump source per process, shared by verification and release search,
+ * so the parsed lists (~4 MB of text each) are loaded once.
+ */
+export function redumpSource(): RedumpDatSource {
+  const databasePath = process.env.GAMARR_DATABASE_PATH ?? "/config/gamarr.db";
+  sharedRedump ??= new RedumpDatSource({
+    cacheDir: path.join(path.dirname(databasePath), "redump"),
+    baseUrl: process.env.GAMARR_REDUMP_BASE_URL || undefined
+  });
+  return sharedRedump;
 }
 
 /** The Open PS2 Loader share inside the container, e.g. `/ps2`. */

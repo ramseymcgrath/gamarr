@@ -644,6 +644,11 @@ label {
   margin-bottom: 14px;
 }
 
+.release-serial {
+  margin: 4px 0 0;
+  font-size: 0.82rem;
+}
+
 .section-label-row h2,
 .result-heading h2,
 .release-section h2,

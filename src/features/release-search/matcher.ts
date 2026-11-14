@@ -2,6 +2,12 @@ import type {
   RankedRelease,
   Release
 } from "@/features/release-search/models";
+import type { DiscSerials } from "@/features/release-search/ports";
+import {
+  displaySerial,
+  extractSerials,
+  normalizeSerial
+} from "@/lib/disc-serial";
 
 export interface RankInput {
   release: Release;
@@ -17,6 +23,8 @@ export interface RankInput {
    * already matched, so it reorders good results without promoting junk.
    */
   preferredSource?: string;
+  /** The game's Redump serials; a serial in a release title is decisive. */
+  serials?: DiscSerials | null;
 }
 
 /**
@@ -26,6 +34,13 @@ export interface RankInput {
  * still sinks below any clean title match.
  */
 export const PREFERRED_SOURCE_BONUS = 50;
+
+/**
+ * A serial names one disc exactly, so it outweighs the platform (30) and year
+ * (5) on top of a title match, and alone still lands a release among the
+ * title matches.
+ */
+export const SERIAL_BONUS = 60;
 
 export function normalizeReleaseTitle(value: string): string {
   return value
@@ -70,6 +85,28 @@ export function rankRelease(input: RankInput): RankedRelease {
     score -= 80;
   }
 
+  // Only serials the Redump list knows count: a serial-shaped token that
+  // isn't one ("ABCD-12345") is ignored rather than held against a release.
+  const titleSerials = input.serials ? extractSerials(input.release.title) : [];
+  const ownSerials = new Set((input.serials?.serials ?? []).map(normalizeSerial));
+  const matchedSerial = titleSerials.find((serial) => ownSerials.has(serial));
+  let serialConflict = false;
+  if (matchedSerial) {
+    supportingReasons.push(`Serial ${displaySerial(matchedSerial)} matches`);
+    score += SERIAL_BONUS;
+  } else {
+    const foreign = titleSerials
+      .map((serial) => ({ serial, game: input.serials?.gameFor(serial) ?? null }))
+      .find((entry) => entry.game !== null);
+    if (foreign) {
+      conflictingReasons.push(
+        `Serial ${displaySerial(foreign.serial)} is ${foreign.game}`
+      );
+      score -= 80;
+      serialConflict = true;
+    }
+  }
+
   if (
     input.release.category &&
     input.categoryIds.includes(input.release.category)
@@ -86,14 +123,14 @@ export function rankRelease(input: RankInput): RankedRelease {
     score += 5;
   }
 
-  if (input.preferredSource && matchedTitle) {
+  if (input.preferredSource && (matchedTitle || matchedSerial)) {
     supportingReasons.push(`Preferred source: ${input.preferredSource}`);
     score += PREFERRED_SOURCE_BONUS;
   }
 
-  const match = conflict
+  const match = conflict || serialConflict
     ? "Conflicting"
-    : matchedTitle && matchedAlias
+    : (matchedTitle && matchedAlias) || matchedSerial
       ? "Strong"
       : "Possible";
 

@@ -51,7 +51,8 @@ export function ReleaseResults({
   releases,
   usenetClientConfigured,
   torrentClientConfigured,
-  warnings = []
+  warnings = [],
+  searchedSerial = null
 }: {
   gameId: number;
   platformId: number;
@@ -59,6 +60,7 @@ export function ReleaseResults({
   usenetClientConfigured: boolean;
   torrentClientConfigured: boolean;
   warnings?: Array<{ indexerName: string; message: string }>;
+  searchedSerial?: string | null;
 }) {
   const [sort, setSort] = useState<"best" | "newest" | "smallest">("best");
   const [selection, setSelection] = useState<{
@@ -85,6 +87,11 @@ export function ReleaseResults({
         <div>
           <p className="eyebrow">INDEXER RESULTS</p>
           <h2 id="release-heading">{releases.length} {releases.length === 1 ? "release" : "releases"} found</h2>
+          {searchedSerial && (
+            <p className="release-serial muted">
+              Searched by title and by disc serial <span className="mono">{searchedSerial}</span>
+            </p>
+          )}
         </div>
         <label className="sort-control">
           <ArrowDownUp aria-hidden="true" />

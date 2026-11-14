@@ -30,6 +30,68 @@ const release = (overrides: Record<string, unknown>) => ({
   ...overrides
 });
 
+const serials = {
+  serials: ["SLUS-21447", "SLES-54442"],
+  gameFor: (serial: string) => ({
+    SLUS21447: "Guitar Hero II (USA)",
+    SLES54442: "Guitar Hero II (Europe)",
+    SLUS21672: "Guitar Hero III - Legends of Rock (USA)"
+  })[serial.replace(/[^A-Z0-9]/gi, "").toUpperCase()] ?? null
+};
+
+describe("rankRelease serials", () => {
+  const ps2 = {
+    ...baseInput,
+    canonicalTitle: "Guitar Hero II",
+    alternativeNames: [],
+    selectedAliases: ["ps2"],
+    conflictingAliases: ["xbox 360"],
+    releaseYear: null,
+    serials
+  };
+
+  it("treats the game's own serial as strong even without the title", () => {
+    const ranked = rankRelease({
+      ...ps2,
+      release: release({ title: "SLUS_214.47 [Redump]", category: null })
+    });
+    expect(ranked.match).toBe("Strong");
+    expect(ranked.supportingReasons).toContain("Serial SLUS-21447 matches");
+    expect(ranked.score).toBe(60);
+  });
+
+  it("ranks a title-and-serial release above a title-and-platform one", () => {
+    const withSerial = rankRelease({
+      ...ps2,
+      release: release({ title: "Guitar Hero II (Europe) [SLES-54442]", category: null })
+    });
+    const withPlatform = rankRelease({
+      ...ps2,
+      release: release({ title: "Guitar Hero II PS2", category: null })
+    });
+    expect(withSerial.score).toBeGreaterThan(withPlatform.score);
+  });
+
+  it("flags another game's serial as conflicting", () => {
+    const ranked = rankRelease({
+      ...ps2,
+      release: release({ title: "Guitar Hero II III Legends SLUS-21672", category: null })
+    });
+    expect(ranked.match).toBe("Conflicting");
+    expect(ranked.conflictingReasons)
+      .toEqual(["Serial SLUS-21672 is Guitar Hero III - Legends of Rock (USA)"]);
+  });
+
+  it("ignores serial-shaped tokens Redump doesn't know", () => {
+    const ranked = rankRelease({
+      ...ps2,
+      release: release({ title: "Guitar Hero II PS2 ABCD-12345", category: null })
+    });
+    expect(ranked.match).toBe("Strong");
+    expect(ranked.conflictingReasons).toEqual([]);
+  });
+});
+
 describe("rankRelease", () => {
   it("classifies title and selected-platform evidence as strong", () => {
     expect(rankRelease({

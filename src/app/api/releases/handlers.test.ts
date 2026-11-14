@@ -64,7 +64,8 @@ describe("release search HTTP handler", () => {
       }],
       warnings: [],
       usenetClientConfigured: true,
-      torrentClientConfigured: true
+      torrentClientConfigured: true,
+      searchedSerial: null
     };
     const search = vi.fn(async (): Promise<ReleaseSearchResponse> => searchResponse);
 
@@ -106,7 +107,8 @@ describe("release search HTTP handler", () => {
       }],
       warnings: [],
       usenetClientConfigured: true,
-      torrentClientConfigured: true
+      torrentClientConfigured: true,
+      searchedSerial: null
     });
   });
 

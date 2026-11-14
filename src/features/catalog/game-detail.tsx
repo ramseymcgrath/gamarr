@@ -82,6 +82,7 @@ export function GameDetail({
           warnings={response.warnings}
           usenetClientConfigured={response.usenetClientConfigured}
           torrentClientConfigured={response.torrentClientConfigured}
+          searchedSerial={response.searchedSerial}
         />
       )}
     </div>

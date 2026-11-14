@@ -12,6 +12,10 @@
  * Pure: parsing and lookup only. Fetching and caching live in the adapter.
  */
 
+import { displaySerial, normalizeSerial } from "@/lib/disc-serial";
+
+export { displaySerial, normalizeSerial };
+
 export interface RedumpRom {
   gameName: string;
   romName: string;
@@ -30,23 +34,13 @@ export interface RedumpIndex {
   sizes: Set<number>;
   /** Normalized serial (`SLUS21447`) → the roms released under it. */
   bySerial: Map<string, RedumpRom[]>;
+  /** `titleKey` of a retail game's name → its roms (demos and betas left out). */
+  byTitle: Map<string, RedumpRom[]>;
 }
 
 const quoted = (field: string) => new RegExp(`\\b${field} "([^"]*)"`);
 const numeric = (field: string) => new RegExp(`\\b${field} (\\d+)\\b`);
 const hex = (field: string) => new RegExp(`\\b${field} ([0-9A-Fa-f]+)\\b`);
-
-/** `SLUS_214.47`, `SLUS-21447`, `slus 21447` all normalize to `SLUS21447`. */
-export function normalizeSerial(serial: string): string {
-  return serial.toUpperCase().replace(/[^A-Z0-9]/g, "");
-}
-
-/** `SLUS21447` → `SLUS-21447`, the form Redump and box art use. */
-export function displaySerial(serial: string): string {
-  const normalized = normalizeSerial(serial);
-  const match = /^([A-Z]{4})(\d+)$/.exec(normalized);
-  return match ? `${match[1]}-${match[2]}` : normalized;
-}
 
 function splitSerials(value: string | undefined): string[] {
   if (!value) return [];
@@ -62,7 +56,8 @@ export function parseRedumpDat(text: string): RedumpIndex {
     romCount: 0,
     bySha1: new Map(),
     sizes: new Set(),
-    bySerial: new Map()
+    bySerial: new Map(),
+    byTitle: new Map()
   };
 
   let game: {
@@ -108,6 +103,10 @@ export function parseRedumpDat(text: string): RedumpIndex {
       for (const serial of rom.serials) {
         append(index.bySerial, normalizeSerial(serial), rom);
       }
+      if (!NON_RETAIL.test(rom.gameName)) {
+        const key = titleKey(rom.gameName);
+        if (key) append(index.byTitle, key, rom);
+      }
       continue;
     }
     const name = quoted("name").exec(line);
@@ -132,4 +131,54 @@ function append<K, V>(map: Map<K, V[]>, key: K, value: V): void {
   const existing = map.get(key);
   if (existing) existing.push(value);
   else map.set(key, [value]);
+}
+
+/** Redump tags for discs that aren't the retail game. */
+const NON_RETAIL = /\((?:[^)]*\b)?(?:demo|beta|proto|prototype|kiosk|sample|preview|trial|taikenban|tentoumuke)\b[^)]*\)/i;
+
+/**
+ * A comparable title: Redump's `Guitar Hero III - Legends of Rock (USA)` and
+ * IGDB's `Guitar Hero III: Legends of Rock` both become
+ * `guitar hero iii legends of rock`. Redump's trailing articles
+ * (`Sims, The - Bustin' Out`) move back to the front of their segment.
+ */
+export function titleKey(name: string): string {
+  return name
+    .replace(/\([^)]*\)|\[[^\]]*\]/g, " ")
+    .split(/\s+-\s+/)
+    .map((segment) => segment.trim().replace(/^(.*), (The|A|An)$/i, "$2 $1"))
+    .join(" ")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/&/g, " and ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function regionRank(region: string | null): number {
+  if (!region) return 4;
+  if (/\bUSA\b/.test(region)) return 0;
+  if (/\bWorld\b/.test(region)) return 1;
+  if (/\bEurope\b/.test(region)) return 2;
+  return 3;
+}
+
+/**
+ * Every serial the retail releases of a game were published under, in
+ * display form, USA releases first. Empty when no title matches exactly.
+ */
+export function serialsForTitles(index: RedumpIndex, titles: string[]): string[] {
+  const roms = new Set<RedumpRom>();
+  for (const title of titles) {
+    for (const rom of index.byTitle.get(titleKey(title)) ?? []) roms.add(rom);
+  }
+  const ordered = [...roms].sort((left, right) =>
+    regionRank(left.region) - regionRank(right.region));
+  return [...new Set(ordered.flatMap((rom) => rom.serials.flatMap((serial) => {
+    // Redump marks reprints and bundles with suffixes (`SLUS-21050GH`,
+    // `SLES-52541/ANZ`, `SLES-525413`); the disc itself carries the base.
+    const base = /^[A-Z]{4}\d{5}/.exec(normalizeSerial(serial))?.[0];
+    return base ? [displaySerial(base)] : [];
+  })))];
 }

@@ -9,7 +9,8 @@ export const INTERNET_ARCHIVE_INDEXER_NAME = "Internet Archive";
 export type QueryReason =
   | "canonical"
   | "canonical-platform"
-  | "alternate-platform";
+  | "alternate-platform"
+  | "serial";
 
 export interface PlannedQuery {
   term: string;

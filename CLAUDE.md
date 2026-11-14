@@ -82,6 +82,8 @@ Search fans out over every enabled Prowlarr indexer with per-indexer failure iso
 
 **Verified PS2 games are copied into the Open PS2 Loader share** (`GAMARR_PS2_LIBRARY_DIR`). The user plays on a real PS2 through OPL, which only reads plain 2048-byte-sector `.iso` files in `DVD/` and `CD/` — never CHD/CSO. The export re-streams each image, hashes the source bytes again while writing a hidden temp file at the share root, and only moves it into place (`link`, so an existing file is never replaced) when the hash is still in Redump; otherwise the temp file is deleted. Redump `.iso` roms go to `DVD/`, `.bin` roms (CD games) to `CD/` with raw 2352-byte sectors unwrapped to 2048-byte user data (Mode 1 / Mode 2 Form 1); audio tracks (`(Track 2+)`) are skipped. Files are named by Redump game name, matching the share's existing files. Exports share the verification drain loop (state in `download_verifications.export_*`), run automatically after a PS2 download verifies unless `GAMARR_PS2_AUTO_EXPORT=false`, and can be retried with `POST /api/downloads/:id/ps2-library`.
 
+**Release search uses disc serials for PS1/PS2.** The game's title (and IGDB alternative names) is matched to Redump retail game names (`titleKey`: parentheses dropped, ` - `/`:` and `&`/`and` folded, `Sims, The` → `The Sims`; demos/betas excluded) to get its serials, USA first. Each Prowlarr indexer is also queried by the first serial (one extra query, failures silent), and ranking treats a serial in a release title as decisive: the game's own serial is `Strong` (+60), another known game's serial is `Conflicting` (−80), unknown serial-shaped tokens are ignored. The lookup shares verification's Redump source and gives up after 5 s, falling back to title-only search.
+
 ### Database
 
 `getDatabase()` in `src/db/client.ts` is a lazy singleton reading `GAMARR_DATABASE_PATH`. It enforces `foreign_keys=ON`, WAL, a 250ms busy timeout, and chmods the directory to `0700` / file to `0600`. `scripts/migrate.mjs` intentionally duplicates that pragma/permission setup because it runs standalone from the container entrypoint, before the app boots, against a trimmed `node_modules`.
@@ -136,5 +138,6 @@ Multi-stage build; the runner stage copies the Next.js standalone output plus a 
 | `GAMARR_PS2_LIBRARY_DIR` | none | Writable Open PS2 Loader share (with `DVD/` and `CD/`) that verified PS2 images are copied into; without it the export is off |
 | `GAMARR_PS2_AUTO_EXPORT` | `true` | `false` makes PS2 library exports manual (Activity's "Add to PS2 library") |
 | `GAMARR_ARCHIVES` | `true` | `false` stops gamarr looking inside `.7z`/`.zip`/`.rar` downloads |
+| `GAMARR_SERIAL_SEARCH` | `true` | `false` stops release search looking up disc serials (PS1/PS2) in Redump |
 | `GAMARR_7Z_PATH` | `7z` | 7-Zip binary to run |
 | `GAMARR_REDUMP_BASE_URL` | libretro-database raw URL | Test-only override of where Redump checksum lists are fetched |
