@@ -41,8 +41,11 @@ export function updateParams(
  * `updateParams`, and on Next.js navigations.
  */
 export function useUrlParams(): URLSearchParams {
-  // Subscribing to Next's params re-renders on its own navigations; the value
-  // itself is read from `location` so native history updates are seen too.
+  // Next's params are authoritative: on a client navigation (a <Link> into
+  // this page) the new screen renders before `location` is updated, so
+  // reading `location` there would see the previous page's URL. Next also
+  // folds native pushState/replaceState into these params. `location` is only
+  // the fallback outside the App Router (unit tests).
   const nextParams = useSearchParams();
   const [, rerender] = useReducer((count: number) => count + 1, 0);
   useEffect(() => {
@@ -53,10 +56,9 @@ export function useUrlParams(): URLSearchParams {
       window.removeEventListener("popstate", rerender);
     };
   }, []);
+  if (nextParams) return new URLSearchParams(nextParams.toString());
   return new URLSearchParams(
-    typeof window === "undefined"
-      ? nextParams?.toString() ?? ""
-      : window.location.search
+    typeof window === "undefined" ? "" : window.location.search
   );
 }
 

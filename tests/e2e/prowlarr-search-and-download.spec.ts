@@ -111,4 +111,22 @@ test("searches Prowlarr and sends a torrent release to qBittorrent", async ({
   await page.getByRole("button", { name: "Refresh active" }).click();
   await expect(row.getByText("Downloading")).toBeVisible();
   await expectNoAccessibilityViolations(page);
+
+  // Library record → "Search again" lands on Discover with the game open.
+  // A client-side navigation: the new page renders before the address bar
+  // changes, which is what broke this link once.
+  await page.goto("/");
+  await page.locator(".library-card")
+    .filter({ hasText: "Metroid Prime 4: Beyond" }).click();
+  const record = page.getByRole("dialog");
+  await expect(record.getByRole("heading", { name: "Metroid Prime 4: Beyond" }))
+    .toBeVisible();
+  await record.getByRole("link", { name: "Search again" }).click();
+  await expect(page).toHaveURL(/\/discover\?platformId=130&game=\d+$/);
+  const game = page.getByRole("dialog");
+  await expect(game.getByRole("heading", { name: "Metroid Prime 4: Beyond" }))
+    .toBeVisible();
+  await expect(game.getByRole("button", { name: "Search releases" })).toBeVisible();
+  await page.goBack();
+  await expect(page).toHaveURL(/\/\?entry=/);
 });
