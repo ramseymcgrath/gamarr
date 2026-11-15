@@ -236,9 +236,8 @@ export class ReleaseSearchService {
         input.platformId,
         [game.name, ...game.alternativeNames]
       );
-      // One extra query per indexer, by the preferred region's serial: enough
-      // to surface dumps named by serial without doubling indexer API use per
-      // region. Ranking still checks a title against every known serial.
+      // One extra query per torrent indexer, by the preferred region's serial.
+      // Ranking still checks every title against all of the game's serials.
       searchedSerial = serials?.serials[0] ?? null;
       const rankInput = {
         canonicalTitle: game.name,
@@ -278,9 +277,14 @@ export class ReleaseSearchService {
               titleIsAmbiguous: false,
               categoryIds: categories
             });
-            const serialQuery: PlannedQuery | null = searchedSerial
-              ? { term: searchedSerial, categories, reason: "serial" }
-              : null;
+            // Torrent indexers only: usenet posts are obfuscated, so a
+            // serial never finds anything there, and Prowlarr paces queries
+            // one at a time, so each wasted one pushes later indexers past
+            // their timeout.
+            const serialQuery: PlannedQuery | null =
+              searchedSerial && indexer.protocol === "torrent"
+                ? { term: searchedSerial, categories, reason: "serial" }
+                : null;
             const bySerial = serialQuery
               ? prowlarr.search(indexer, serialQuery, controller.signal)
                 .then((result) => result.releases)

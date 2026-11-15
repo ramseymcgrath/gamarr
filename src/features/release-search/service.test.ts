@@ -839,6 +839,22 @@ describe("ReleaseSearchService serial search", () => {
     ]);
   });
 
+  it("doesn't send the serial query to usenet indexers", async () => {
+    const terms: string[] = [];
+    const response = await serviceFor({
+      serialCatalog,
+      prowlarr: prowlarrFor({
+        indexers: [indexers[1]!],
+        search: async (_indexer, query) => {
+          terms.push(query.term);
+          return { releases: [], warnings: [] };
+        }
+      })
+    }).search({ gameId: 1, platformId: 130 });
+    expect(terms).toEqual(["Game Name"]);
+    expect(response.searchedSerial).toBe("SLUS-21447");
+  });
+
   it("searches by title alone when the lookup fails or stalls", async () => {
     const terms: string[] = [];
     const prowlarr = prowlarrFor({

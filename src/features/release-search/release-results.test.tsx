@@ -44,7 +44,7 @@ describe("ReleaseResults", () => {
       searchedSerial="SLUS-21447"
     />);
     expect(screen.getByText("SLUS-21447")).toBeVisible();
-    expect(screen.getByText(/searched by title and by disc serial/i)).toBeVisible();
+    expect(screen.getByText(/ranked by title and by disc serial/i)).toBeVisible();
   });
 
   it("renders a protocol label as text, not colour alone", () => {

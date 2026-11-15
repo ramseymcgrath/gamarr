@@ -89,7 +89,7 @@ export function ReleaseResults({
           <h2 id="release-heading">{releases.length} {releases.length === 1 ? "release" : "releases"} found</h2>
           {searchedSerial && (
             <p className="release-serial muted">
-              Searched by title and by disc serial <span className="mono">{searchedSerial}</span>
+              Ranked by title and by disc serial <span className="mono">{searchedSerial}</span>
             </p>
           )}
         </div>
