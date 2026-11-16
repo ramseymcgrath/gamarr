@@ -16,7 +16,10 @@ import {
   type TorrentClientPort
 } from "@/features/downloads/port";
 import type { DownloadRepository } from "@/features/downloads/repository";
-import { INTERNET_ARCHIVE_INDEXER_ID } from "@/features/release-search/models";
+import {
+  COLLECTION_INDEXER_PREFIX,
+  INTERNET_ARCHIVE_INDEXER_ID
+} from "@/features/release-search/models";
 import type {
   CandidateRepository,
   ReleaseCandidateRecord
@@ -43,7 +46,66 @@ interface DownloadServiceDependencies {
    */
   onCompleted?: (attemptIds: string[]) => void;
   id?: () => string;
+  /** Waits between `listFiles` polls after a collection add. */
+  sleep?: (ms: number) => Promise<void>;
 }
+
+const COLLECTION_CHANGED = "Collection torrent changed; search again";
+const OTHER_FILES_ENABLED =
+  "Other files in this collection are enabled in qBittorrent; "
+  + "set them to Do not download, then retry";
+/** 20 polls x 500 ms: qBittorrent gets 10 s to list a freshly added torrent. */
+const FILE_LIST_POLLS = 20;
+const FILE_LIST_POLL_MS = 500;
+
+interface CollectionSnapshot {
+  indexerName: string | null;
+  hash: string;
+  file: SelectedFile;
+}
+
+function parseCollectionSnapshot(value: string): CollectionSnapshot | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const record = parsed as Record<string, unknown>;
+  if (
+    typeof record.collectionId !== "string"
+    || !/^[0-9a-f]{40}$/.test(record.collectionId)
+    || typeof record.fileIndex !== "number"
+    || !Number.isInteger(record.fileIndex)
+    || record.fileIndex < 0
+    || typeof record.fileName !== "string"
+    || record.fileName === ""
+  ) {
+    return null;
+  }
+  return {
+    indexerName: typeof record.indexerName === "string"
+      ? record.indexerName
+      : null,
+    hash: record.collectionId,
+    file: { index: record.fileIndex, name: record.fileName }
+  };
+}
+
+/**
+ * qBittorrent names a multi-file torrent's files with the root folder in
+ * front, while the snapshot holds the name inside the root. Accept the exact
+ * name (a single-file torrent, or one added without its root folder) or the
+ * name with exactly one leading segment removed. Nothing fuzzier.
+ */
+function collectionFileMatches(qbitName: string, fileName: string): boolean {
+  if (qbitName === fileName) return true;
+  const slash = qbitName.indexOf("/");
+  return slash > 0 && qbitName.slice(slash + 1) === fileName;
+}
+
+type TorrentFileList = Awaited<ReturnType<TorrentClientPort["listFiles"]>>;
 
 interface CandidateSnapshot {
   indexerName: string | null;
@@ -190,10 +252,13 @@ function submittedNothing(error: unknown): boolean {
 export class DownloadService {
   private readonly now: () => number;
   private readonly id: () => string;
+  private readonly sleep: (ms: number) => Promise<void>;
 
   constructor(private readonly dependencies: DownloadServiceDependencies) {
     this.now = dependencies.now ?? Date.now;
     this.id = dependencies.id ?? randomUUID;
+    this.sleep = dependencies.sleep
+      ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   }
 
   async submit(input: SubmitDownloadInput): Promise<DownloadAttempt> {
@@ -221,6 +286,9 @@ export class DownloadService {
       throw validationError("Prowlarr configuration changed; search again");
     }
 
+    if (candidate.indexerId.startsWith(COLLECTION_INDEXER_PREFIX)) {
+      return this.submitCollection(input, candidate);
+    }
     return candidate.protocol === "usenet"
       ? this.submitUsenet(input, candidate)
       : this.submitTorrent(input, candidate);
@@ -229,9 +297,14 @@ export class DownloadService {
   private claim(
     input: SubmitDownloadInput,
     candidate: ReleaseCandidateRecord,
-    source: "prowlarr-usenet" | "prowlarr-torrent" | "internet-archive-torrent",
+    source:
+      | "prowlarr-usenet"
+      | "prowlarr-torrent"
+      | "internet-archive-torrent"
+      | "collection-torrent",
     category: string | null,
-    sabnzbdConfigRevision: number
+    sabnzbdConfigRevision: number,
+    collection: CollectionSnapshot | null = null
   ) {
     const snapshot = parseCandidateSnapshot(candidate.sourceSnapshot);
     const timestamp = this.now();
@@ -251,7 +324,7 @@ export class DownloadService {
         submissionKey: input.submissionKey,
         requestFingerprint: fingerprint(source, input, {
           iaFileName: null,
-          collectionFileIndex: null
+          collectionFileIndex: collection?.file.index ?? null
         }),
         status: "Pending",
         source,
@@ -261,8 +334,12 @@ export class DownloadService {
         indexerUrlSnapshot: snapshot.origin,
         newznabGuid: candidate.guid,
         iaFileName: null,
-        torrentHash: null,
-        selectedFiles: source === "prowlarr-usenet" ? null : [],
+        // A collection attempt owns its file from the moment it is claimed,
+        // so a concurrent grab's safety check already counts it.
+        torrentHash: collection?.hash ?? null,
+        selectedFiles: collection
+          ? [collection.file]
+          : source === "prowlarr-usenet" ? null : [],
         filesAppliedAt: null,
         size: candidate.size,
         category,
@@ -452,6 +529,237 @@ export class DownloadService {
         updatedAt: this.now()
       });
     }
+  }
+
+  /**
+   * Grabs one file out of a shared collection torrent. The torrent must never
+   * run while a file nobody asked for is wanted, so `start` is the last call
+   * and only follows a passing safety check; every failure leaves a torrent
+   * this method added stopped.
+   */
+  private async submitCollection(
+    input: SubmitDownloadInput,
+    candidate: ReleaseCandidateRecord
+  ): Promise<DownloadAttempt> {
+    if (input.selectedFiles !== undefined) {
+      throw validationError("Collection file selection is fixed");
+    }
+    const collection = parseCollectionSnapshot(candidate.sourceSnapshot);
+    if (!collection) throw validationError(COLLECTION_CHANGED);
+    const qbitSettings = this.dependencies.settings.getQbittorrent();
+    const client = this.dependencies.torrentClient();
+    if (!qbitSettings?.password || !client) {
+      throw validationError("qBittorrent is not configured");
+    }
+    const claimed = this.claim(
+      input,
+      candidate,
+      "collection-torrent",
+      qbitSettings.defaultCategory,
+      0,
+      collection
+    );
+    if (!claimed.created) {
+      return this.assertSameRequest(claimed.attempt, input);
+    }
+
+    let fetched: Awaited<ReturnType<ReleaseFetcherPort["fetch"]>>;
+    try {
+      fetched = await this.dependencies.releaseFetcher.fetch({
+        candidate,
+        magnetUrl: null,
+        maxBytes: this.dependencies.maxTorrentBytes
+      });
+    } catch (error) {
+      return this.failFetch(claimed.attempt.id, error);
+    }
+    if (fetched.kind !== "torrent") {
+      return this.dependencies.repository.update(claimed.attempt.id, {
+        status: "Failed",
+        failureDetail: COLLECTION_CHANGED,
+        updatedAt: this.now()
+      });
+    }
+
+    const submittingAt = this.now();
+    this.dependencies.repository.update(claimed.attempt.id, {
+      status: "Submitting",
+      sabRequestStartedAt: submittingAt,
+      updatedAt: submittingAt
+    });
+    try {
+      await this.applyCollection(client, {
+        attempt: claimed.attempt,
+        collection,
+        bytes: fetched.bytes,
+        category: qbitSettings.defaultCategory
+      });
+    } catch (error) {
+      return this.dependencies.repository.update(claimed.attempt.id, {
+        status: "Failed",
+        failureDetail: error instanceof AppError
+          ? error.message
+          : "qBittorrent did not accept the collection grab",
+        updatedAt: this.now()
+      });
+    }
+    const appliedAt = this.now();
+    return this.dependencies.repository.update(claimed.attempt.id, {
+      status: "Downloading",
+      filesAppliedAt: appliedAt,
+      updatedAt: appliedAt
+    });
+  }
+
+  /** Spec steps 1-6. Throws on any failure; `start` is its final call. */
+  private async applyCollection(
+    client: TorrentClientPort,
+    input: {
+      attempt: DownloadAttempt;
+      collection: CollectionSnapshot;
+      bytes: Uint8Array;
+      category: string | null;
+    }
+  ): Promise<void> {
+    const { attempt, collection } = input;
+    const { hash, file } = collection;
+
+    // 1. Is the torrent already loaded?
+    let loaded = await this.torrentLoaded(client, hash);
+
+    // 2. Not loaded: add it stopped, then switch every file off before
+    //    anything else touches it.
+    if (!loaded) {
+      try {
+        const added = await client.add({
+          payload: {
+            torrent: input.bytes,
+            filename: `gamarr-${attempt.id}.torrent`
+          },
+          category: input.category,
+          tag: attempt.marker,
+          stopped: true
+        });
+        if (added.hash !== null && added.hash.toLowerCase() !== hash) {
+          throw validationError(COLLECTION_CHANGED);
+        }
+      } catch (error) {
+        // qBittorrent answers 409 when it already has the torrent (a
+        // concurrent grab won the add). Only that case takes the
+        // already-loaded path, and only once `list` confirms it.
+        if (
+          !(error instanceof TorrentAddError)
+          || error.outcome !== "rejected"
+          || !(await this.torrentLoaded(client, hash))
+        ) {
+          throw error;
+        }
+        loaded = true;
+      }
+    }
+
+    let files: TorrentFileList;
+    if (loaded) {
+      // 3. Shared torrent: one marker tag per attempt.
+      await client.addTags(hash, attempt.marker);
+      files = await this.pollFiles(client, hash);
+    } else {
+      files = await this.pollFiles(client, hash);
+      // Every file except those other live attempts already own; in the
+      // normal case that is all of them. Excluding owned files keeps a grab
+      // that raced this add from having its file switched back off.
+      const owned = this.ownedCollectionFiles(hash, attempt.id);
+      const zero = files
+        .map((entry) => entry.index)
+        .filter((index) => !owned.has(index));
+      if (zero.length > 0) await client.setFilePriorities(hash, zero, 0);
+    }
+
+    // 4. The file at the pinned index must still be the one the user chose.
+    const target = files.find((entry) => entry.index === file.index);
+    if (!target || !collectionFileMatches(target.name, file.name)) {
+      throw validationError(COLLECTION_CHANGED);
+    }
+
+    // Already loaded: refuse before raising anything if an unowned file is
+    // wanted, so a failed grab does not leave its own file enabled on a
+    // torrent that may be running.
+    if (loaded) this.assertOnlyOwnedFilesWanted(hash, files);
+
+    // 5. Raise only the target. Nothing on a loaded torrent is ever lowered.
+    await client.setFilePriorities(hash, [file.index], 1);
+
+    // 6. Safety check on a fresh read, then start.
+    const after = await client.listFiles(hash);
+    const own = after.find((entry) => entry.index === file.index);
+    if (!own || own.priority <= 0) {
+      throw new AppError(
+        "UNAVAILABLE",
+        502,
+        "qBittorrent did not apply the file selection"
+      );
+    }
+    this.assertOnlyOwnedFilesWanted(hash, after);
+    await client.start(hash);
+  }
+
+  private async torrentLoaded(
+    client: TorrentClientPort,
+    hash: string
+  ): Promise<boolean> {
+    const torrents = await client.list();
+    return torrents.some((torrent) => torrent.hash.toLowerCase() === hash);
+  }
+
+  /** NOT_FOUND and an empty list both mean "qBittorrent is not ready yet". */
+  private async pollFiles(
+    client: TorrentClientPort,
+    hash: string
+  ): Promise<TorrentFileList> {
+    for (let poll = 0; poll < FILE_LIST_POLLS; poll += 1) {
+      if (poll > 0) await this.sleep(FILE_LIST_POLL_MS);
+      try {
+        const files = await client.listFiles(hash);
+        if (files.length > 0) return files;
+      } catch (error) {
+        if (!(error instanceof AppError) || error.code !== "NOT_FOUND") {
+          throw error;
+        }
+      }
+    }
+    throw new AppError(
+      "UNAVAILABLE",
+      504,
+      "qBittorrent did not list the collection's files in time"
+    );
+  }
+
+  /**
+   * File indices claimed by `collection-torrent` attempts on this hash that
+   * have not failed. Completed attempts still own their file: switching it
+   * off would stop it seeding, and it is the operator's, not ours, to drop.
+   */
+  private ownedCollectionFiles(hash: string, exceptId?: string): Set<number> {
+    const owned = new Set<number>();
+    for (const attempt of this.dependencies.repository.listByTorrentHash(hash)) {
+      if (attempt.source !== "collection-torrent") continue;
+      if (attempt.status === "Failed") continue;
+      if (attempt.id === exceptId) continue;
+      const index = attempt.selectedFiles?.[0]?.index;
+      if (index !== undefined) owned.add(index);
+    }
+    return owned;
+  }
+
+  private assertOnlyOwnedFilesWanted(
+    hash: string,
+    files: TorrentFileList
+  ): void {
+    // This attempt is claimed and Submitting, so it owns its own file here.
+    const owned = this.ownedCollectionFiles(hash);
+    const unowned = files.some((entry) =>
+      entry.priority > 0 && !owned.has(entry.index));
+    if (unowned) throw validationError(OTHER_FILES_ENABLED);
   }
 
   private failFetch(id: string, error: unknown): DownloadAttempt {

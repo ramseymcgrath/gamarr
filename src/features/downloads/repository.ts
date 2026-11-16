@@ -26,6 +26,8 @@ export interface DownloadRepository {
   update(id: string, patch: Partial<DownloadAttempt>): DownloadAttempt;
   get(id: string): DownloadAttempt | null;
   list(): DownloadAttempt[];
+  /** Every attempt, in any status, recorded against one qBittorrent hash. */
+  listByTorrentHash(hash: string): DownloadAttempt[];
   recoverStaleSubmitting(before: number, updatedAt: number): void;
   recoverStaleInternetArchiveDownloads(updatedAt: number): void;
 }
@@ -193,6 +195,13 @@ export class SqliteDownloadRepository implements DownloadRepository {
   list(): DownloadAttempt[] {
     return this.database.select().from(downloadAttempts)
       .orderBy(desc(downloadAttempts.createdAt))
+      .all()
+      .map(mapAttempt);
+  }
+
+  listByTorrentHash(hash: string): DownloadAttempt[] {
+    return this.database.select().from(downloadAttempts)
+      .where(eq(downloadAttempts.torrentHash, hash))
       .all()
       .map(mapAttempt);
   }

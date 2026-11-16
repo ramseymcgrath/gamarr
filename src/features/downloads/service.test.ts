@@ -23,6 +23,7 @@ import type {
   ReleaseCandidateRecord
 } from "@/features/release-search/ports";
 import type { SettingsRepository } from "@/features/settings/service";
+import { AppError } from "@/lib/errors";
 
 class MemoryDownloads implements DownloadRepository {
   readonly attempts = new Map<string, DownloadAttempt>();
@@ -61,6 +62,10 @@ class MemoryDownloads implements DownloadRepository {
 
   list(): DownloadAttempt[] {
     return [...this.attempts.values()];
+  }
+
+  listByTorrentHash(hash: string): DownloadAttempt[] {
+    return this.list().filter((attempt) => attempt.torrentHash === hash);
   }
 
   recoverStaleSubmitting(before: number, updatedAt: number): void {
@@ -150,7 +155,28 @@ const archiveCandidate = candidate("torrent", {
   })
 });
 
+const collectionHash = "c0ffee0123456789abcdef0123456789abcdef01";
+const collectionCandidate = candidate("torrent", {
+  id: "candidate-collection",
+  indexerId: `collection:${collectionHash}`,
+  guid: `collection:${collectionHash}:1`,
+  title: "b",
+  seeders: null,
+  downloadPath: `/collection/${collectionHash}/1`,
+  category: null,
+  sourceSnapshot: JSON.stringify({
+    indexerName: "My Collection",
+    collectionId: collectionHash,
+    torrentFileName: "collection.torrent",
+    fileIndex: 1,
+    fileName: "b.7z",
+    origin: null,
+    magnetUrl: null
+  })
+});
+
 const candidateRecords = new Map([
+  [collectionCandidate.id, collectionCandidate],
   [archiveCandidate.id, archiveCandidate],
   [usenetCandidate.id, usenetCandidate],
   [torrentCandidate.id, torrentCandidate],
@@ -231,6 +257,8 @@ interface BuildOptions {
   fileLists?: Array<Array<{ index: number; name: string }>>;
   now?: () => number;
   onCompleted?: (attemptIds: string[]) => void;
+  client?: TorrentClientPort;
+  sleep?: (ms: number) => Promise<void>;
 }
 
 function build(options: BuildOptions = {}) {
@@ -330,7 +358,8 @@ function build(options: BuildOptions = {}) {
     sabFactory: () => sab,
     torrentClient: () => options.torrentConfigured === false
       ? null
-      : torrentClient,
+      : options.client ?? torrentClient,
+    sleep: options.sleep ?? (async () => undefined),
     maxTorrentBytes: 8 * 1024 * 1024,
     id: () => "attempt-1",
     now: options.now ?? (() => 1_000),
@@ -1133,5 +1162,516 @@ describe("fingerprintParts", () => {
       iaFileName: null,
       collectionFileIndex: null
     })).toEqual(["candidate-collection", 1, 130, "torrent", -1]);
+  });
+});
+
+interface FakeTorrentFile {
+  index: number;
+  name: string;
+  priority: number;
+  progress: number;
+}
+
+/**
+ * A qBittorrent stand-in that keeps real per-file priorities and records every
+ * call in order, so tests can assert both the sequence and the end state.
+ */
+function fakeQbittorrent(options: {
+  loaded?: boolean;
+  files?: Array<{ index: number; name: string; priority?: number }>;
+  notFoundPolls?: number;
+  emptyPolls?: number;
+  addError?: unknown;
+  /** After a failed add, `list()` reports the torrent (a lost add race). */
+  presentAfterAddError?: boolean;
+  addHash?: string | null;
+  ignoreLowering?: boolean;
+  failPriorities?: boolean;
+}) {
+  const calls: string[] = [];
+  const addInputs: Array<Parameters<TorrentClientPort["add"]>[0]> = [];
+  const template = options.files ?? [
+    { index: 0, name: "Collection/a.7z" },
+    { index: 1, name: "Collection/b.7z" },
+    { index: 2, name: "Collection/c.7z" }
+  ];
+  const files: FakeTorrentFile[] = template.map((file) => ({
+    progress: 0,
+    ...file,
+    priority: file.priority ?? 1
+  }));
+  let present = options.loaded === true;
+  let notFound = options.notFoundPolls ?? 0;
+  let empty = options.emptyPolls ?? 0;
+  let addFailed = false;
+  const client: TorrentClientPort = {
+    add: async (input) => {
+      calls.push(`add(stopped=${String(input.stopped)})`);
+      addInputs.push(input);
+      if (options.addError !== undefined) {
+        addFailed = true;
+        throw options.addError;
+      }
+      present = true;
+      for (const file of files) file.priority = 1;
+      return {
+        hash: options.addHash === undefined ? collectionHash : options.addHash
+      };
+    },
+    listFiles: async (hash) => {
+      calls.push("listFiles");
+      expect(hash).toBe(collectionHash);
+      if (notFound > 0) {
+        notFound -= 1;
+        throw new AppError("NOT_FOUND", 404, "Torrent not found");
+      }
+      if (empty > 0) {
+        empty -= 1;
+        return [];
+      }
+      if (!present) throw new AppError("NOT_FOUND", 404, "Torrent not found");
+      return files.map((file) => ({ ...file }));
+    },
+    setFilePriorities: async (hash, indices, priority) => {
+      expect(hash).toBe(collectionHash);
+      calls.push(`prio([${indices.join(",")}],${priority})`);
+      if (options.failPriorities) throw new Error("connection reset");
+      if (priority === 0 && options.ignoreLowering) return;
+      for (const file of files) {
+        if (indices.includes(file.index)) file.priority = priority;
+      }
+    },
+    addTags: async (hash, tag) => {
+      expect(hash).toBe(collectionHash);
+      calls.push(`addTags(${tag})`);
+    },
+    start: async (hash) => {
+      expect(hash).toBe(collectionHash);
+      calls.push("start");
+    },
+    list: async () => {
+      calls.push("list");
+      const visible = present || (addFailed && options.presentAfterAddError);
+      if (visible && options.presentAfterAddError) present = true;
+      return visible
+        ? [{ hash: collectionHash, tags: [], state: "stoppedDL", progress: 0 }]
+        : [];
+    },
+    testConnection: async () => undefined
+  };
+  return { client, calls, files, addInputs };
+}
+
+function collectionAttempt(
+  id: string,
+  status: DownloadAttempt["status"],
+  index: number,
+  name: string
+): DownloadAttempt {
+  return storedAttempt({
+    id,
+    submissionKey: `key-${id}`,
+    status,
+    source: "collection-torrent",
+    indexerId: `collection:${collectionHash}`,
+    torrentHash: collectionHash,
+    selectedFiles: [{ index, name }],
+    marker: `gamarr-${id}`,
+    sabJobId: null
+  });
+}
+
+const otherFilesEnabled =
+  "Other files in this collection are enabled in qBittorrent; "
+  + "set them to Do not download, then retry";
+
+function collectionSubmission(
+  overrides: Partial<SubmitDownloadInput> = {}
+): SubmitDownloadInput {
+  return submission({ candidateId: collectionCandidate.id, ...overrides });
+}
+
+describe("DownloadService collection submission", () => {
+  it("fresh add: add(stopped) → filePrio(all,0) → filePrio([i],1) → start", async () => {
+    const qbit = fakeQbittorrent({});
+    const { service } = build({ client: qbit.client });
+
+    const attempt = await service.submit(collectionSubmission());
+
+    expect(qbit.calls).toEqual([
+      "list",
+      "add(stopped=true)",
+      "listFiles",
+      "prio([0,1,2],0)",
+      "prio([1],1)",
+      "listFiles",
+      "start"
+    ]);
+    expect(qbit.addInputs[0]).toMatchObject({
+      category: "games",
+      tag: "gamarr-attempt-1",
+      stopped: true
+    });
+    expect(qbit.files.map((file) => file.priority)).toEqual([0, 1, 0]);
+    expect(attempt).toMatchObject({
+      status: "Downloading",
+      source: "collection-torrent",
+      torrentHash: collectionHash,
+      selectedFiles: [{ index: 1, name: "b.7z" }],
+      filesAppliedAt: 1_000,
+      failureDetail: null,
+      requestFingerprint: fingerprint([
+        collectionCandidate.id,
+        1,
+        130,
+        "torrent",
+        1
+      ])
+    });
+  });
+
+  it("polls listFiles through NOT_FOUND/empty until files appear", async () => {
+    const qbit = fakeQbittorrent({ notFoundPolls: 2, emptyPolls: 1 });
+    const sleep = vi.fn(async () => undefined);
+    const { service } = build({ client: qbit.client, sleep });
+
+    const attempt = await service.submit(collectionSubmission());
+
+    expect(attempt.status).toBe("Downloading");
+    expect(sleep).toHaveBeenCalledTimes(3);
+    expect(qbit.calls.slice(0, 7)).toEqual([
+      "list",
+      "add(stopped=true)",
+      "listFiles",
+      "listFiles",
+      "listFiles",
+      "listFiles",
+      "prio([0,1,2],0)"
+    ]);
+  });
+
+  it("fails with nothing started when the files never appear within 10 s", async () => {
+    const qbit = fakeQbittorrent({ notFoundPolls: 1_000 });
+    const waits: number[] = [];
+    const { service } = build({
+      client: qbit.client,
+      sleep: async (ms) => {
+        waits.push(ms);
+      }
+    });
+
+    const attempt = await service.submit(collectionSubmission());
+
+    expect(attempt.status).toBe("Failed");
+    expect(attempt.failureDetail).toBeTruthy();
+    expect(waits.reduce((sum, ms) => sum + ms, 0)).toBeLessThanOrEqual(10_000);
+    expect(qbit.calls).not.toContain("start");
+    expect(qbit.calls.some((call) => call.startsWith("prio"))).toBe(false);
+    expect(qbit.addInputs[0]?.stopped).toBe(true);
+  });
+
+  it("already loaded: addTags then filePrio([i],1) then start; no add; nothing lowered", async () => {
+    const repository = new MemoryDownloads();
+    repository.attempts.set(
+      "other",
+      collectionAttempt("other", "Downloading", 0, "a.7z")
+    );
+    const qbit = fakeQbittorrent({
+      loaded: true,
+      files: [
+        { index: 0, name: "Collection/a.7z", priority: 1 },
+        { index: 1, name: "Collection/b.7z", priority: 0 },
+        { index: 2, name: "Collection/c.7z", priority: 0 }
+      ]
+    });
+    const { service } = build({ client: qbit.client, repository });
+
+    const attempt = await service.submit(collectionSubmission());
+
+    expect(qbit.calls).toEqual([
+      "list",
+      "addTags(gamarr-attempt-1)",
+      "listFiles",
+      "prio([1],1)",
+      "listFiles",
+      "start"
+    ]);
+    expect(qbit.files.map((file) => file.priority)).toEqual([1, 1, 0]);
+    expect(attempt).toMatchObject({
+      status: "Downloading",
+      torrentHash: collectionHash,
+      selectedFiles: [{ index: 1, name: "b.7z" }],
+      filesAppliedAt: 1_000
+    });
+  });
+
+  it("add rejected 409 → already-loaded path", async () => {
+    const repository = new MemoryDownloads();
+    repository.attempts.set(
+      "other",
+      collectionAttempt("other", "Submitting", 0, "a.7z")
+    );
+    const qbit = fakeQbittorrent({
+      addError: new TorrentAddError(
+        "rejected",
+        "qBittorrent rejected the torrent submission"
+      ),
+      presentAfterAddError: true,
+      files: [
+        { index: 0, name: "Collection/a.7z", priority: 1 },
+        { index: 1, name: "Collection/b.7z", priority: 0 },
+        { index: 2, name: "Collection/c.7z", priority: 0 }
+      ]
+    });
+    const { service } = build({ client: qbit.client, repository });
+
+    const attempt = await service.submit(collectionSubmission());
+
+    expect(qbit.calls).toEqual([
+      "list",
+      "add(stopped=true)",
+      "list",
+      "addTags(gamarr-attempt-1)",
+      "listFiles",
+      "prio([1],1)",
+      "listFiles",
+      "start"
+    ]);
+    expect(qbit.calls.some((call) => call.endsWith(",0)"))).toBe(false);
+    expect(attempt.status).toBe("Downloading");
+  });
+
+  it("fails a rejected add when qBittorrent does not have the torrent", async () => {
+    const qbit = fakeQbittorrent({
+      addError: new TorrentAddError(
+        "rejected",
+        "qBittorrent rejected the torrent submission"
+      )
+    });
+    const { service } = build({ client: qbit.client });
+
+    const attempt = await service.submit(collectionSubmission());
+
+    expect(attempt).toMatchObject({
+      status: "Failed",
+      failureDetail: "qBittorrent rejected the torrent submission"
+    });
+    expect(qbit.calls).not.toContain("start");
+  });
+
+  it("unowned file wanted on a hand-loaded torrent → Failed, never started", async () => {
+    const qbit = fakeQbittorrent({ loaded: true });
+    const { service } = build({ client: qbit.client });
+
+    const attempt = await service.submit(collectionSubmission());
+
+    expect(attempt).toMatchObject({
+      status: "Failed",
+      failureDetail: otherFilesEnabled
+    });
+    expect(qbit.calls).not.toContain("start");
+    expect(qbit.calls.some((call) => call.endsWith(",0)"))).toBe(false);
+  });
+
+  it("treats a file owned by a Completed attempt as owned", async () => {
+    const repository = new MemoryDownloads();
+    repository.attempts.set(
+      "done",
+      collectionAttempt("done", "Completed", 0, "a.7z")
+    );
+    const qbit = fakeQbittorrent({
+      loaded: true,
+      files: [
+        { index: 0, name: "Collection/a.7z", priority: 1 },
+        { index: 1, name: "Collection/b.7z", priority: 0 },
+        { index: 2, name: "Collection/c.7z", priority: 0 }
+      ]
+    });
+    const { service } = build({ client: qbit.client, repository });
+
+    const attempt = await service.submit(collectionSubmission());
+
+    expect(attempt.status).toBe("Downloading");
+    expect(qbit.calls.at(-1)).toBe("start");
+  });
+
+  it("does not count a Failed attempt's file as owned", async () => {
+    const repository = new MemoryDownloads();
+    repository.attempts.set(
+      "done",
+      collectionAttempt("done", "Completed", 0, "a.7z")
+    );
+    repository.attempts.set(
+      "failed",
+      collectionAttempt("failed", "Failed", 2, "c.7z")
+    );
+    const qbit = fakeQbittorrent({
+      loaded: true,
+      files: [
+        { index: 0, name: "Collection/a.7z", priority: 1 },
+        { index: 1, name: "Collection/b.7z", priority: 0 },
+        { index: 2, name: "Collection/c.7z", priority: 1 }
+      ]
+    });
+    const { service } = build({ client: qbit.client, repository });
+
+    const attempt = await service.submit(collectionSubmission());
+
+    expect(attempt).toMatchObject({
+      status: "Failed",
+      failureDetail: otherFilesEnabled
+    });
+    expect(qbit.calls).not.toContain("start");
+  });
+
+  it("re-reads priorities after the raise and refuses to start on an unowned file", async () => {
+    const qbit = fakeQbittorrent({ ignoreLowering: true });
+    const { service } = build({ client: qbit.client });
+
+    const attempt = await service.submit(collectionSubmission());
+
+    expect(attempt).toMatchObject({
+      status: "Failed",
+      failureDetail: otherFilesEnabled
+    });
+    expect(qbit.calls).toEqual([
+      "list",
+      "add(stopped=true)",
+      "listFiles",
+      "prio([0,1,2],0)",
+      "prio([1],1)",
+      "listFiles"
+    ]);
+  });
+
+  it("leaves a fresh torrent stopped when a call after the add fails", async () => {
+    const qbit = fakeQbittorrent({ failPriorities: true });
+    const { service } = build({ client: qbit.client });
+
+    const attempt = await service.submit(collectionSubmission());
+
+    expect(attempt.status).toBe("Failed");
+    expect(attempt.failureDetail).toBeTruthy();
+    expect(qbit.calls).not.toContain("start");
+  });
+
+  it("fails without starting when qBittorrent reports a different hash", async () => {
+    const qbit = fakeQbittorrent({
+      addHash: "0123456789abcdef0123456789abcdef01234567"
+    });
+    const { service } = build({ client: qbit.client });
+
+    const attempt = await service.submit(collectionSubmission());
+
+    expect(attempt).toMatchObject({
+      status: "Failed",
+      failureDetail: "Collection torrent changed; search again"
+    });
+    expect(qbit.calls).toEqual(["list", "add(stopped=true)"]);
+  });
+
+  it("keeps another live attempt's file out of the fresh zero-all call", async () => {
+    const repository = new MemoryDownloads();
+    repository.attempts.set(
+      "racing",
+      collectionAttempt("racing", "Submitting", 2, "c.7z")
+    );
+    const qbit = fakeQbittorrent({});
+    const { service } = build({ client: qbit.client, repository });
+
+    const attempt = await service.submit(collectionSubmission());
+
+    expect(qbit.calls).toContain("prio([0,1],0)");
+    expect(qbit.files.map((file) => file.priority)).toEqual([0, 1, 1]);
+    expect(attempt.status).toBe("Downloading");
+  });
+
+  it("file name at index differs (already loaded) → Failed, no calls after files", async () => {
+    const qbit = fakeQbittorrent({
+      loaded: true,
+      files: [
+        { index: 0, name: "Collection/a.7z", priority: 0 },
+        { index: 1, name: "Collection/z.7z", priority: 0 },
+        { index: 2, name: "Collection/c.7z", priority: 0 }
+      ]
+    });
+    const { service } = build({ client: qbit.client });
+
+    const attempt = await service.submit(collectionSubmission());
+
+    expect(attempt).toMatchObject({
+      status: "Failed",
+      failureDetail: "Collection torrent changed; search again"
+    });
+    expect(qbit.calls).toEqual([
+      "list",
+      "addTags(gamarr-attempt-1)",
+      "listFiles"
+    ]);
+  });
+
+  it("file name at index differs (fresh add) → Failed, never raised or started", async () => {
+    const qbit = fakeQbittorrent({
+      files: [
+        { index: 0, name: "Collection/a.7z" },
+        { index: 1, name: "Collection/z.7z" },
+        { index: 2, name: "Collection/c.7z" }
+      ]
+    });
+    const { service } = build({ client: qbit.client });
+
+    const attempt = await service.submit(collectionSubmission());
+
+    expect(attempt).toMatchObject({
+      status: "Failed",
+      failureDetail: "Collection torrent changed; search again"
+    });
+    expect(qbit.calls).toEqual([
+      "list",
+      "add(stopped=true)",
+      "listFiles",
+      "prio([0,1,2],0)"
+    ]);
+  });
+
+  it("does not accept a suffix match from a deeper folder", async () => {
+    const qbit = fakeQbittorrent({
+      loaded: true,
+      files: [
+        { index: 0, name: "Collection/a.7z", priority: 0 },
+        { index: 1, name: "Collection/extra/b.7z", priority: 0 }
+      ]
+    });
+    const { service } = build({ client: qbit.client });
+
+    const attempt = await service.submit(collectionSubmission());
+
+    expect(attempt.failureDetail).toBe("Collection torrent changed; search again");
+    expect(qbit.calls).not.toContain("start");
+  });
+
+  it("selectedFiles in the request → validation error before claiming", async () => {
+    const qbit = fakeQbittorrent({});
+    const { service, repository } = build({ client: qbit.client });
+
+    await expect(service.submit(collectionSubmission({ selectedFiles: [1] })))
+      .rejects.toThrow("Collection file selection is fixed");
+    await expect(service.submit(collectionSubmission({ selectedFiles: [] })))
+      .rejects.toThrow("Collection file selection is fixed");
+    expect(repository.attempts.size).toBe(0);
+    expect(qbit.calls).toEqual([]);
+  });
+
+  it("replay with the same submissionKey returns the attempt unchanged", async () => {
+    const qbit = fakeQbittorrent({});
+    const { service, fetch } = build({ client: qbit.client });
+
+    const first = await service.submit(collectionSubmission());
+    const callCount = qbit.calls.length;
+    const replay = await service.submit(collectionSubmission());
+
+    expect(replay).toEqual(first);
+    expect(qbit.calls).toHaveLength(callCount);
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
 });

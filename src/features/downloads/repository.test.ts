@@ -352,6 +352,34 @@ describe("SqliteDownloadRepository", () => {
     database.$client.close();
   });
 
+  it("lists every attempt on one torrent hash", () => {
+    const { database, repository } = setup();
+    const hash = "8c212779b4abde7c6bc608063a0d008b7e40ce32";
+    for (const [id, torrentHash] of [
+      ["first", hash],
+      ["second", hash],
+      ["other", "0123456789abcdef0123456789abcdef01234567"],
+      ["none", null]
+    ] as const) {
+      repository.claimSubmission({
+        library,
+        attempt: attempt({
+          id,
+          submissionKey: `key-${id}`,
+          marker: `gamarr-${id}`,
+          source: "collection-torrent",
+          torrentHash,
+          selectedFiles: [{ index: 1, name: "a.7z" }]
+        })
+      });
+    }
+
+    expect(repository.listByTorrentHash(hash).map((row) => row.id).sort())
+      .toEqual(["first", "second"]);
+    expect(repository.listByTorrentHash("ffff")).toEqual([]);
+    database.$client.close();
+  });
+
   it("refuses a torrent write once the attempt is terminal", () => {
     const { database, repository } = setup();
     repository.claimSubmission({
