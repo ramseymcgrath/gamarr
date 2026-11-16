@@ -62,6 +62,7 @@ export function releaseSearchDependencies() {
         timeoutMs: Math.min(prowlarr.timeoutMs, 10_000)
       }),
       internetArchive,
+      collections: collectionsPort(),
       serialCatalog: process.env.GAMARR_SERIAL_SEARCH === "false"
         ? null
         : new RedumpSerialCatalog(redumpSource()),

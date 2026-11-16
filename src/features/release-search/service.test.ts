@@ -8,6 +8,7 @@ import type { CatalogRepository } from "@/features/catalog/ports";
 import type { Release } from "@/features/release-search/models";
 import type {
   CandidateRepository,
+  CollectionsPort,
   InternetArchivePort,
   ProwlarrIndexerSummary,
   ProwlarrPort,
@@ -122,6 +123,7 @@ function serviceFor(input: {
   candidates?: CandidateRepository;
   prowlarr?: ProwlarrPort;
   internetArchive?: InternetArchivePort | null;
+  collections?: CollectionsPort | null;
   serialCatalog?: SerialCatalogPort | null;
   serialLookupTimeoutMs?: number;
   fetch?: (input: {
@@ -143,6 +145,7 @@ function serviceFor(input: {
     candidates: input.candidates ?? new MemoryCandidates(),
     prowlarr: input.prowlarr ?? prowlarrFor(),
     internetArchive: input.internetArchive ?? null,
+    collections: input.collections ?? null,
     serialCatalog: input.serialCatalog ?? null,
     serialLookupTimeoutMs: input.serialLookupTimeoutMs,
     prowlarrBaseUrl: "https://prowlarr.test/root",
@@ -928,5 +931,136 @@ describe("ReleaseSearchService built-in platform aliases", () => {
       ["Game Name [Wii] [NTSC]", "Conflicting"],
       ["Game Name. Xbox 360", "Conflicting"]
     ]);
+  });
+});
+
+describe("ReleaseSearchService collections", () => {
+  const hash = "b".repeat(40);
+  const nightfire = {
+    id: hash,
+    platformId: 130,
+    name: "Big Pack",
+    torrentFileName: "big-pack.torrent",
+    files: [
+      { index: 0, name: "Other (USA).7z", size: 5 },
+      { index: 3, name: "Game Name (USA).7z", size: 77 }
+    ]
+  };
+
+  function collectionsFor(
+    list: CollectionsPort["list"]
+  ): CollectionsPort {
+    return {
+      list,
+      read: (id) => id === hash
+        ? { collection: nightfire, bytes: new Uint8Array() }
+        : null
+    };
+  }
+
+  it("collection releases rank with the preferred-source bonus and carry the collection name", async () => {
+    const candidates = new MemoryCandidates();
+    const result = await serviceFor({
+      candidates,
+      id: () => "collection-candidate",
+      prowlarr: prowlarrFor({ indexers: [] }),
+      collections: collectionsFor(() => ({
+        collections: [nightfire],
+        warnings: []
+      }))
+    }).search({ gameId: 1, platformId: 130 });
+
+    expect(result.releases).toHaveLength(1);
+    expect(result.releases[0]).toMatchObject({
+      title: "Game Name (USA)",
+      size: 77,
+      supportingReasons: expect.arrayContaining(["Preferred source: Big Pack"]),
+      sources: [{
+        candidateId: "collection-candidate",
+        indexerName: "Big Pack",
+        protocol: "torrent",
+        seeders: null
+      }]
+    });
+    expect(candidates.saved[0]).toMatchObject({
+      indexerId: `collection:${hash}`,
+      indexerConfigRevision: 7,
+      guid: `collection:${hash}:3`,
+      downloadPath: `/collection/${hash}/3`
+    });
+    expect(JSON.parse(candidates.saved[0]!.sourceSnapshot)).toEqual({
+      indexerName: "Big Pack",
+      collectionId: hash,
+      torrentFileName: "big-pack.torrent",
+      fileIndex: 3,
+      fileName: "Game Name (USA).7z",
+      origin: null,
+      magnetUrl: null
+    });
+  });
+
+  it("a broken collection is a warning only", async () => {
+    const result = await serviceFor({
+      prowlarr: prowlarrFor({ indexers: [] }),
+      collections: collectionsFor(() => ({
+        collections: [],
+        warnings: ["Skipped bad.torrent: unreadable"]
+      }))
+    }).search({ gameId: 1, platformId: 130 });
+
+    expect(result.releases).toEqual([]);
+    expect(result.warnings).toEqual([{
+      indexerId: "collections",
+      indexerName: "Collections",
+      message: "Skipped bad.torrent: unreadable"
+    }]);
+  });
+
+  it("another platform's collections are not searched", async () => {
+    const list = vi.fn<CollectionsPort["list"]>(
+      () => ({ collections: [], warnings: [] })
+    );
+    await serviceFor({
+      prowlarr: prowlarrFor({ indexers: [] }),
+      collections: collectionsFor(list)
+    }).search({ gameId: 1, platformId: 130 });
+
+    expect(list).toHaveBeenCalledExactlyOnceWith(130);
+  });
+
+  it("listCandidateFiles returns only the chosen file for a collection candidate", async () => {
+    const found: ReleaseCandidateRecord = {
+      id: "c",
+      expiresAt: 9_999_999,
+      protocol: "torrent",
+      indexerId: `collection:${hash}`,
+      indexerConfigRevision: 7,
+      guid: `collection:${hash}:3`,
+      title: "Game Name (USA)",
+      size: 77,
+      seeders: null,
+      downloadPath: `/collection/${hash}/3`,
+      category: null,
+      sourceSnapshot: JSON.stringify({
+        indexerName: "Big Pack",
+        collectionId: hash,
+        torrentFileName: "big-pack.torrent",
+        fileIndex: 3,
+        fileName: "Game Name (USA).7z",
+        origin: null,
+        magnetUrl: null
+      }),
+      createdAt: 1
+    };
+    const result = await serviceFor({
+      candidates: new MemoryCandidates(found),
+      collections: collectionsFor(() => ({ collections: [], warnings: [] }))
+    }).listCandidateFiles("c");
+
+    expect(result).toEqual({
+      files: [{ index: 3, name: "Game Name (USA).7z", size: 77 }],
+      metadataPending: false,
+      collection: { name: "Big Pack" }
+    });
   });
 });

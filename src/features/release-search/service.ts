@@ -6,6 +6,12 @@ import {
   rankRelease
 } from "@/features/release-search/matcher";
 import {
+  collectionFileTitle,
+  matchCollectionFiles
+} from "@/features/release-search/collections";
+import {
+  COLLECTION_INDEXER_PREFIX,
+  collectionIndexerId,
   INTERNET_ARCHIVE_INDEXER_ID,
   INTERNET_ARCHIVE_INDEXER_NAME,
   type PlannedQuery,
@@ -16,6 +22,9 @@ import { platformAliases } from "@/features/release-search/platform-aliases";
 import { planPrimaryQuery } from "@/features/release-search/query-planner";
 import type {
   CandidateRepository,
+  Collection,
+  CollectionFile,
+  CollectionsPort,
   DiscSerials,
   InternetArchivePort,
   ProwlarrIndexerSummary,
@@ -35,6 +44,9 @@ import {
   type DownloadUrlRejectionReason
 } from "@/integrations/prowlarr/url-policy";
 import { AppError, validationError } from "@/lib/errors";
+
+const COLLECTIONS_WARNING_ID = "collections";
+const COLLECTIONS_WARNING_NAME = "Collections";
 
 const rejectionLabels: Array<[DownloadUrlRejectionReason, string]> = [
   ["malformed", "malformed"],
@@ -79,6 +91,8 @@ interface ReleaseSearchDependencies {
   prowlarr: ProwlarrPort | null;
   /** Searched alongside the Prowlarr indexers; `null` when disabled. */
   internetArchive?: InternetArchivePort | null;
+  /** Multi-file collection torrents in the config folder; `null` when off. */
+  collections?: CollectionsPort | null;
   /** Disc serials from Redump, for platforms that have a list. */
   serialCatalog?: SerialCatalogPort | null;
   /** How long a search waits for the serial lookup before going without. */
@@ -136,6 +150,8 @@ export interface ReleaseSearchResponse {
 export interface CandidateFilesResponse {
   files: TorrentFile[];
   metadataPending: boolean;
+  /** Set for a collection candidate: the one file Gamarr will turn on. */
+  collection?: { name: string };
 }
 
 /**
@@ -217,6 +233,7 @@ export class ReleaseSearchService {
 
     let indexers;
     let serials: DiscSerials | null = null;
+    let collections: Collection[] = [];
     let searchedSerial: string | null = null;
     try {
       try {
@@ -249,6 +266,49 @@ export class ReleaseSearchService {
         categoryIds: platform.categoryIds ?? [],
         serials
       };
+      const collectionList = this.dependencies.collections
+        ? this.dependencies.collections.list(input.platformId)
+        : { collections: [], warnings: [] };
+      collections = collectionList.collections;
+      for (const message of collectionList.warnings) {
+        warnings.push({
+          indexerId: COLLECTIONS_WARNING_ID,
+          indexerName: COLLECTIONS_WARNING_NAME,
+          message
+        });
+      }
+      const redumpNames = [...new Set(
+        (serials?.serials ?? []).flatMap((serial) => {
+          const name = serials?.gameFor(serial);
+          return name ? [name] : [];
+        })
+      )];
+      for (const collection of collections) {
+        for (const file of matchCollectionFiles(
+          collection,
+          [game.name, ...game.alternativeNames],
+          redumpNames
+        )) {
+          ranked.push(rankRelease({
+            ...rankInput,
+            release: {
+              guid: `${collectionIndexerId(collection.id)}:${file.index}`,
+              title: collectionFileTitle(file.name),
+              protocol: "torrent",
+              indexerId: collectionIndexerId(collection.id),
+              indexerName: collection.name,
+              downloadUrl: `${collectionIndexerId(collection.id)}/${file.index}`,
+              magnetUrl: null,
+              seeders: null,
+              peers: null,
+              size: file.size,
+              category: null,
+              publishedAt: null
+            },
+            preferredSource: collection.name
+          }));
+        }
+      }
       await Promise.all([
         this.searchInternetArchive(
           game.name,
@@ -336,6 +396,18 @@ export class ReleaseSearchService {
         categoryIds: []
       });
     }
+    for (const collection of collections) {
+      indexerById.set(collectionIndexerId(collection.id), {
+        id: collectionIndexerId(collection.id),
+        name: collection.name,
+        protocol: "torrent",
+        priority: 0,
+        categoryIds: []
+      });
+    }
+    const collectionById = new Map(
+      collections.map((collection) => [collectionIndexerId(collection.id), collection])
+    );
     const timestamp = this.now();
     // Reasons are counted per indexer so one unusable enclosure costs only that
     // release, not every result from every indexer.
@@ -354,6 +426,10 @@ export class ReleaseSearchService {
         }
         if (source.indexerId === INTERNET_ARCHIVE_INDEXER_ID) {
           return [this.saveInternetArchiveCandidate(source, timestamp)];
+        }
+        const collection = collectionById.get(source.indexerId);
+        if (collection) {
+          return [this.saveCollectionCandidate(source, collection, timestamp)];
         }
         let safe;
         try {
@@ -483,6 +559,10 @@ export class ReleaseSearchService {
       throw validationError("Usenet candidates do not have selectable files");
     }
 
+    if (candidate.indexerId.startsWith(COLLECTION_INDEXER_PREFIX)) {
+      return this.collectionCandidateFile(candidate);
+    }
+
     const fetched = await this.dependencies.fetcher.fetch({
       candidate,
       magnetUrl: snapshotMagnetUrl(candidate.sourceSnapshot),
@@ -501,6 +581,89 @@ export class ReleaseSearchService {
     return {
       files: decodeTorrentFiles(fetched.bytes),
       metadataPending: false
+    };
+  }
+
+  /**
+   * A collection candidate is one file inside a shared torrent, so the file
+   * list is that single file, read from the already-parsed collection rather
+   * than the torrent bytes.
+   */
+  private collectionCandidateFile(
+    candidate: ReleaseCandidateRecord
+  ): CandidateFilesResponse {
+    let snapshot: unknown;
+    try {
+      snapshot = JSON.parse(candidate.sourceSnapshot);
+    } catch {
+      snapshot = null;
+    }
+    const record = typeof snapshot === "object" && snapshot !== null
+      ? snapshot as Record<string, unknown>
+      : {};
+    const found = typeof record.collectionId === "string"
+      ? this.dependencies.collections?.read(record.collectionId)
+      : null;
+    const file: CollectionFile | undefined = found?.collection.files.find(
+      (entry) => entry.index === record.fileIndex
+        && entry.name === record.fileName
+    );
+    if (!found || !file) {
+      throw new AppError(
+        "NOT_FOUND",
+        404,
+        "That collection file is no longer available"
+      );
+    }
+    return {
+      files: [{ index: file.index, name: file.name, size: file.size }],
+      metadataPending: false,
+      collection: { name: found.collection.name }
+    };
+  }
+
+  /**
+   * Collection candidates never touch the Prowlarr URL policy: nothing is
+   * fetched from a URL. The snapshot names the collection and file, and the
+   * fetch step re-reads the `.torrent` from the config folder and re-checks them.
+   */
+  private saveCollectionCandidate(
+    source: Release,
+    collection: Collection,
+    timestamp: number
+  ): PublicReleaseSource {
+    const fileIndex = Number(source.guid.slice(source.guid.lastIndexOf(":") + 1));
+    const file = collection.files.find((entry) => entry.index === fileIndex);
+    if (!file) throw validationError("Collection changed during release search");
+    const candidateId = this.id();
+    this.dependencies.candidates.save({
+      id: candidateId,
+      expiresAt: timestamp + 30 * 60 * 1000,
+      protocol: "torrent",
+      indexerId: collectionIndexerId(collection.id),
+      indexerConfigRevision: this.dependencies.prowlarrConfigRevision,
+      guid: source.guid,
+      title: source.title,
+      size: source.size,
+      seeders: null,
+      downloadPath: `/collection/${collection.id}/${file.index}`,
+      category: null,
+      sourceSnapshot: JSON.stringify({
+        indexerName: collection.name,
+        collectionId: collection.id,
+        torrentFileName: collection.torrentFileName,
+        fileIndex: file.index,
+        fileName: file.name,
+        origin: null,
+        magnetUrl: null
+      }),
+      createdAt: timestamp
+    });
+    return {
+      candidateId,
+      indexerName: collection.name,
+      protocol: "torrent",
+      seeders: null
     };
   }
 

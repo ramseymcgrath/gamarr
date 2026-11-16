@@ -68,4 +68,18 @@ describe("DownloadDialog", () => {
     expect(await screen.findByText("qBittorrent is not configured"))
       .toBeVisible();
   });
+
+  it("collection release shows what will be turned on and no checkboxes", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(Response.json({
+      files: [{ index: 3, name: "007 - Nightfire (USA).7z", size: 1024 }],
+      metadataPending: false,
+      collection: { name: "Big Pack" }
+    }));
+    render(<DownloadDialog {...baseProps} />);
+
+    expect(await screen.findByText(/Gamarr will turn on/)).toHaveTextContent(
+      "Gamarr will turn on 007 - Nightfire (USA).7z in Big Pack"
+    );
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+  });
 });

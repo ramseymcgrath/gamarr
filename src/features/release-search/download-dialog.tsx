@@ -56,6 +56,7 @@ export function DownloadDialog({
   >("confirm");
   const [files, setFiles] = useState<CandidateFile[] | null>(null);
   const [metadataPending, setMetadataPending] = useState(false);
+  const [collectionName, setCollectionName] = useState<string | null>(null);
   const [filesError, setFilesError] = useState(false);
   const [selectedFiles, setSelectedFiles] = useState<number[]>([]);
   const [detail, setDetail] = useState<string | null>(null);
@@ -66,6 +67,7 @@ export function DownloadDialog({
     const load = async () => {
       setFiles(null);
       setMetadataPending(false);
+      setCollectionName(null);
       setFilesError(false);
       setSelectedFiles([]);
       try {
@@ -76,10 +78,14 @@ export function DownloadDialog({
         const body = await response.json() as {
           files?: CandidateFile[];
           metadataPending?: boolean;
+          collection?: { name: string };
         };
         if (cancelled) return;
         setFiles(body.files ?? []);
         setMetadataPending(body.metadataPending === true);
+        setCollectionName(
+          body.collection && body.files?.length === 1 ? body.collection.name : null
+        );
       } catch {
         if (!cancelled) setFilesError(true);
       }
@@ -122,6 +128,9 @@ export function DownloadDialog({
     }
   };
 
+  const collectionFile = collectionName !== null && files?.length === 1
+    ? files[0]!
+    : null;
   const clientName = protocol === "torrent" ? "qBittorrent" : "SABnzbd";
   const submitLabel = protocol === "torrent" ? "Send to qBittorrent" : "Send to SABnzbd";
   const toggleFile = (index: number) => setSelectedFiles((current) =>
@@ -143,7 +152,9 @@ export function DownloadDialog({
               <p className="eyebrow">CONFIRM DOWNLOAD</p>
               <Dialog.Title>{submitLabel}?</Dialog.Title>
               <Dialog.Description>
-                {protocol === "torrent"
+                {collectionFile !== null
+                  ? <>Gamarr will turn on <strong>{collectionFile.name}</strong> in <strong>{collectionName}</strong>.</>
+                  : protocol === "torrent"
                   ? <>Gamarr will add this torrent from <strong>{indexerName}</strong> to qBittorrent.</>
                   : <>Gamarr will retrieve this NZB from <strong>{indexerName}</strong> and upload it to SABnzbd.</>}
               </Dialog.Description>
@@ -159,7 +170,7 @@ export function DownloadDialog({
                   The file list is not known until metadata arrives; the whole torrent will be added.
                 </p>
               )}
-              {protocol === "torrent" && files !== null && !metadataPending && files.length > 0 && (
+              {protocol === "torrent" && files !== null && !metadataPending && files.length > 0 && collectionFile === null && (
                 <fieldset className="file-picker">
                   <legend>Select torrent files (leave all unselected for the whole torrent)</legend>
                   {files.map((file) => (
