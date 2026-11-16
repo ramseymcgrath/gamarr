@@ -42,7 +42,7 @@ describe("routeReleaseFetch", () => {
     const internetArchive: ReleaseFetcher = {
       fetch: vi.fn(async () => torrent)
     };
-    const router = routeReleaseFetch({ prowlarr, internetArchive });
+    const router = routeReleaseFetch({ prowlarr, internetArchive, collections: null });
     await expect(router.fetch({
       candidate: candidate(),
       magnetUrl: null,
@@ -54,7 +54,7 @@ describe("routeReleaseFetch", () => {
   it("sends every other candidate to Prowlarr", async () => {
     const prowlarr: ReleaseFetcher = { fetch: vi.fn(async () => torrent) };
     const internetArchive: ReleaseFetcher = { fetch: vi.fn() };
-    await routeReleaseFetch({ prowlarr, internetArchive }).fetch({
+    await routeReleaseFetch({ prowlarr, internetArchive, collections: null }).fetch({
       candidate: candidate({ indexerId: "12" }),
       magnetUrl: null,
       maxBytes: 10
@@ -64,11 +64,44 @@ describe("routeReleaseFetch", () => {
 
   it("fails an archive candidate cleanly when the source is disabled", async () => {
     const prowlarr: ReleaseFetcher = { fetch: vi.fn() };
-    await expect(routeReleaseFetch({ prowlarr, internetArchive: null }).fetch({
+    await expect(routeReleaseFetch({
+      prowlarr,
+      internetArchive: null,
+      collections: null
+    }).fetch({
       candidate: candidate(),
       magnetUrl: null,
       maxBytes: 10
     })).rejects.toThrow("Internet Archive is disabled");
+    expect(prowlarr.fetch).not.toHaveBeenCalled();
+  });
+});
+
+describe("routeReleaseFetch collections", () => {
+  const request = {
+    candidate: candidate({ indexerId: "collection:abc123" }),
+    magnetUrl: null,
+    maxBytes: 10
+  };
+
+  it("routes collection candidates to the collections fetcher", async () => {
+    const prowlarr: ReleaseFetcher = { fetch: vi.fn() };
+    const internetArchive: ReleaseFetcher = { fetch: vi.fn() };
+    const collections: ReleaseFetcher = { fetch: vi.fn(async () => torrent) };
+    await expect(
+      routeReleaseFetch({ prowlarr, internetArchive, collections })
+        .fetch(request)
+    ).resolves.toBe(torrent);
+    expect(prowlarr.fetch).not.toHaveBeenCalled();
+    expect(internetArchive.fetch).not.toHaveBeenCalled();
+  });
+
+  it("fails a collection candidate cleanly when collections is null", async () => {
+    const prowlarr: ReleaseFetcher = { fetch: vi.fn() };
+    await expect(
+      routeReleaseFetch({ prowlarr, internetArchive: null, collections: null })
+        .fetch(request)
+    ).rejects.toMatchObject({ status: 503, message: "Collections are disabled" });
     expect(prowlarr.fetch).not.toHaveBeenCalled();
   });
 });

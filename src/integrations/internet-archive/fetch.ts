@@ -1,4 +1,5 @@
 import {
+  COLLECTION_INDEXER_PREFIX,
   INTERNET_ARCHIVE_INDEXER_ID
 } from "@/features/release-search/models";
 import type { ReleaseCandidateRecord } from "@/features/release-search/ports";
@@ -62,16 +63,23 @@ export class InternetArchiveTorrentFetcher implements ReleaseFetcher {
 }
 
 /**
- * Sends Internet Archive candidates to archive.org and everything else to
- * Prowlarr. With Internet Archive disabled, its stale candidates fail cleanly
+ * Sends collection candidates to the operator's folder, Internet Archive
+ * candidates to archive.org and everything else to Prowlarr. With Internet Archive disabled, its stale candidates fail cleanly
  * rather than being misrouted through the Prowlarr download proxy.
  */
 export function routeReleaseFetch(input: {
   prowlarr: ReleaseFetcher;
   internetArchive: ReleaseFetcher | null;
+  collections: ReleaseFetcher | null;
 }): ReleaseFetcher {
   return {
     fetch: async (request) => {
+      if (request.candidate.indexerId.startsWith(COLLECTION_INDEXER_PREFIX)) {
+        if (input.collections === null) {
+          throw new AppError("UNAVAILABLE", 503, "Collections are disabled");
+        }
+        return input.collections.fetch(request);
+      }
       if (!isInternetArchiveCandidate(request.candidate)) {
         return input.prowlarr.fetch(request);
       }

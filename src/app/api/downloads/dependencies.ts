@@ -4,11 +4,13 @@ import {
   verificationRepository,
   verificationService
 } from "@/app/api/verification/dependencies";
+import { collectionsPort } from "@/app/api/releases/dependencies";
 import { getDatabase } from "@/db/client";
 import { SqliteDownloadRepository } from "@/features/downloads/repository";
 import { DownloadService } from "@/features/downloads/service";
 import { SqliteCandidateRepository } from "@/features/release-search/repository";
 import { SqliteSettingsRepository } from "@/features/settings/repository";
+import { CollectionTorrentFetcher } from "@/integrations/collections/fetch";
 import {
   InternetArchiveTorrentFetcher,
   routeReleaseFetch
@@ -55,7 +57,8 @@ function buildDownloadService() {
       },
       internetArchive: internetArchive === null
         ? null
-        : new InternetArchiveTorrentFetcher(internetArchive)
+        : new InternetArchiveTorrentFetcher(internetArchive),
+      collections: new CollectionTorrentFetcher(collectionsPort())
     }),
     sabFactory: (settings) => new SabnzbdClient({
       baseUrl: settings.baseUrl,
