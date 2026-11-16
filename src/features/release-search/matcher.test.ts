@@ -59,6 +59,16 @@ describe("rankRelease platform conflicts", () => {
     expect(ranked.conflictingReasons).toEqual(["Conflicting platform: wii"]);
   });
 
+  it("names the longest matching platform", () => {
+    const ranked = rankRelease({
+      ...input,
+      selectedAliases: ["ps2"],
+      conflictingAliases: ["xbox", "xbox 360"],
+      release: release({ title: "Guitar Hero III Legends Of Rock. Xbox 360", category: null })
+    });
+    expect(ranked.conflictingReasons).toEqual(["Conflicting platform: xbox 360"]);
+  });
+
   it("doesn't treat part of the selected platform's name as another platform", () => {
     const ranked = rankRelease({
       ...input,

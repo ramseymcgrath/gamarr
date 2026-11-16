@@ -5,7 +5,7 @@ import { platformAliases } from "@/features/release-search/platform-aliases";
 describe("platformAliases", () => {
   it("gives common platforms aliases without any setup", () => {
     expect(platformAliases({ id: 8, aliases: [] }))
-      .toEqual(["ps2", "playstation 2", "playstation2"]);
+      .toEqual(["ps2", "ps2dvd", "playstation 2", "playstation2"]);
   });
 
   it("adds Settings aliases, lowercased and without repeats", () => {

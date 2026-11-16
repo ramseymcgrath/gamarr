@@ -81,7 +81,10 @@ export function rankRelease(input: RankInput): RankedRelease {
   const selectedInTitle = input.selectedAliases
     .filter((alias) => containsPhrase(normalizedTitle, alias));
   const gameTitles = [input.canonicalTitle, ...input.alternativeNames];
-  const conflict = input.conflictingAliases.find((alias) =>
+  // Longest first, so "Xbox 360" is reported as xbox 360, not xbox.
+  const conflict = [...input.conflictingAliases]
+    .sort((left, right) => right.length - left.length)
+    .find((alias) =>
     containsPhrase(normalizedTitle, alias)
     // "wii" inside a matched "wii u", "xbox" inside "xbox 360": the release
     // names the selected platform, not another one.
