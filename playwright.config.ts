@@ -35,7 +35,11 @@ export default defineConfig({
       GAMARR_IGDB_BASE_URL: "http://127.0.0.1:4100/v4",
       GAMARR_PROWLARR_BASE_URL: "http://127.0.0.1:4100",
       // e2e must never reach real third-party services.
-      GAMARR_INTERNET_ARCHIVE: "false"
+      GAMARR_INTERNET_ARCHIVE: "false",
+      // Redump serial lookups fetch from the network; the collection match
+      // only needs titles.
+      GAMARR_SERIAL_SEARCH: "false",
+      GAMARR_COLLECTIONS_DIR: `${process.cwd()}/tests/fixtures/collections`
     }
   }]
 });

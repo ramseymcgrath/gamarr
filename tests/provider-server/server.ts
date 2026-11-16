@@ -1,3 +1,6 @@
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 
 import {
@@ -5,6 +8,25 @@ import {
   prowlarrTorrentPayload
 } from "@tests/provider-server/prowlarr-fixtures";
 import { fixtureState } from "@tests/provider-server/state";
+
+/**
+ * The committed collection fixture (see tests/fixtures/make-collection-torrent.ts).
+ * Its info-hash is derived here independently of the app: the `info` value is
+ * the last key of the root dictionary, so it spans from after `4:info` to the
+ * root's closing `e`.
+ */
+const collectionTorrent = readFileSync(
+  path.resolve("tests/fixtures/collections/8/ps2-test.torrent")
+);
+const collectionHash = createHash("sha1")
+  .update(collectionTorrent.subarray(7, collectionTorrent.length - 1))
+  .digest("hex");
+const collectionRoot = "Fixture Collection";
+const collectionFileNames = [
+  "Fixture Quest (USA).iso",
+  "Another Game (Europe).iso",
+  "Third Game (Japan).iso"
+];
 
 const port = Number(process.env.GAMARR_FIXTURE_PORT ?? 4100);
 
@@ -40,6 +62,9 @@ function hasQbittorrentSession(request: IncomingMessage): boolean {
 const server = createServer(async (request, response) => {
   const url = new URL(request.url ?? "/", `http://${request.headers.host}`);
   if (url.pathname === "/health") return json(response, { status: "ok" });
+  if (url.pathname === "/qbittorrent-calls") {
+    return json(response, fixtureState.qbittorrentCalls);
+  }
   if (url.pathname === "/reset") {
     fixtureState.reset();
     return json(response, { status: "ok" });
@@ -65,6 +90,7 @@ const server = createServer(async (request, response) => {
   if (url.pathname.endsWith("/platforms")) {
     return json(response, [
       { id: 130, name: "Nintendo Switch", abbreviation: "Switch", generation: 8 },
+      { id: 8, name: "PlayStation 2", abbreviation: "PS2", generation: 6 },
       { id: 167, name: "PlayStation 5", abbreviation: "PS5", generation: 9 },
       { id: 169, name: "Xbox Series X|S", abbreviation: "XSX", generation: 9 },
       { id: 6, name: "PC (Microsoft Windows)", abbreviation: "PC" }
@@ -100,6 +126,18 @@ const server = createServer(async (request, response) => {
         // the 365 day window, so the shelf must not show it.
         first_release_date: 1104537600,
         release_dates: [{ platform: 130, y: 2024, date: 1704067200 }]
+      }]);
+    }
+    if (query.includes("platforms = (8)")) {
+      return json(response, [{
+        id: 220200,
+        name: "Fixture Quest",
+        slug: "fixture-quest",
+        summary: "A PlayStation 2 fixture that lives in a collection.",
+        platforms: [8],
+        genres: [{ name: "Adventure" }],
+        alternative_names: [],
+        release_dates: [{ platform: 8, y: 2003 }]
       }]);
     }
     return json(response, [{
@@ -171,8 +209,28 @@ const server = createServer(async (request, response) => {
     if (!hasQbittorrentSession(request)) {
       return json(response, { error: "forbidden" }, 403);
     }
-    const payload = (await body(request)).toString("utf8");
+    const raw = await body(request);
+    const payload = raw.toString("utf8");
     const tag = payload.match(/name="tags"\r\n\r\n([^\r\n]+)/)?.[1] ?? "";
+    if (raw.includes(collectionTorrent)) {
+      const stopped = /name="stopped"\r\n\r\ntrue\r\n/.test(payload);
+      fixtureState.qbittorrentCalls.push(stopped ? "add:stopped" : "add:running");
+      fixtureState.collection = {
+        hash: collectionHash,
+        tags: [tag],
+        stopped,
+        files: collectionFileNames.map((name) => ({
+          name: `${collectionRoot}/${name}`,
+          priority: 1
+        }))
+      };
+      return json(response, {
+        added_torrent_ids: [collectionHash],
+        success_count: 1,
+        pending_count: 0,
+        failure_count: 0
+      });
+    }
     if (
       tag.length === 0 ||
       !payload.includes('name="torrents"; filename="') ||
@@ -195,10 +253,19 @@ const server = createServer(async (request, response) => {
     if (!hasQbittorrentSession(request)) {
       return json(response, { error: "forbidden" }, 403);
     }
-    if (fixtureState.torrent === null) return json(response, []);
+    const collection = fixtureState.collection;
+    const collectionInfo = collection === null ? [] : [{
+      hash: collection.hash,
+      tags: collection.tags.join(", "),
+      state: collection.stopped ? "stoppedDL" : "downloading",
+      progress: 0.5,
+      name: collectionRoot,
+      size: 27
+    }];
+    if (fixtureState.torrent === null) return json(response, collectionInfo);
     fixtureState.torrent.polls += 1;
     const complete = fixtureState.torrent.polls >= 2;
-    return json(response, [{
+    return json(response, [...collectionInfo, {
       hash: "abc123",
       tags: fixtureState.torrent.tag,
       state: complete ? "uploading" : "downloading",
@@ -206,6 +273,63 @@ const server = createServer(async (request, response) => {
       name: "metroid-prime-4-beyond-usa",
       size: 2048
     }]);
+  }
+  if (
+    request.method === "GET" &&
+    url.pathname === "/qbittorrent/api/v2/torrents/files"
+  ) {
+    if (!hasQbittorrentSession(request)) {
+      return json(response, { error: "forbidden" }, 403);
+    }
+    const collection = fixtureState.collection;
+    if (collection === null || url.searchParams.get("hash") !== collection.hash) {
+      return json(response, { error: "not found" }, 404);
+    }
+    return json(response, collection.files.map((file, index) => ({
+      index,
+      name: file.name,
+      size: 9,
+      progress: file.priority > 0 && !collection.stopped ? 0.5 : 0,
+      priority: file.priority
+    })));
+  }
+  if (
+    request.method === "POST" &&
+    url.pathname.startsWith("/qbittorrent/api/v2/torrents/")
+  ) {
+    const action = url.pathname.slice("/qbittorrent/api/v2/torrents/".length);
+    if (!["filePrio", "addTags", "start"].includes(action)) {
+      return json(response, { error: "not found" }, 404);
+    }
+    if (!hasQbittorrentSession(request)) {
+      return json(response, { error: "forbidden" }, 403);
+    }
+    const form = new URLSearchParams((await body(request)).toString("utf8"));
+    const collection = fixtureState.collection;
+    const hash = form.get("hash") ?? form.get("hashes");
+    if (collection === null || hash !== collection.hash) {
+      return json(response, { error: "not found" }, 404);
+    }
+    if (action === "filePrio") {
+      const ids = (form.get("id") ?? "").split("|").map(Number);
+      const priority = Number(form.get("priority"));
+      for (const id of ids) {
+        const file = collection.files[id];
+        if (file) file.priority = priority;
+      }
+      const all = ids.length === collection.files.length;
+      fixtureState.qbittorrentCalls.push(
+        `filePrio:${all ? "all" : ids.join("|")}:${priority}`
+      );
+    } else if (action === "addTags") {
+      collection.tags.push(form.get("tags") ?? "");
+      fixtureState.qbittorrentCalls.push("addTags");
+    } else {
+      collection.stopped = false;
+      fixtureState.qbittorrentCalls.push("start");
+    }
+    response.writeHead(200);
+    return response.end();
   }
   json(response, { error: "not found" }, 404);
 });

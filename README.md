@@ -79,6 +79,7 @@ again.
 | `GAMARR_API_TOKEN` | none | Optional bearer token for trusted automation |
 | `GAMARR_TRUST_PROXY` | `false` | Honor forwarded host/protocol only behind a trusted reverse proxy |
 | `GAMARR_PROWLARR_MAX_TORRENT_BYTES` | `8388608` (8 MiB) | Ceiling for a `.torrent` metainfo fetch |
+| `GAMARR_COLLECTIONS_DIR` | `<database dir>/collections` | Folder of collection `.torrent` files, one subfolder per IGDB platform id (PS2 = `8`) |
 | `GAMARR_PROWLARR_BASE_URL` | none | Test-only override of the configured Prowlarr origin |
 
 Gamarr intentionally has no user login in this LAN-oriented release. Do not
@@ -86,6 +87,13 @@ publish it directly to the internet. When using a reverse proxy, terminate
 authentication there, set an exact HTTPS origin, and enable
 `GAMARR_TRUST_PROXY=true` only when untrusted clients cannot set forwarded
 headers.
+
+### Collection torrents
+
+Drop multi-file `.torrent` files into `<GAMARR_COLLECTIONS_DIR>/<IGDB platform
+id>/` (PlayStation 2 is `8`). When a game's title matches a file inside one,
+release search offers it, and a grab enables only that file in qBittorrent.
+qBittorrent must not have unrelated files enabled on that torrent.
 
 ## Local development
 
