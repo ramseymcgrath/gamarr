@@ -12,6 +12,7 @@ import {
   type RankedRelease,
   type Release
 } from "@/features/release-search/models";
+import { platformAliases } from "@/features/release-search/platform-aliases";
 import { planPrimaryQuery } from "@/features/release-search/query-planner";
 import type {
   CandidateRepository,
@@ -204,7 +205,7 @@ export class ReleaseSearchService {
 
     const conflictingAliases = this.dependencies.catalog.listPlatforms()
       .filter((candidate) => candidate.id !== platform.id)
-      .flatMap((candidate) => candidate.aliases);
+      .flatMap(platformAliases);
     const ranked: RankedRelease[] = [];
     const warnings: ReleaseSearchResponse["warnings"] = [];
     const controller = new AbortController();
@@ -242,7 +243,7 @@ export class ReleaseSearchService {
       const rankInput = {
         canonicalTitle: game.name,
         alternativeNames: game.alternativeNames,
-        selectedAliases: platform.aliases,
+        selectedAliases: platformAliases(platform),
         conflictingAliases,
         releaseYear: game.releaseYear,
         categoryIds: platform.categoryIds ?? [],

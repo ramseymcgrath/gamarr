@@ -894,3 +894,39 @@ describe("ReleaseSearchService serial search", () => {
     expect(response.warnings).toEqual([]);
   });
 });
+
+describe("ReleaseSearchService built-in platform aliases", () => {
+  it("tells PS2 releases from other consoles with no aliases set", async () => {
+    const ps2: PlatformView = {
+      id: 8, name: "PlayStation 2", visible: true, aliases: [], categoryIds: []
+    };
+    const catalog: CatalogRepository = {
+      ...catalogFor(ps2),
+      listPlatforms: () => [
+        ps2,
+        { id: 5, name: "Wii", visible: false, aliases: [] },
+        { id: 12, name: "Xbox 360", visible: false, aliases: [] }
+      ],
+      getGame: (id) => id === game.id ? { ...game, platformIds: [8] } : null
+    };
+    const response = await serviceFor({
+      catalog,
+      prowlarr: prowlarrFor({
+        indexers: [indexers[0]!],
+        search: async () => ({
+          releases: [
+            release({ guid: "a", title: "Game Name PS2", size: 1, category: null }),
+            release({ guid: "b", title: "Game Name [Wii] [NTSC]", size: 2, category: null }),
+            release({ guid: "c", title: "Game Name. Xbox 360", size: 3, category: null })
+          ],
+          warnings: []
+        })
+      })
+    }).search({ gameId: 1, platformId: 8 });
+    expect(response.releases.map((entry) => [entry.title, entry.match])).toEqual([
+      ["Game Name PS2", "Strong"],
+      ["Game Name [Wii] [NTSC]", "Conflicting"],
+      ["Game Name. Xbox 360", "Conflicting"]
+    ]);
+  });
+});

@@ -39,6 +39,48 @@ const serials = {
   })[serial.replace(/[^A-Z0-9]/gi, "").toUpperCase()] ?? null
 };
 
+describe("rankRelease platform conflicts", () => {
+  const input = {
+    ...baseInput,
+    canonicalTitle: "Guitar Hero III: Legends of Rock",
+    alternativeNames: [],
+    releaseYear: null,
+    categoryIds: []
+  };
+
+  it("flags a release for another console", () => {
+    const ranked = rankRelease({
+      ...input,
+      selectedAliases: ["ps2", "playstation 2"],
+      conflictingAliases: ["wii", "wii u", "xbox 360", "xbox"],
+      release: release({ title: "Guitar Hero III: Legends of Rock [Wii] [NTSC]", category: null })
+    });
+    expect(ranked.match).toBe("Conflicting");
+    expect(ranked.conflictingReasons).toEqual(["Conflicting platform: wii"]);
+  });
+
+  it("doesn't treat part of the selected platform's name as another platform", () => {
+    const ranked = rankRelease({
+      ...input,
+      selectedAliases: ["wii u"],
+      conflictingAliases: ["wii", "xbox"],
+      release: release({ title: "Guitar Hero III Legends of Rock Wii U", category: null })
+    });
+    expect(ranked.match).toBe("Strong");
+  });
+
+  it("doesn't treat a word of the game's name as a platform", () => {
+    const ranked = rankRelease({
+      ...input,
+      canonicalTitle: "Bait and Switch",
+      selectedAliases: ["ps2"],
+      conflictingAliases: ["switch"],
+      release: release({ title: "Bait and Switch PS2", category: null })
+    });
+    expect(ranked.match).toBe("Strong");
+  });
+});
+
 describe("rankRelease serials", () => {
   const ps2 = {
     ...baseInput,

@@ -78,8 +78,16 @@ export function rankRelease(input: RankInput): RankedRelease {
     score += 30;
   }
 
-  const conflict = input.conflictingAliases
-    .find((alias) => containsPhrase(normalizedTitle, alias));
+  const selectedInTitle = input.selectedAliases
+    .filter((alias) => containsPhrase(normalizedTitle, alias));
+  const gameTitles = [input.canonicalTitle, ...input.alternativeNames];
+  const conflict = input.conflictingAliases.find((alias) =>
+    containsPhrase(normalizedTitle, alias)
+    // "wii" inside a matched "wii u", "xbox" inside "xbox 360": the release
+    // names the selected platform, not another one.
+    && !selectedInTitle.some((selected) => containsPhrase(normalizeReleaseTitle(selected), alias))
+    // A word of the game's own name ("Bait and Switch") isn't a platform.
+    && !gameTitles.some((title) => containsPhrase(normalizeReleaseTitle(title), alias)));
   if (conflict) {
     conflictingReasons.push(`Conflicting platform: ${conflict.toLowerCase()}`);
     score -= 80;
