@@ -584,7 +584,7 @@ describe("QbittorrentClient", () => {
     });
   });
 
-  it("addTags surfaces a failed request as UNAVAILABLE", async () => {
+  it("start surfaces a failed request as UNAVAILABLE", async () => {
     const fetchImpl = vi.fn(async (input: RequestInfo | URL) =>
       String(input).includes("/auth/login")
         ? loginOk()

@@ -657,7 +657,12 @@ export class DownloadService {
           tag: attempt.marker,
           stopped: true
         });
-        if (added.hash !== null && added.hash.toLowerCase() !== hash) {
+        if (added.hash === null) {
+          // qBittorrent 5.3 names every clean add in `added_torrent_ids`, so
+          // no hash means a duplicate or an unconfirmed add. Treat it as
+          // already loaded: nothing is zeroed, only the target is raised.
+          loaded = true;
+        } else if (added.hash.toLowerCase() !== hash) {
           throw validationError(COLLECTION_CHANGED);
         }
       } catch (error) {
@@ -786,10 +791,24 @@ export class DownloadService {
     files: TorrentFileList
   ): void {
     // This attempt is claimed and Submitting, so it owns its own file here.
+    // A fully downloaded file has nothing left to fetch, so it never blocks.
     const owned = this.ownedCollectionFiles(hash);
-    const unowned = files.some((entry) =>
-      entry.priority > 0 && !owned.has(entry.index));
-    if (unowned) throw validationError(OTHER_FILES_ENABLED);
+    const offenders = files.filter((entry) =>
+      entry.priority > 0 && entry.progress < 1 && !owned.has(entry.index));
+    if (offenders.length === 0) return;
+    // Base names only, on one line: the message is shown as a failure detail.
+    const names = offenders
+      .slice(0, 3)
+      .map((entry) =>
+        (entry.name.split("/").at(-1) ?? entry.name).replace(/\s+/g, " "))
+      .join(", ");
+    const more = offenders.length > 3
+      ? ` and ${offenders.length - 3} more`
+      : "";
+    throw validationError(
+      `${OTHER_FILES_ENABLED} (or remove the stopped torrent). `
+        + `Enabled: ${names}${more}`
+    );
   }
 
   private failFetch(id: string, error: unknown): DownloadAttempt {
@@ -982,11 +1001,14 @@ export class DownloadService {
       const selected = attempt.selectedFiles?.[0];
       if (!hash || !selected) continue;
 
-      const torrent = torrents.find((job) => job.hash === hash);
+      // A grab still in flight owns its row until `submit` settles it.
+      if (attempt.status === "Submitting" || attempt.status === "Pending") {
+        continue;
+      }
+
+      const torrent = torrents.find((job) =>
+        job.hash.toLowerCase() === hash.toLowerCase());
       if (!torrent) {
-        if (attempt.status === "Submitting" || attempt.status === "Pending") {
-          continue;
-        }
         fail(attempt.id, "Torrent was removed from qBittorrent");
         continue;
       }

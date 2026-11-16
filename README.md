@@ -93,7 +93,11 @@ headers.
 Drop multi-file `.torrent` files into `<GAMARR_COLLECTIONS_DIR>/<IGDB platform
 id>/` (PlayStation 2 is `8`). When a game's title matches a file inside one,
 release search offers it, and a grab enables only that file in qBittorrent.
-qBittorrent must not have unrelated files enabled on that torrent.
+qBittorrent must not have unrelated files enabled on that torrent. If a grab
+is refused with "Other files in this collection are enabled", set the named
+files to Do not download, or remove the stopped collection torrent, in
+qBittorrent, then retry. Collection grabs, like Internet Archive grabs, need
+Prowlarr configured.
 
 ## Local development
 

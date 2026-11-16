@@ -552,6 +552,16 @@ describe("ClientDownloadLocator", () => {
       });
     });
 
+    it("matches an uppercase hash from qBittorrent", async () => {
+      const locator = new ClientDownloadLocator({
+        torrent: () => collection([{ ...job, hash: "HASH-1" }]),
+        sabnzbd: () => null
+      });
+      await expect(locator.locate(owned)).resolves.toMatchObject({
+        kind: "found"
+      });
+    });
+
     it("joins a single-file torrent without a root folder", async () => {
       const locator = new ClientDownloadLocator({
         torrent: () => collection(

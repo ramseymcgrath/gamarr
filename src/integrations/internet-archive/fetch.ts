@@ -64,8 +64,9 @@ export class InternetArchiveTorrentFetcher implements ReleaseFetcher {
 
 /**
  * Sends collection candidates to the operator's folder, Internet Archive
- * candidates to archive.org and everything else to Prowlarr. With Internet Archive disabled, its stale candidates fail cleanly
- * rather than being misrouted through the Prowlarr download proxy.
+ * candidates to archive.org and everything else to Prowlarr. With Internet
+ * Archive disabled, its stale candidates fail cleanly rather than being
+ * misrouted through the Prowlarr download proxy.
  */
 export function routeReleaseFetch(input: {
   prowlarr: ReleaseFetcher;

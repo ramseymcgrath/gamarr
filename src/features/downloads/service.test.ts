@@ -1178,13 +1178,20 @@ interface FakeTorrentFile {
  */
 function fakeQbittorrent(options: {
   loaded?: boolean;
-  files?: Array<{ index: number; name: string; priority?: number }>;
+  files?: Array<{
+    index: number;
+    name: string;
+    priority?: number;
+    progress?: number;
+  }>;
   notFoundPolls?: number;
   emptyPolls?: number;
   addError?: unknown;
   /** After a failed add, `list()` reports the torrent (a lost add race). */
   presentAfterAddError?: boolean;
   addHash?: string | null;
+  /** The add does not reset priorities (qBittorrent already had it). */
+  addKeepsPriorities?: boolean;
   ignoreLowering?: boolean;
   failPriorities?: boolean;
   startError?: unknown;
@@ -1214,7 +1221,9 @@ function fakeQbittorrent(options: {
         throw options.addError;
       }
       present = true;
-      for (const file of files) file.priority = 1;
+      if (!options.addKeepsPriorities) {
+        for (const file of files) file.priority = 1;
+      }
       return {
         hash: options.addHash === undefined ? collectionHash : options.addHash
       };
@@ -1469,7 +1478,8 @@ describe("DownloadService collection submission", () => {
 
     expect(attempt).toMatchObject({
       status: "Failed",
-      failureDetail: otherFilesEnabled
+      failureDetail: `${otherFilesEnabled} (or remove the stopped torrent). `
+        + "Enabled: a.7z, c.7z"
     });
     expect(qbit.calls).not.toContain("start");
     expect(qbit.calls.some((call) => call.endsWith(",0)"))).toBe(false);
@@ -1521,7 +1531,8 @@ describe("DownloadService collection submission", () => {
 
     expect(attempt).toMatchObject({
       status: "Failed",
-      failureDetail: otherFilesEnabled
+      failureDetail: `${otherFilesEnabled} (or remove the stopped torrent). `
+        + "Enabled: c.7z"
     });
     expect(qbit.calls).not.toContain("start");
   });
@@ -1534,7 +1545,8 @@ describe("DownloadService collection submission", () => {
 
     expect(attempt).toMatchObject({
       status: "Failed",
-      failureDetail: otherFilesEnabled
+      failureDetail: `${otherFilesEnabled} (or remove the stopped torrent). `
+        + "Enabled: a.7z, c.7z"
     });
     expect(qbit.calls).toEqual([
       "list",
@@ -1721,6 +1733,105 @@ describe("DownloadService collection submission", () => {
     expect(qbit.calls).not.toContain("start");
   });
 
+  it("lets a fully downloaded unowned file stay enabled", async () => {
+    const qbit = fakeQbittorrent({
+      loaded: true,
+      files: [
+        { index: 0, name: "Collection/a.7z", priority: 1, progress: 1 },
+        { index: 1, name: "Collection/b.7z", priority: 0 },
+        { index: 2, name: "Collection/c.7z", priority: 0 }
+      ]
+    });
+    const { service } = build({ client: qbit.client });
+
+    const attempt = await service.submit(collectionSubmission());
+
+    expect(attempt.status).toBe("Downloading");
+    expect(qbit.calls.at(-1)).toBe("start");
+  });
+
+  it("refuses a partly downloaded unowned file and names it", async () => {
+    const qbit = fakeQbittorrent({
+      loaded: true,
+      files: [
+        { index: 0, name: "Collection/a.7z", priority: 1, progress: 0.5 },
+        { index: 1, name: "Collection/b.7z", priority: 0 },
+        { index: 2, name: "Collection/c.7z", priority: 0 }
+      ]
+    });
+    const { service } = build({ client: qbit.client });
+
+    const attempt = await service.submit(collectionSubmission());
+
+    expect(attempt).toMatchObject({
+      status: "Failed",
+      failureDetail: `${otherFilesEnabled} (or remove the stopped torrent). `
+        + "Enabled: a.7z"
+    });
+    expect(qbit.calls).not.toContain("start");
+  });
+
+  it("names the first three offenders and counts the rest", async () => {
+    const names = ["a", "b", "c", "d", "e", "f", "g", "h"];
+    const qbit = fakeQbittorrent({
+      loaded: true,
+      files: names.map((name, index) => ({
+        index,
+        name: `Collection/${name}.7z`,
+        priority: index === 1 ? 0 : 1
+      }))
+    });
+    const { service } = build({ client: qbit.client });
+
+    const attempt = await service.submit(collectionSubmission());
+
+    expect(attempt.status).toBe("Failed");
+    expect(attempt.failureDetail).toBe(
+      `${otherFilesEnabled} (or remove the stopped torrent). `
+        + "Enabled: a.7z, c.7z, d.7z and 4 more"
+    );
+    expect(attempt.failureDetail).not.toContain("\n");
+    expect(qbit.calls).not.toContain("start");
+  });
+
+  it("null add hash with every file wanted: no zero-all, refused, never started", async () => {
+    const qbit = fakeQbittorrent({ addHash: null });
+    const { service } = build({ client: qbit.client });
+
+    const attempt = await service.submit(collectionSubmission());
+
+    expect(attempt.status).toBe("Failed");
+    expect(attempt.failureDetail?.startsWith(otherFilesEnabled)).toBe(true);
+    expect(qbit.calls.some((call) => call.endsWith(",0)"))).toBe(false);
+    expect(qbit.calls).not.toContain("start");
+  });
+
+  it("null add hash with other files off: raises its own file and starts", async () => {
+    const qbit = fakeQbittorrent({
+      addHash: null,
+      addKeepsPriorities: true,
+      files: [
+        { index: 0, name: "Collection/a.7z", priority: 0 },
+        { index: 1, name: "Collection/b.7z", priority: 0 },
+        { index: 2, name: "Collection/c.7z", priority: 0 }
+      ]
+    });
+    const { service } = build({ client: qbit.client });
+
+    const attempt = await service.submit(collectionSubmission());
+
+    expect(qbit.calls).toEqual([
+      "list",
+      "add(stopped=true)",
+      "addTags(gamarr-attempt-1)",
+      "listFiles",
+      "prio([1],1)",
+      "listFiles",
+      "start"
+    ]);
+    expect(attempt.status).toBe("Downloading");
+  });
+
   it("selectedFiles in the request → validation error before claiming", async () => {
     const qbit = fakeQbittorrent({});
     const { service, repository } = build({ client: qbit.client });
@@ -1756,6 +1867,7 @@ describe("DownloadService collection reconciliation", () => {
     progress?: number[];
     jobs?: "absent";
     statuses?: DownloadAttempt["status"][];
+    listHash?: string;
   }) {
     const repository = new MemoryDownloads();
     const names = ["a.7z", "b.7z"];
@@ -1776,7 +1888,7 @@ describe("DownloadService collection reconciliation", () => {
       list: async (): Promise<Job[]> => options.jobs === "absent"
         ? []
         : [{
-          hash: collectionHash,
+          hash: options.listHash ?? collectionHash,
           tags: [],
           state: options.state ?? "downloading",
           progress: 0.99
@@ -1885,6 +1997,39 @@ describe("DownloadService collection reconciliation", () => {
     await service.reconcile();
     expect(repository.attempts.get("at-0")?.status).toBe("Submitting");
     expect(repository.attempts.get("at-1")?.status).toBe("Failed");
+  });
+
+  it("leaves a submitting attempt alone even when its torrent is present", async () => {
+    const { service, repository } = setup({
+      state: "stoppedDL",
+      progress: [0.5, 0],
+      statuses: ["Submitting", "Pending"]
+    });
+    const before = [
+      repository.attempts.get("at-0"),
+      repository.attempts.get("at-1")
+    ];
+    await service.reconcile();
+    expect(repository.attempts.get("at-0")).toEqual(before[0]);
+    expect(repository.attempts.get("at-1")).toEqual(before[1]);
+    expect(repository.attempts.get("at-0")).toMatchObject({
+      status: "Submitting",
+      failureDetail: null,
+      progress: 0
+    });
+  });
+
+  it("matches an uppercase hash from qBittorrent", async () => {
+    const { service, repository } = setup({
+      listHash: collectionHash.toUpperCase(),
+      progress: [1, 0.25]
+    });
+    await service.reconcile();
+    expect(repository.attempts.get("at-0")?.status).toBe("Completed");
+    expect(repository.attempts.get("at-1")).toMatchObject({
+      status: "Downloading",
+      progress: 25
+    });
   });
 
   it("fails when the file at that index changed", async () => {

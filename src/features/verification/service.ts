@@ -82,7 +82,8 @@ export class ClientDownloadLocator implements DownloadLocatorPort {
       if (!client) return { kind: "missing", detail: "qBittorrent is not configured" };
       const torrents = await client.list();
       const torrent = attempt.torrentHash
-        ? torrents.find((job) => job.hash === attempt.torrentHash)
+        ? torrents.find((job) =>
+          job.hash.toLowerCase() === attempt.torrentHash?.toLowerCase())
         : torrents.find((job) => job.tags.includes(attempt.marker));
       if (!torrent) return { kind: "missing", detail: "qBittorrent no longer has this torrent" };
       if (!torrent.contentPath) return { kind: "missing", detail: "qBittorrent did not report a content path" };
@@ -92,7 +93,8 @@ export class ClientDownloadLocator implements DownloadLocatorPort {
       const client = this.clients.torrent();
       if (!client) return { kind: "missing", detail: "qBittorrent is not configured" };
       const torrents = await client.list();
-      const torrent = torrents.find((job) => job.hash === attempt.torrentHash);
+      const wanted = attempt.torrentHash?.toLowerCase();
+      const torrent = torrents.find((job) => job.hash.toLowerCase() === wanted);
       if (!torrent || !attempt.torrentHash) {
         return { kind: "missing", detail: "qBittorrent no longer has this torrent" };
       }
