@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { AppError } from "@/lib/errors";
 
 /** Deeper than any real torrent; shallow enough to stop a nesting bomb. */
@@ -26,6 +28,28 @@ class Reader {
 
   get position(): number {
     return this.offset;
+  }
+
+  /**
+   * Reads the root dictionary and returns the `info` value together with the
+   * exact byte span it occupied, which is what the info-hash covers.
+   */
+  readRootInfo(): { info: Bencode; start: number; end: number } {
+    if (String.fromCharCode(this.byte()) !== "d") malformed();
+    this.offset += 1;
+    let found: { info: Bencode; start: number; end: number } | null = null;
+    while (String.fromCharCode(this.byte()) !== "e") {
+      const key = this.read(1);
+      if (!(key instanceof Uint8Array)) malformed();
+      const start = this.offset;
+      const value = this.read(1);
+      if (new TextDecoder().decode(key) === "info") {
+        found = { info: value, start, end: this.offset };
+      }
+    }
+    this.offset += 1;
+    if (this.offset !== this.bytes.length || found === null) malformed();
+    return found;
   }
 
   private byte(): number {
@@ -162,4 +186,19 @@ export function decodeTorrentFiles(bytes: Uint8Array): TorrentFile[] {
       size: asSize(file.get("length"))
     };
   });
+}
+
+/** SHA-1 (v1) info-hash as lowercase hex; `v2` flags a `file tree` info dict. */
+export function torrentInfoHash(bytes: Uint8Array): { hash: string; v2: boolean } {
+  const { info, start, end } = new Reader(bytes).readRootInfo();
+  const hash = createHash("sha1").update(bytes.subarray(start, end)).digest("hex");
+  return { hash, v2: asMap(info).has("file tree") };
+}
+
+/** The `info.name` root and whether the torrent is multi-file. */
+export function torrentRoot(bytes: Uint8Array): { name: string; multiFile: boolean } {
+  const info = asMap(new Reader(bytes).readRootInfo().info);
+  const name = asText(info.get("name"));
+  assertSafeSegment(name);
+  return { name, multiFile: info.has("files") };
 }

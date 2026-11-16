@@ -37,6 +37,25 @@ export interface InternetArchivePort {
   ): Promise<{ items: InternetArchiveSearchItem[]; warnings: string[] }>;
 }
 
+export interface CollectionFile {
+  index: number;
+  name: string;
+  size: number;
+}
+
+export interface Collection {
+  id: string;
+  platformId: number;
+  name: string;
+  torrentFileName: string;
+  files: CollectionFile[];
+}
+
+export interface CollectionsPort {
+  list(platformId: number): { collections: Collection[]; warnings: string[] };
+  read(id: string): { collection: Collection; bytes: Uint8Array } | null;
+}
+
 export interface ReleaseCandidateRecord {
   id: string;
   expiresAt: number;

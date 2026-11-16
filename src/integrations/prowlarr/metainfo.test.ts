@@ -1,6 +1,11 @@
+import { createHash } from "node:crypto";
+
 import { describe, expect, it } from "vitest";
 
-import { decodeTorrentFiles } from "@/integrations/prowlarr/metainfo";
+import {
+  decodeTorrentFiles,
+  torrentInfoHash
+} from "@/integrations/prowlarr/metainfo";
 
 function bytes(value: string): Uint8Array {
   return new TextEncoder().encode(value);
@@ -80,5 +85,19 @@ describe("decodeTorrentFiles", () => {
     expect(decodeTorrentFiles(noLength)).toEqual([
       { index: 0, name: "c/a.xci", size: null }
     ]);
+  });
+});
+
+describe("torrentInfoHash", () => {
+  it("hashes the raw info dict", () => {
+    const info = "d6:lengthi1024e4:name8:Game.xcie";
+    const torrent = bytes(`d8:announce3:url4:info${info}5:zzzzzi1ee`);
+    const expected = createHash("sha1").update(bytes(info)).digest("hex");
+    expect(torrentInfoHash(torrent)).toEqual({ hash: expected, v2: false });
+  });
+
+  it("flags v2 file tree", () => {
+    const torrent = bytes("d4:infod9:file treede4:name1:xee");
+    expect(torrentInfoHash(torrent).v2).toBe(true);
   });
 });

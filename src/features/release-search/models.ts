@@ -5,6 +5,11 @@
  */
 export const INTERNET_ARCHIVE_INDEXER_ID = "internet-archive";
 export const INTERNET_ARCHIVE_INDEXER_NAME = "Internet Archive";
+export const COLLECTION_INDEXER_PREFIX = "collection:";
+
+export function collectionIndexerId(hash: string): string {
+  return `${COLLECTION_INDEXER_PREFIX}${hash}`;
+}
 
 export type QueryReason =
   | "canonical"
