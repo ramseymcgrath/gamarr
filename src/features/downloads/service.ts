@@ -54,7 +54,10 @@ const COLLECTION_CHANGED = "Collection torrent changed; search again";
 const OTHER_FILES_ENABLED =
   "Other files in this collection are enabled in qBittorrent; "
   + "set them to Do not download, then retry";
-/** 20 polls x 500 ms: qBittorrent gets 10 s to list a freshly added torrent. */
+/**
+ * 20 polls with a 500 ms wait before each retry (19 waits, 9.5 s): qBittorrent
+ * gets under 10 s to list a freshly added torrent.
+ */
 const FILE_LIST_POLLS = 20;
 const FILE_LIST_POLL_MS = 500;
 
@@ -603,6 +606,17 @@ export class DownloadService {
         updatedAt: this.now()
       });
     }
+    // 6b. Only reached once the safety check passed. A failed start may
+    // still have started the torrent, so the outcome is Unknown, not Failed.
+    try {
+      await client.start(collection.hash);
+    } catch {
+      return this.dependencies.repository.update(claimed.attempt.id, {
+        status: "Unknown",
+        failureDetail: "qBittorrent start was not confirmed",
+        updatedAt: this.now()
+      });
+    }
     const appliedAt = this.now();
     return this.dependencies.repository.update(claimed.attempt.id, {
       status: "Downloading",
@@ -611,7 +625,10 @@ export class DownloadService {
     });
   }
 
-  /** Spec steps 1-6. Throws on any failure; `start` is its final call. */
+  /**
+   * Spec steps 1-6 up to, not including, `start`. Throws on any failure;
+   * returning normally means the safety check passed.
+   */
   private async applyCollection(
     client: TorrentClientPort,
     input: {
@@ -665,13 +682,15 @@ export class DownloadService {
       files = await this.pollFiles(client, hash);
     } else {
       files = await this.pollFiles(client, hash);
-      // Every file except those other live attempts already own; in the
-      // normal case that is all of them. Excluding owned files keeps a grab
-      // that raced this add from having its file switched back off.
-      const owned = this.ownedCollectionFiles(hash, attempt.id);
+      // Every file except those of other grabs still in flight
+      // (`Submitting`), which may have raced this add and raised their file.
+      // Completed, Downloading and Unknown owners are stale once the torrent
+      // was gone, so their files are zeroed: skipping them would re-download
+      // every past grab.
+      const inFlight = this.inFlightCollectionFiles(hash, attempt.id);
       const zero = files
         .map((entry) => entry.index)
-        .filter((index) => !owned.has(index));
+        .filter((index) => !inFlight.has(index));
       if (zero.length > 0) await client.setFilePriorities(hash, zero, 0);
     }
 
@@ -700,7 +719,6 @@ export class DownloadService {
       );
     }
     this.assertOnlyOwnedFilesWanted(hash, after);
-    await client.start(hash);
   }
 
   private async torrentLoaded(
@@ -739,16 +757,28 @@ export class DownloadService {
    * have not failed. Completed attempts still own their file: switching it
    * off would stop it seeding, and it is the operator's, not ours, to drop.
    */
-  private ownedCollectionFiles(hash: string, exceptId?: string): Set<number> {
+  private ownedCollectionFiles(hash: string): Set<number> {
     const owned = new Set<number>();
     for (const attempt of this.dependencies.repository.listByTorrentHash(hash)) {
       if (attempt.source !== "collection-torrent") continue;
       if (attempt.status === "Failed") continue;
-      if (attempt.id === exceptId) continue;
       const index = attempt.selectedFiles?.[0]?.index;
       if (index !== undefined) owned.add(index);
     }
     return owned;
+  }
+
+  /** Files of other collection grabs on this hash that are mid-submit. */
+  private inFlightCollectionFiles(hash: string, exceptId: string): Set<number> {
+    const inFlight = new Set<number>();
+    for (const attempt of this.dependencies.repository.listByTorrentHash(hash)) {
+      if (attempt.source !== "collection-torrent") continue;
+      if (attempt.status !== "Submitting") continue;
+      if (attempt.id === exceptId) continue;
+      const index = attempt.selectedFiles?.[0]?.index;
+      if (index !== undefined) inFlight.add(index);
+    }
+    return inFlight;
   }
 
   private assertOnlyOwnedFilesWanted(

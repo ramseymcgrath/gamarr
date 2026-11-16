@@ -1187,6 +1187,7 @@ function fakeQbittorrent(options: {
   addHash?: string | null;
   ignoreLowering?: boolean;
   failPriorities?: boolean;
+  startError?: unknown;
 }) {
   const calls: string[] = [];
   const addInputs: Array<Parameters<TorrentClientPort["add"]>[0]> = [];
@@ -1248,6 +1249,7 @@ function fakeQbittorrent(options: {
     start: async (hash) => {
       expect(hash).toBe(collectionHash);
       calls.push("start");
+      if (options.startError !== undefined) throw options.startError;
     },
     list: async () => {
       calls.push("list");
@@ -1584,6 +1586,75 @@ describe("DownloadService collection submission", () => {
     expect(qbit.calls).toContain("prio([0,1],0)");
     expect(qbit.files.map((file) => file.priority)).toEqual([0, 1, 1]);
     expect(attempt.status).toBe("Downloading");
+  });
+
+  it("zeroes stale Completed and Downloading owners' files on a fresh add", async () => {
+    const repository = new MemoryDownloads();
+    repository.attempts.set(
+      "done",
+      collectionAttempt("done", "Completed", 0, "a.7z")
+    );
+    repository.attempts.set(
+      "stale",
+      collectionAttempt("stale", "Downloading", 2, "c.7z")
+    );
+    const qbit = fakeQbittorrent({});
+    const { service } = build({ client: qbit.client, repository });
+
+    const attempt = await service.submit(collectionSubmission());
+
+    expect(qbit.calls).toEqual([
+      "list",
+      "add(stopped=true)",
+      "listFiles",
+      "prio([0,1,2],0)",
+      "prio([1],1)",
+      "listFiles",
+      "start"
+    ]);
+    expect(qbit.files.map((file) => file.priority)).toEqual([0, 1, 0]);
+    expect(attempt.status).toBe("Downloading");
+  });
+
+  it("zeroes a stale Downloading owner of the target index before raising it", async () => {
+    const repository = new MemoryDownloads();
+    repository.attempts.set(
+      "done",
+      collectionAttempt("done", "Completed", 0, "a.7z")
+    );
+    repository.attempts.set(
+      "stale",
+      collectionAttempt("stale", "Downloading", 1, "b.7z")
+    );
+    const qbit = fakeQbittorrent({});
+    const { service } = build({ client: qbit.client, repository });
+
+    const attempt = await service.submit(collectionSubmission());
+
+    expect(qbit.calls).toEqual([
+      "list",
+      "add(stopped=true)",
+      "listFiles",
+      "prio([0,1,2],0)",
+      "prio([1],1)",
+      "listFiles",
+      "start"
+    ]);
+    expect(attempt.status).toBe("Downloading");
+  });
+
+  it("records Unknown when start itself is not confirmed", async () => {
+    const qbit = fakeQbittorrent({ startError: new Error("socket hang up") });
+    const { service } = build({ client: qbit.client });
+
+    const attempt = await service.submit(collectionSubmission());
+
+    expect(attempt).toMatchObject({
+      status: "Unknown",
+      failureDetail: "qBittorrent start was not confirmed",
+      filesAppliedAt: null
+    });
+    expect(qbit.calls.at(-1)).toBe("start");
   });
 
   it("file name at index differs (already loaded) → Failed, no calls after files", async () => {
