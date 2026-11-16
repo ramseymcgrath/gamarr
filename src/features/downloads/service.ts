@@ -102,7 +102,7 @@ function parseCollectionSnapshot(value: string): CollectionSnapshot | null {
  * name (a single-file torrent, or one added without its root folder) or the
  * name with exactly one leading segment removed. Nothing fuzzier.
  */
-function collectionFileMatches(qbitName: string, fileName: string): boolean {
+export function collectionFileMatches(qbitName: string, fileName: string): boolean {
   if (qbitName === fileName) return true;
   const slash = qbitName.indexOf("/");
   return slash > 0 && qbitName.slice(slash + 1) === fileName;
@@ -875,6 +875,7 @@ export class DownloadService {
     const client = this.dependencies.torrentClient();
     if (!client) return;
     const torrents = await client.list();
+    await this.reconcileCollections(client, torrents, attempts, timestamp);
     for (const attempt of attempts) {
       if (isTerminalDownloadStatus(attempt.status)) continue;
       if (
@@ -936,6 +937,97 @@ export class DownloadService {
       }
       this.dependencies.repository.update(attempt.id, {
         filesAppliedAt: timestamp,
+        updatedAt: timestamp
+      });
+    }
+  }
+
+  /**
+   * Collection attempts share one torrent and each owns one file, so they are
+   * matched by hash and judged by their own file's progress, never the
+   * torrent's. File priorities are never touched here.
+   */
+  private async reconcileCollections(
+    client: TorrentClientPort,
+    torrents: Awaited<ReturnType<TorrentClientPort["list"]>>,
+    attempts: DownloadAttempt[],
+    timestamp: number
+  ): Promise<void> {
+    const fileLists = new Map<string, Promise<TorrentFileList | null>>();
+    const filesOf = (hash: string) => {
+      let pending = fileLists.get(hash);
+      if (!pending) {
+        pending = client.listFiles(hash).catch((error: unknown) => {
+          if (error instanceof AppError && error.code === "NOT_FOUND") {
+            return null;
+          }
+          throw error;
+        });
+        fileLists.set(hash, pending);
+      }
+      return pending;
+    };
+    const fail = (id: string, detail: string) =>
+      this.dependencies.repository.update(id, {
+        status: "Failed",
+        failureDetail: detail,
+        completedAt: null,
+        updatedAt: timestamp
+      });
+
+    for (const attempt of attempts) {
+      if (attempt.source !== "collection-torrent") continue;
+      if (isTerminalDownloadStatus(attempt.status)) continue;
+      const { torrentHash: hash } = attempt;
+      const selected = attempt.selectedFiles?.[0];
+      if (!hash || !selected) continue;
+
+      const torrent = torrents.find((job) => job.hash === hash);
+      if (!torrent) {
+        if (attempt.status === "Submitting" || attempt.status === "Pending") {
+          continue;
+        }
+        fail(attempt.id, "Torrent was removed from qBittorrent");
+        continue;
+      }
+      if (torrent.state === "error" || torrent.state === "missingFiles") {
+        fail(attempt.id, torrent.state);
+        continue;
+      }
+
+      let files: TorrentFileList | null;
+      try {
+        files = await filesOf(hash);
+      } catch {
+        continue;
+      }
+      if (files === null) {
+        fail(attempt.id, "Torrent was removed from qBittorrent");
+        continue;
+      }
+      const file = files.find((entry) => entry.index === selected.index);
+      if (!file || !collectionFileMatches(file.name, selected.name)) {
+        fail(attempt.id, COLLECTION_CHANGED);
+        continue;
+      }
+
+      if (file.progress >= 1) {
+        this.dependencies.repository.update(attempt.id, {
+          status: "Completed",
+          progress: 100,
+          failureDetail: null,
+          completedAt: timestamp,
+          updatedAt: timestamp
+        });
+        continue;
+      }
+      const stopped = torrent.state === "stoppedDL"
+        || torrent.state === "pausedDL";
+      this.dependencies.repository.update(attempt.id, {
+        status: "Downloading",
+        progress: torrentProgress(file.progress * 100),
+        failureDetail: stopped ? "Stopped in qBittorrent" : null,
+        completedAt: null,
         updatedAt: timestamp
       });
     }

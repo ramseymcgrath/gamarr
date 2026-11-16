@@ -1,6 +1,9 @@
 import type { DownloadAttempt } from "@/features/downloads/models";
 import type { SabnzbdPort, TorrentClientPort } from "@/features/downloads/port";
 import { createHash } from "node:crypto";
+import path from "node:path";
+
+import { collectionFileMatches } from "@/features/downloads/service";
 
 import { readDiscIdentity, type DiscIdentity, type DiscRead } from "@/features/verification/disc";
 import {
@@ -84,6 +87,31 @@ export class ClientDownloadLocator implements DownloadLocatorPort {
       if (!torrent) return { kind: "missing", detail: "qBittorrent no longer has this torrent" };
       if (!torrent.contentPath) return { kind: "missing", detail: "qBittorrent did not report a content path" };
       return { kind: "found", clientPath: torrent.contentPath };
+    }
+    if (attempt.source === "collection-torrent") {
+      const client = this.clients.torrent();
+      if (!client) return { kind: "missing", detail: "qBittorrent is not configured" };
+      const torrents = await client.list();
+      const torrent = torrents.find((job) => job.hash === attempt.torrentHash);
+      if (!torrent || !attempt.torrentHash) {
+        return { kind: "missing", detail: "qBittorrent no longer has this torrent" };
+      }
+      if (!torrent.savePath) {
+        return { kind: "missing", detail: "qBittorrent did not report a save path" };
+      }
+      const selected = attempt.selectedFiles?.[0];
+      const files = selected
+        ? await client.listFiles(attempt.torrentHash).catch(() => [])
+        : [];
+      const file = files.find((entry) => entry.index === selected?.index);
+      if (!selected || !file || !collectionFileMatches(file.name, selected.name)) {
+        return { kind: "missing", detail: "qBittorrent no longer has this file" };
+      }
+      // The listing carries the root folder exactly as qBittorrent stores it.
+      return {
+        kind: "found",
+        clientPath: path.posix.join(torrent.savePath, file.name)
+      };
     }
     if (attempt.source === "prowlarr-usenet" || attempt.source === "newznab") {
       const sab = this.clients.sabnzbd();

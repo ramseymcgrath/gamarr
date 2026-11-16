@@ -520,6 +520,70 @@ describe("ClientDownloadLocator", () => {
     });
   });
 
+  describe("collection attempts", () => {
+    const collection = (
+      jobs: Awaited<ReturnType<TorrentClientPort["list"]>>,
+      files: Array<{ index: number; name: string }> = [{
+        index: 3,
+        name: "My Sony PlayStation 2 (USA) Collection/007 - Nightfire (USA).7z"
+      }]
+    ) => ({
+      list: async () => jobs,
+      listFiles: async () => files.map((f) => ({ ...f, progress: 1, priority: 1 }))
+    }) as unknown as TorrentClientPort;
+    const owned = attempt({
+      source: "collection-torrent",
+      torrentHash: "hash-1",
+      selectedFiles: [{ index: 3, name: "007 - Nightfire (USA).7z" }]
+    });
+    const job = {
+      hash: "hash-1", tags: [], state: "stalledUP", progress: 1,
+      savePath: "/downloads"
+    };
+
+    it("locates <savePath>/<root>/<file name>", async () => {
+      const locator = new ClientDownloadLocator({
+        torrent: () => collection([job]), sabnzbd: () => null
+      });
+      await expect(locator.locate(owned)).resolves.toEqual({
+        kind: "found",
+        clientPath:
+          "/downloads/My Sony PlayStation 2 (USA) Collection/007 - Nightfire (USA).7z"
+      });
+    });
+
+    it("joins a single-file torrent without a root folder", async () => {
+      const locator = new ClientDownloadLocator({
+        torrent: () => collection(
+          [job], [{ index: 3, name: "007 - Nightfire (USA).7z" }]
+        ),
+        sabnzbd: () => null
+      });
+      await expect(locator.locate(owned)).resolves.toEqual({
+        kind: "found",
+        clientPath: "/downloads/007 - Nightfire (USA).7z"
+      });
+    });
+
+    it("reports a missing torrent, save path or file", async () => {
+      const missing = (jobs: typeof job[], files?: Array<{ index: number; name: string }>) =>
+        new ClientDownloadLocator({
+          torrent: () => collection(jobs, files), sabnzbd: () => null
+        }).locate(owned);
+      await expect(missing([])).resolves.toEqual({
+        kind: "missing", detail: "qBittorrent no longer has this torrent"
+      });
+      await expect(missing([{ ...job, savePath: undefined as never }]))
+        .resolves.toEqual({
+          kind: "missing", detail: "qBittorrent did not report a save path"
+        });
+      await expect(missing([job], [{ index: 3, name: "Other/else.7z" }]))
+        .resolves.toEqual({
+          kind: "missing", detail: "qBittorrent no longer has this file"
+        });
+    });
+  });
+
   it("explains when the client no longer has the download", async () => {
     const locator = new ClientDownloadLocator({
       torrent: () => torrent([]),

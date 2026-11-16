@@ -1746,3 +1746,184 @@ describe("DownloadService collection submission", () => {
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("DownloadService collection reconciliation", () => {
+  const root = "Collection";
+  type Job = Awaited<ReturnType<TorrentClientPort["list"]>>[number];
+
+  function setup(options: {
+    state?: string;
+    progress?: number[];
+    jobs?: "absent";
+    statuses?: DownloadAttempt["status"][];
+  }) {
+    const repository = new MemoryDownloads();
+    const names = ["a.7z", "b.7z"];
+    names.forEach((name, index) => {
+      repository.attempts.set(
+        `at-${index}`,
+        collectionAttempt(
+          `at-${index}`,
+          options.statuses?.[index] ?? "Downloading",
+          index,
+          name
+        )
+      );
+    });
+    const calls: string[] = [];
+    const progress = options.progress ?? [0, 0];
+    const client = {
+      list: async (): Promise<Job[]> => options.jobs === "absent"
+        ? []
+        : [{
+          hash: collectionHash,
+          tags: [],
+          state: options.state ?? "downloading",
+          progress: 0.99
+        }],
+      listFiles: async (hash: string) => {
+        calls.push(`listFiles(${hash})`);
+        return names.map((name, index) => ({
+          index,
+          name: `${root}/${name}`,
+          progress: progress[index] ?? 0,
+          priority: 1
+        }));
+      },
+      setFilePriorities: async () => {
+        calls.push("setFilePriorities");
+      }
+    } as unknown as TorrentClientPort;
+    const { service } = build({ repository, client });
+    return { service, repository, calls };
+  }
+
+  it("completes a file at 100% while the torrent is still downloading", async () => {
+    const { service, repository, calls } = setup({
+      state: "stalledDL",
+      progress: [1, 0.3]
+    });
+    await service.reconcile();
+    expect(repository.attempts.get("at-0")).toMatchObject({
+      status: "Completed",
+      progress: 100,
+      failureDetail: null
+    });
+    expect(repository.attempts.get("at-1")).toMatchObject({
+      status: "Downloading",
+      progress: 30
+    });
+    expect(calls).toEqual([`listFiles(${collectionHash})`]);
+  });
+
+  it("completes two attempts on one torrent independently", async () => {
+    const { service, repository } = setup({
+      state: "stalledUP",
+      progress: [1, 1]
+    });
+    await service.reconcile();
+    expect(repository.attempts.get("at-0")?.status).toBe("Completed");
+    expect(repository.attempts.get("at-1")?.status).toBe("Completed");
+  });
+
+  for (const state of ["error", "missingFiles"]) {
+    it(`fails every attempt on a torrent in ${state}`, async () => {
+      const { service, repository } = setup({ state, progress: [0.5, 1] });
+      await service.reconcile();
+      for (const id of ["at-0", "at-1"]) {
+        expect(repository.attempts.get(id)).toMatchObject({
+          status: "Failed",
+          failureDetail: state
+        });
+      }
+    });
+  }
+
+  for (const state of ["stoppedDL", "pausedDL"]) {
+    it(`marks a ${state} torrent as stopped but keeps progress`, async () => {
+      const { service, repository } = setup({ state, progress: [0.4, 0] });
+      await service.reconcile();
+      expect(repository.attempts.get("at-0")).toMatchObject({
+        status: "Downloading",
+        progress: 40,
+        failureDetail: "Stopped in qBittorrent"
+      });
+    });
+  }
+
+  it("clears the stopped note once the torrent runs again", async () => {
+    const { service, repository } = setup({
+      state: "downloading",
+      progress: [0.4, 0]
+    });
+    repository.attempts.set("at-0", {
+      ...repository.attempts.get("at-0")!,
+      failureDetail: "Stopped in qBittorrent"
+    });
+    await service.reconcile();
+    expect(repository.attempts.get("at-0")).toMatchObject({
+      status: "Downloading",
+      progress: 40,
+      failureDetail: null
+    });
+  });
+
+  it("fails attempts whose torrent left qBittorrent", async () => {
+    const { service, repository } = setup({ jobs: "absent" });
+    await service.reconcile();
+    expect(repository.attempts.get("at-0")).toMatchObject({
+      status: "Failed",
+      failureDetail: "Torrent was removed from qBittorrent"
+    });
+  });
+
+  it("leaves a submitting attempt alone when its hash is absent", async () => {
+    const { service, repository } = setup({
+      jobs: "absent",
+      statuses: ["Submitting", "Downloading"]
+    });
+    await service.reconcile();
+    expect(repository.attempts.get("at-0")?.status).toBe("Submitting");
+    expect(repository.attempts.get("at-1")?.status).toBe("Failed");
+  });
+
+  it("fails when the file at that index changed", async () => {
+    const { service, repository } = setup({ progress: [0.2, 0] });
+    repository.attempts.set("at-0", {
+      ...repository.attempts.get("at-0")!,
+      selectedFiles: [{ index: 0, name: "renamed.7z" }]
+    });
+    await service.reconcile();
+    expect(repository.attempts.get("at-0")).toMatchObject({
+      status: "Failed",
+      failureDetail: "Collection torrent changed; search again"
+    });
+  });
+
+  it("never calls setFilePriorities for collection attempts", async () => {
+    const { service, calls } = setup({ progress: [0.2, 0.5] });
+    await service.reconcile();
+    await service.reconcile();
+    expect(calls).not.toContain("setFilePriorities");
+  });
+
+  it("reports newly completed collection attempts", async () => {
+    const onCompleted = vi.fn();
+    const repository = new MemoryDownloads();
+    repository.attempts.set(
+      "at-0",
+      collectionAttempt("at-0", "Downloading", 0, "a.7z")
+    );
+    const client = {
+      list: async () => [{
+        hash: collectionHash, tags: [], state: "stalledDL", progress: 0.1
+      }],
+      listFiles: async () => [
+        { index: 0, name: "Collection/a.7z", progress: 1, priority: 1 }
+      ]
+    } as unknown as TorrentClientPort;
+    const { service } = build({ repository, client, onCompleted });
+    await service.reconcile();
+    expect(onCompleted).toHaveBeenCalledWith(["at-0"]);
+  });
+});
