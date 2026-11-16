@@ -17,7 +17,7 @@ import {
   type TorrentJob
 } from "@/features/downloads/port";
 import type { DownloadRepository } from "@/features/downloads/repository";
-import { DownloadService } from "@/features/downloads/service";
+import { DownloadService, fingerprintParts } from "@/features/downloads/service";
 import type {
   CandidateRepository,
   ReleaseCandidateRecord
@@ -1106,5 +1106,24 @@ describe("DownloadService torrent reconciliation and recovery", () => {
       failureDetail: null,
       updatedAt: 900
     });
+  });
+});
+
+describe("fingerprintParts", () => {
+  it("pins a collection-torrent request to its file index", () => {
+    const input = {
+      candidateId: "candidate-collection",
+      gameId: 1,
+      platformId: 130
+    } as SubmitDownloadInput;
+
+    expect(fingerprintParts("collection-torrent", input, {
+      iaFileName: null,
+      collectionFileIndex: 4
+    })).toEqual(["candidate-collection", 1, 130, "torrent", 4]);
+    expect(fingerprintParts("collection-torrent", input, {
+      iaFileName: null,
+      collectionFileIndex: null
+    })).toEqual(["candidate-collection", 1, 130, "torrent", -1]);
   });
 });

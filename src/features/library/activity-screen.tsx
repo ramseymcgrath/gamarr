@@ -46,7 +46,7 @@ export interface ActivityItem {
   id: string;
   libraryEntryId: string;
   status: string;
-  source?: "newznab" | "internet-archive" | "internet-archive-torrent";
+  source?: "newznab" | "internet-archive" | "internet-archive-torrent" | "collection-torrent";
   releaseTitle: string;
   indexerName: string;
   fileName?: string | null;
@@ -329,6 +329,8 @@ export function ActivityScreen({ initial }: { initial: ActivityItem[] }) {
                 <span>
                   {item.source === "internet-archive-torrent"
                     ? "Internet Archive (torrent)"
+                    : item.source === "collection-torrent"
+                    ? `${item.indexerName} (collection)`
                     : <>{item.indexerName} · {item.source === "internet-archive"
                       ? item.fileName ?? "Direct download"
                       : item.category ?? "Default category"}</>}

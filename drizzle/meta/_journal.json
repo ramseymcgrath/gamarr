@@ -64,6 +64,13 @@
       "when": 1794686379031,
       "tag": "0008_ps2_library_export",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1794860234473,
+      "tag": "0009_cool_makkari",
+      "breakpoints": true
     }
   ]
 }

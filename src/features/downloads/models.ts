@@ -8,7 +8,8 @@ export type AttemptSourceType =
   | "prowlarr-torrent"
   | "newznab"
   | "internet-archive"
-  | "internet-archive-torrent";
+  | "internet-archive-torrent"
+  | "collection-torrent";
 
 export type DownloadStatus =
   | "Pending"

@@ -69,6 +69,28 @@ describe("ActivityScreen", () => {
     expect(screen.queryByText(/Default category/)).not.toBeInTheDocument();
   });
 
+  it("labels a collection attempt with its collection name as plain text", () => {
+    render(<ActivityScreen initial={[{
+      id: "attempt-collection",
+      libraryEntryId: "library-1",
+      status: "Queued",
+      source: "collection-torrent",
+      releaseTitle: "Doom II.zip",
+      indexerName: "Redump Pack",
+      fileName: null,
+      size: 100,
+      category: null,
+      progress: 0,
+      failureDetail: null,
+      createdAt: 1,
+      updatedAt: 1,
+      completedAt: null
+    }]} />);
+
+    expect(screen.getByText("Redump Pack (collection)")).toBeInTheDocument();
+    expect(screen.queryByText(/Default category/)).not.toBeInTheDocument();
+  });
+
   it("offers a verified PS2 download for the PS2 library and shows where it went", async () => {
     const request = vi.fn(async () => Response.json({ ...verified, exportStatus: "Pending" }));
     vi.stubGlobal("fetch", request);

@@ -82,10 +82,10 @@ function selectedIndices(input: SubmitDownloadInput): number[] {
   return [...indices].sort((left, right) => left - right);
 }
 
-function fingerprintParts(
+export function fingerprintParts(
   source: AttemptSourceType,
   input: SubmitDownloadInput,
-  legacy: { iaFileName: string | null }
+  legacy: { iaFileName: string | null; collectionFileIndex: number | null }
 ): Array<string | number> {
   switch (source) {
     case "prowlarr-usenet":
@@ -117,13 +117,21 @@ function fingerprintParts(
         "torrent",
         ...selectedIndices(input)
       ];
+    case "collection-torrent":
+      return [
+        input.candidateId,
+        input.gameId,
+        input.platformId,
+        "torrent",
+        legacy.collectionFileIndex ?? -1
+      ];
   }
 }
 
 function fingerprint(
   source: AttemptSourceType,
   input: SubmitDownloadInput,
-  legacy: { iaFileName: string | null }
+  legacy: { iaFileName: string | null; collectionFileIndex: number | null }
 ): string {
   return createHash("sha256")
     .update(JSON.stringify(fingerprintParts(source, input, legacy)))
@@ -241,7 +249,10 @@ export class DownloadService {
         id: attemptId,
         libraryEntryId: `library-${input.gameId}-${input.platformId}`,
         submissionKey: input.submissionKey,
-        requestFingerprint: fingerprint(source, input, { iaFileName: null }),
+        requestFingerprint: fingerprint(source, input, {
+          iaFileName: null,
+          collectionFileIndex: null
+        }),
         status: "Pending",
         source,
         releaseTitle: candidate.title,
@@ -615,7 +626,10 @@ export class DownloadService {
       attempt.requestFingerprint !== fingerprint(
         attempt.source,
         input,
-        { iaFileName: attempt.iaFileName }
+        {
+          iaFileName: attempt.iaFileName,
+          collectionFileIndex: attempt.selectedFiles?.[0]?.index ?? null
+        }
       )
     ) {
       throw new AppError(

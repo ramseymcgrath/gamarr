@@ -126,6 +126,55 @@ describe("SqliteDownloadRepository", () => {
     database.$client.close();
   });
 
+  it("accepts collection-torrent attempts", () => {
+    const { database, repository } = setup();
+    repository.claimSubmission({
+      library,
+      attempt: attempt({ source: "collection-torrent", status: "Queued" })
+    });
+
+    expect(repository.get("attempt")?.source).toBe("collection-torrent");
+    database.$client.close();
+  });
+
+  it("fails stale collection submissions and marks the rest Unknown", () => {
+    const { database, repository } = setup();
+    repository.claimSubmission({
+      library,
+      attempt: attempt({
+        id: "collection",
+        submissionKey: "collection-key",
+        source: "collection-torrent",
+        status: "Submitting",
+        sabRequestStartedAt: 100
+      })
+    });
+    repository.claimSubmission({
+      library,
+      attempt: attempt({
+        id: "usenet",
+        submissionKey: "usenet-key",
+        marker: "usenet-marker",
+        status: "Submitting",
+        sabRequestStartedAt: 100
+      })
+    });
+
+    repository.recoverStaleSubmitting(200, 300);
+
+    expect(repository.get("collection")).toMatchObject({
+      status: "Failed",
+      failureDetail: "Submission state was uncertain after restart",
+      updatedAt: 300
+    });
+    expect(repository.get("usenet")).toMatchObject({
+      status: "Unknown",
+      failureDetail: "Submission state was uncertain after restart",
+      updatedAt: 300
+    });
+    database.$client.close();
+  });
+
   it("fails every non-terminal legacy Internet Archive download", () => {
     const { database, repository } = setup();
     const claim = (value: DownloadAttempt) => repository.claimSubmission({

@@ -198,16 +198,20 @@ export class SqliteDownloadRepository implements DownloadRepository {
   }
 
   recoverStaleSubmitting(before: number, updatedAt: number): void {
+    const stale = and(
+      eq(downloadAttempts.status, "Submitting"),
+      lt(downloadAttempts.sabRequestStartedAt, before)
+    );
+    const failureDetail = "Submission state was uncertain after restart";
+    // A collection submission is a single torrent add that gamarr can safely
+    // retry, so it fails outright instead of waiting in Unknown.
     this.database.update(downloadAttempts)
-      .set({
-        status: "Unknown",
-        failureDetail: "Submission state was uncertain after restart",
-        updatedAt
-      })
-      .where(and(
-        eq(downloadAttempts.status, "Submitting"),
-        lt(downloadAttempts.sabRequestStartedAt, before)
-      ))
+      .set({ status: "Failed", failureDetail, updatedAt })
+      .where(and(stale, eq(downloadAttempts.source, "collection-torrent")))
+      .run();
+    this.database.update(downloadAttempts)
+      .set({ status: "Unknown", failureDetail, updatedAt })
+      .where(stale)
       .run();
   }
 

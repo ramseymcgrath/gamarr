@@ -221,7 +221,7 @@ export const downloadAttempts = sqliteTable(
     ),
     check(
       "download_attempts_source_valid",
-      sql`${table.source} in ('prowlarr-usenet', 'prowlarr-torrent', 'newznab', 'internet-archive', 'internet-archive-torrent')`
+      sql`${table.source} in ('prowlarr-usenet', 'prowlarr-torrent', 'newznab', 'internet-archive', 'internet-archive-torrent', 'collection-torrent')`
     )
   ]
 );
