@@ -8,11 +8,12 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import type { Route } from "next";
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 
 import { EmptyState } from "@/components/empty-state";
 import { StatusPill } from "@/components/status-pill";
 import { Button } from "@/components/ui/button";
+import type { AttemptSourceType } from "@/features/downloads/models";
 import {
   LibraryEntrySheet,
   useLibraryEntrySheet
@@ -42,11 +43,23 @@ export interface ActivityVerification {
   checkedAt: number | null;
 }
 
+function sourceLabel(item: ActivityItem): ReactNode {
+  if (item.source === "internet-archive-torrent") {
+    return "Internet Archive (torrent)";
+  }
+  if (item.source === "collection-torrent") {
+    return `${item.indexerName} (collection)`;
+  }
+  return <>{item.indexerName} · {item.source === "internet-archive"
+    ? item.fileName ?? "Direct download"
+    : item.category ?? "Default category"}</>;
+}
+
 export interface ActivityItem {
   id: string;
   libraryEntryId: string;
   status: string;
-  source?: "newznab" | "internet-archive" | "internet-archive-torrent" | "collection-torrent";
+  source?: AttemptSourceType;
   releaseTitle: string;
   indexerName: string;
   fileName?: string | null;
@@ -327,13 +340,7 @@ export function ActivityScreen({ initial }: { initial: ActivityItem[] }) {
               <div>
                 <strong>{item.releaseTitle}</strong>
                 <span>
-                  {item.source === "internet-archive-torrent"
-                    ? "Internet Archive (torrent)"
-                    : item.source === "collection-torrent"
-                    ? `${item.indexerName} (collection)`
-                    : <>{item.indexerName} · {item.source === "internet-archive"
-                      ? item.fileName ?? "Direct download"
-                      : item.category ?? "Default category"}</>}
+                  {sourceLabel(item)}
                 </span>
                 {item.failureDetail && <span className="failure-detail">{item.failureDetail}</span>}
               </div>

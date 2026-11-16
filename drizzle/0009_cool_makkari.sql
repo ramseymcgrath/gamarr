@@ -34,8 +34,11 @@ CREATE TABLE `__new_download_attempts` (
 );
 --> statement-breakpoint
 INSERT INTO `__new_download_attempts`("id", "library_entry_id", "submission_key", "request_fingerprint", "status", "source", "release_title", "indexer_id", "indexer_name_snapshot", "indexer_url_snapshot", "newznab_guid", "ia_file_name", "torrent_hash", "selected_files", "files_applied_at", "size", "category", "sabnzbd_config_revision", "sab_marker", "sab_job_id", "progress", "failure_detail", "sab_request_started_at", "created_at", "updated_at", "completed_at") SELECT "id", "library_entry_id", "submission_key", "request_fingerprint", "status", "source", "release_title", "indexer_id", "indexer_name_snapshot", "indexer_url_snapshot", "newznab_guid", "ia_file_name", "torrent_hash", "selected_files", "files_applied_at", "size", "category", "sabnzbd_config_revision", "sab_marker", "sab_job_id", "progress", "failure_detail", "sab_request_started_at", "created_at", "updated_at", "completed_at" FROM `download_attempts`;--> statement-breakpoint
+CREATE TABLE `__verifications_backup` AS SELECT * FROM `download_verifications`;--> statement-breakpoint
 DROP TABLE `download_attempts`;--> statement-breakpoint
 ALTER TABLE `__new_download_attempts` RENAME TO `download_attempts`;--> statement-breakpoint
+INSERT INTO `download_verifications` SELECT * FROM `__verifications_backup`;--> statement-breakpoint
+DROP TABLE `__verifications_backup`;--> statement-breakpoint
 PRAGMA foreign_keys=ON;--> statement-breakpoint
 CREATE UNIQUE INDEX `download_attempts_submission_key_unique` ON `download_attempts` (`submission_key`);--> statement-breakpoint
 CREATE UNIQUE INDEX `download_attempts_marker_unique` ON `download_attempts` (`sab_marker`);--> statement-breakpoint
