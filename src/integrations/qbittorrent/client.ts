@@ -29,7 +29,8 @@ const torrentJobSchema = z.object({
   tags: z.string().optional().default(""),
   state: z.string(),
   progress: z.number(),
-  content_path: z.string().optional()
+  content_path: z.string().optional(),
+  save_path: z.string().optional()
 });
 
 async function discardBody(response: Response): Promise<void> {
@@ -61,6 +62,7 @@ export class QbittorrentClient implements TorrentClientPort {
     payload: { torrent: Uint8Array; filename: string } | { magnet: string };
     category: string | null;
     tag: string;
+    stopped?: boolean;
   }): Promise<{ hash: string | null }> {
     const form = new FormData();
     if ("magnet" in input.payload) {
@@ -76,6 +78,7 @@ export class QbittorrentClient implements TorrentClientPort {
     }
     form.set("tags", input.tag);
     if (input.category !== null) form.set("category", input.category);
+    if (input.stopped === true) form.set("stopped", "true");
 
     let response: Response;
     try {
@@ -195,11 +198,17 @@ export class QbittorrentClient implements TorrentClientPort {
       tags: job.tags.split(",").map((tag) => tag.trim()).filter(Boolean),
       state: job.state,
       progress: Math.max(0, Math.min(100, Math.round(job.progress * 100))),
-      ...(job.content_path ? { contentPath: job.content_path } : {})
+      ...(job.content_path ? { contentPath: job.content_path } : {}),
+      ...(job.save_path ? { savePath: job.save_path } : {})
     }));
   }
 
-  async listFiles(hash: string): Promise<Array<{ index: number; name: string }>> {
+  async listFiles(hash: string): Promise<Array<{
+    index: number;
+    name: string;
+    progress: number;
+    priority: number;
+  }>> {
     const search = new URLSearchParams({ hash });
     let response: Response;
     try {
@@ -217,6 +226,13 @@ export class QbittorrentClient implements TorrentClientPort {
     }
     if (!response.ok) {
       await discardBody(response);
+      if (response.status === 404) {
+        throw new AppError(
+          "NOT_FOUND",
+          404,
+          "qBittorrent does not have this torrent yet"
+        );
+      }
       throw new AppError(
         "UNAVAILABLE",
         502,
@@ -243,7 +259,12 @@ export class QbittorrentClient implements TorrentClientPort {
       );
     }
     const parsed = z
-      .array(z.object({ name: z.string().min(1), index: z.number().optional() }))
+      .array(z.object({
+        name: z.string().min(1),
+        index: z.number().optional(),
+        progress: z.number(),
+        priority: z.number()
+      }))
       .safeParse(payload);
     if (!parsed.success) {
       throw new AppError(
@@ -256,43 +277,60 @@ export class QbittorrentClient implements TorrentClientPort {
     // there, and it is the same order the metainfo declares.
     return parsed.data.map((file, position) => ({
       index: file.index ?? position,
-      name: file.name
+      name: file.name,
+      progress: file.progress,
+      priority: file.priority
     }));
   }
 
   async setFilePriorities(
     hash: string,
     indices: number[],
-    priority: 0
+    priority: 0 | 1
   ): Promise<void> {
     if (indices.length === 0) return;
-    const form = new URLSearchParams({
-      hash,
-      id: indices.join("|"),
-      priority: String(priority)
-    });
+    await this.postForm(
+      "torrents/filePrio",
+      { hash, id: indices.join("|"), priority: String(priority) },
+      "qBittorrent file priority request failed"
+    );
+  }
+
+  async addTags(hash: string, tag: string): Promise<void> {
+    await this.postForm(
+      "torrents/addTags",
+      { hashes: hash, tags: tag },
+      "qBittorrent tag request failed"
+    );
+  }
+
+  async start(hash: string): Promise<void> {
+    await this.postForm(
+      "torrents/start",
+      { hashes: hash },
+      "qBittorrent start request failed"
+    );
+  }
+
+  private async postForm(
+    path: string,
+    fields: Record<string, string>,
+    failureMessage: string
+  ): Promise<void> {
     let response: Response;
     try {
-      response = await this.authenticatedRequest("torrents/filePrio", {
+      response = await this.authenticatedRequest(path, {
         method: "POST",
         headers: { "content-type": "application/x-www-form-urlencoded" },
-        body: form
+        body: new URLSearchParams(fields)
       });
     } catch (error) {
       if (error instanceof AppError) throw error;
-      throw new AppError(
-        "UNAVAILABLE",
-        502,
-        "qBittorrent file priority request failed"
-      );
+      throw new AppError("UNAVAILABLE", 502, failureMessage);
     }
     await discardBody(response);
     if (!response.ok) {
-      throw new AppError(
-        "UNAVAILABLE",
-        502,
-        "qBittorrent file priority request failed"
-      );
+      throw new AppError("UNAVAILABLE", 502, failureMessage);
     }
   }
 

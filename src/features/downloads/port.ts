@@ -48,6 +48,8 @@ export interface TorrentJob {
   progress: number;
   /** Where the content lives inside the qBittorrent container. */
   contentPath?: string;
+  /** qBittorrent's `save_path`: the directory the torrent downloads into. */
+  savePath?: string;
 }
 
 export interface TorrentClientPort {
@@ -55,13 +57,27 @@ export interface TorrentClientPort {
     payload: { torrent: Uint8Array; filename: string } | { magnet: string };
     category: string | null;
     tag: string;
+    /** Add paused, so file priorities can be set before any piece downloads. */
+    stopped?: boolean;
   }): Promise<{ hash: string | null }>;
-  listFiles(hash: string): Promise<Array<{ index: number; name: string }>>;
+  /**
+   * Throws `AppError("NOT_FOUND", 404)` when qBittorrent does not know the
+   * torrent yet, so callers can tell that apart from other failures.
+   * `progress` is qBittorrent's raw 0..1 fraction.
+   */
+  listFiles(hash: string): Promise<Array<{
+    index: number;
+    name: string;
+    progress: number;
+    priority: number;
+  }>>;
   setFilePriorities(
     hash: string,
     indices: number[],
-    priority: 0
+    priority: 0 | 1
   ): Promise<void>;
+  addTags(hash: string, tag: string): Promise<void>;
+  start(hash: string): Promise<void>;
   /**
    * Every torrent the client knows about, in one request. qBittorrent's `tag=`
    * filter accepts a single value, so filtering server-side would cost one

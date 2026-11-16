@@ -294,12 +294,20 @@ function build(options: BuildOptions = {}) {
     };
   });
   const fileLists = [...(options.fileLists ?? [[]])];
-  const listFiles = vi.fn(async () => fileLists.shift() ?? []);
+  const listFiles = vi.fn(async () =>
+    (fileLists.shift() ?? []).map((file) => ({
+      progress: 0,
+      priority: 1,
+      ...file
+    }))
+  );
   const setFilePriorities = vi.fn(async () => undefined);
   const torrentClient: TorrentClientPort = {
     add,
     listFiles,
     setFilePriorities,
+    addTags: async () => undefined,
+    start: async () => undefined,
     list: async () => options.torrents ?? [],
     testConnection: async () => undefined
   };

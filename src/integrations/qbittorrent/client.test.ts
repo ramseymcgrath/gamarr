@@ -368,14 +368,14 @@ describe("QbittorrentClient", () => {
       calls.push(new Request(input, init));
       if (String(input).includes("/auth/login")) return loginOk();
       return Response.json([
-        { name: "a", index: 0 },
-        { name: "b", index: 1 }
+        { name: "a", index: 0, progress: 0.5, priority: 1 },
+        { name: "b", index: 1, progress: 1, priority: 0 }
       ]);
     }) as unknown as typeof fetch;
 
     await expect(client(fetchImpl).listFiles("torrent-hash")).resolves.toEqual([
-      { name: "a", index: 0 },
-      { name: "b", index: 1 }
+      { name: "a", index: 0, progress: 0.5, priority: 1 },
+      { name: "b", index: 1, progress: 1, priority: 0 }
     ]);
 
     const listing = calls.find((call) => call.url.includes("/torrents/files"));
@@ -386,12 +386,15 @@ describe("QbittorrentClient", () => {
     const fetchImpl = vi.fn(async (input: RequestInfo | URL) =>
       String(input).includes("/auth/login")
         ? loginOk()
-        : Response.json([{ name: "a" }, { name: "b" }])
+        : Response.json([
+          { name: "a", progress: 0, priority: 1 },
+          { name: "b", progress: 0, priority: 1 }
+        ])
     ) as unknown as typeof fetch;
 
     await expect(client(fetchImpl).listFiles("torrent-hash")).resolves.toEqual([
-      { name: "a", index: 0 },
-      { name: "b", index: 1 }
+      { name: "a", index: 0, progress: 0, priority: 1 },
+      { name: "b", index: 1, progress: 0, priority: 1 }
     ]);
   });
 
@@ -454,6 +457,156 @@ describe("QbittorrentClient", () => {
       client(fetchImpl).setFilePriorities("torrent-hash", [], 0)
     ).resolves.toBeUndefined();
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("add sends stopped=true", async () => {
+    const calls: Request[] = [];
+    const fetchImpl = vi.fn(async (
+      input: RequestInfo | URL,
+      init?: RequestInit
+    ) => {
+      calls.push(new Request(input, init));
+      return String(input).includes("/auth/login")
+        ? loginOk()
+        : Response.json({ added_torrent_ids: ["h"] });
+    }) as unknown as typeof fetch;
+
+    await client(fetchImpl).add({
+      payload: { magnet: "magnet:?xt=urn:btih:h" },
+      category: null,
+      tag: "gamarr-1",
+      stopped: true
+    });
+    const add = calls.find((call) => call.url.includes("/torrents/add"));
+    expect((await add!.formData()).get("stopped")).toBe("true");
+  });
+
+  it("add omits stopped by default", async () => {
+    const calls: Request[] = [];
+    const fetchImpl = vi.fn(async (
+      input: RequestInfo | URL,
+      init?: RequestInit
+    ) => {
+      calls.push(new Request(input, init));
+      return String(input).includes("/auth/login")
+        ? loginOk()
+        : Response.json({ added_torrent_ids: ["h"] });
+    }) as unknown as typeof fetch;
+
+    await client(fetchImpl).add({
+      payload: { magnet: "magnet:?xt=urn:btih:h" },
+      category: null,
+      tag: "gamarr-1"
+    });
+    const add = calls.find((call) => call.url.includes("/torrents/add"));
+    expect((await add!.formData()).has("stopped")).toBe(false);
+  });
+
+  it("listFiles 404 maps to NOT_FOUND", async () => {
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) =>
+      String(input).includes("/auth/login")
+        ? loginOk()
+        : new Response("Not Found", { status: 404 })
+    ) as unknown as typeof fetch;
+
+    await expect(client(fetchImpl).listFiles("torrent-hash"))
+      .rejects.toMatchObject({
+        code: "NOT_FOUND",
+        status: 404,
+        message: "qBittorrent does not have this torrent yet"
+      });
+  });
+
+  it("parses a 2,065-file response", async () => {
+    const files = Array.from({ length: 2065 }, (_, index) => ({
+      name: `disc/file-${index}.bin`,
+      index,
+      progress: index / 2065,
+      priority: 0
+    }));
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) =>
+      String(input).includes("/auth/login") ? loginOk() : Response.json(files)
+    ) as unknown as typeof fetch;
+
+    const result = await client(fetchImpl).listFiles("torrent-hash");
+    expect(result).toHaveLength(2065);
+    expect(result[2064]).toEqual(files[2064]);
+  });
+
+  it("setFilePriorities sends one request for 2,065 indices", async () => {
+    const calls: Request[] = [];
+    const fetchImpl = vi.fn(async (
+      input: RequestInfo | URL,
+      init?: RequestInit
+    ) => {
+      calls.push(new Request(input, init));
+      return String(input).includes("/auth/login")
+        ? loginOk()
+        : new Response("Ok.");
+    }) as unknown as typeof fetch;
+    const indices = Array.from({ length: 2065 }, (_, index) => index);
+
+    await client(fetchImpl).setFilePriorities("torrent-hash", indices, 1);
+
+    const prio = calls.filter((call) => call.url.includes("/torrents/filePrio"));
+    expect(prio).toHaveLength(1);
+    const body = new URLSearchParams(await prio[0]!.text());
+    expect(body.get("id")).toBe(indices.join("|"));
+    expect(body.get("priority")).toBe("1");
+  });
+
+  it("addTags and start post the hash", async () => {
+    const calls: Request[] = [];
+    const fetchImpl = vi.fn(async (
+      input: RequestInfo | URL,
+      init?: RequestInit
+    ) => {
+      calls.push(new Request(input, init));
+      return String(input).includes("/auth/login")
+        ? loginOk()
+        : new Response("Ok.");
+    }) as unknown as typeof fetch;
+    const subject = client(fetchImpl);
+
+    await subject.addTags("torrent-hash", "gamarr-pick");
+    await subject.start("torrent-hash");
+
+    const tags = calls.find((call) => call.url.includes("/torrents/addTags"));
+    expect(tags?.method).toBe("POST");
+    expect(Object.fromEntries(new URLSearchParams(await tags!.text()))).toEqual({
+      hashes: "torrent-hash",
+      tags: "gamarr-pick"
+    });
+    const start = calls.find((call) => call.url.includes("/torrents/start"));
+    expect(start?.method).toBe("POST");
+    expect(Object.fromEntries(new URLSearchParams(await start!.text()))).toEqual({
+      hashes: "torrent-hash"
+    });
+  });
+
+  it("addTags surfaces a failed request as UNAVAILABLE", async () => {
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) =>
+      String(input).includes("/auth/login")
+        ? loginOk()
+        : new Response("no", { status: 500 })
+    ) as unknown as typeof fetch;
+    await expect(client(fetchImpl).start("h")).rejects.toMatchObject({
+      code: "UNAVAILABLE"
+    });
+  });
+
+  it("list maps save_path", async () => {
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) =>
+      String(input).includes("/auth/login")
+        ? loginOk()
+        : Response.json([
+          { hash: "a", state: "x", progress: 0, save_path: "/downloads/" },
+          { hash: "b", state: "x", progress: 0 }
+        ])) as unknown as typeof fetch;
+
+    const jobs = await client(fetchImpl).list();
+    expect(jobs[0]!.savePath).toBe("/downloads/");
+    expect(jobs[1]).not.toHaveProperty("savePath");
   });
 
   it("bounds torrent-list JSON responses", async () => {
